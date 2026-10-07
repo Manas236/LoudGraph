@@ -103,7 +103,7 @@ def pick(scored: list[dict], series: dict, topic: dict, exclude_sets: set[str] |
     curves = {s["iso3"]: z_curve(series[s["iso3"]], x0, x1) for s in cands}
     by = {s["iso3"]: s for s in cands}
     rng = random.Random(seed)
-    sel, attempts, problem = None, 0, None
+    sel, attempts, variety_problem, good_but_used = None, 0, None, False
     for attempt in range(pc["max_attempts"]):
         if attempt == 0:
             pool = cands
@@ -114,19 +114,22 @@ def pick(scored: list[dict], series: dict, topic: dict, exclude_sets: set[str] |
             pool = sorted(rng.sample(cands, rng.randint(n, len(cands) - 1)), key=lambda s: -s["score"])
         attempts += 1
         trial = _greedy(pool, n, curves, pc)
-        if ",".join(sorted(trial)) in exclude_sets:
-            problem = problem or "every country set we can build for this topic has already been used"
-            continue
         why = _variety_problem(trial, by, curves, pc)
+        used = ",".join(sorted(trial)) in exclude_sets
         if why:
-            problem = why
+            variety_problem = variety_problem or why
+            continue
+        if used:
+            good_but_used = True
             continue
         sel = trial
         break
     if sel is None:
-        if problem and problem.startswith("every"):
-            raise NotEnoughData(problem)
-        raise LowVariety(f"low variety: {problem}")
+        # a bland set is "low variety" whether or not it was used before; only when a varied set
+        # existed and had already been posted is the topic simply exhausted
+        if good_but_used:
+            raise NotEnoughData("every varied country set we can build for this topic has already been used")
+        raise LowVariety(f"low variety: {variety_problem}")
     ordered = sorted(sel, key=lambda iso: by[iso]["score"])  # lowest drama first, best LAST
 
     # Slow-mo events lengthen the video: drop the least interesting country until it fits.

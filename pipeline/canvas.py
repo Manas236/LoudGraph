@@ -170,11 +170,14 @@ class SkiaCanvas(BaseCanvas):
         self._font(font, size).measureText(s, self.sk.TextEncoding.kUTF8, b)
         return b.left(), b.right(), b.top(), b.bottom()
 
-    def text(self, x, y, s, font, size, color, anchor="l", alpha=1.0, tag="text"):
-        """anchor l/m/r positions the INK (not the advance box) at x, so pixel centring is exact."""
+    def text(self, x, y, s, font, size, color, anchor="l", alpha=1.0, tag="text", halo=0.0, halo_color=None):
+        """anchor l/m/r positions the INK (not the advance box) at x, so pixel centring is exact.
+        halo > 0 first strokes the glyphs in halo_color, so lines underneath pass visibly behind."""
         f = self._font(font, size)
         l, r, t, b = self.ink(s, font, size)
         x0 = x - (l + r) / 2 if anchor == "m" else (x - r if anchor == "r" else x - l)
+        if halo > 0 and halo_color:
+            self.c.drawString(s, x0, y, f, self._paint(halo_color, 1.0, stroke=2 * halo))
         self.c.drawString(s, x0, y, f, self._paint(color, alpha))
         self._record(s, x0 + l, y + t, x0 + r, y + b, tag)
         return r - l
@@ -306,7 +309,7 @@ class PillowCanvas(BaseCanvas):
         l, t, r, b = self._font(font, size).getbbox(s, anchor="ls")
         return l / self.S, r / self.S, t / self.S, b / self.S
 
-    def text(self, x, y, s, font, size, color, anchor="l", alpha=1.0, tag="text"):
+    def text(self, x, y, s, font, size, color, anchor="l", alpha=1.0, tag="text", halo=0.0, halo_color=None):
         S = self.S
         f = self._font(font, size)
         il, ir, _, _ = self.ink(s, font, size)
@@ -316,6 +319,9 @@ class PillowCanvas(BaseCanvas):
         if alpha < 1:  # Pillow ignores fill alpha for text on RGB images: blend against the pixel under it
             br, bg_, bb = self.img.getpixel((min(int(x * S), self.img.width - 1), min(int(y * S), self.img.height - 1)))
             r, g, b = (int(c0 + (c1 - c0) * alpha) for c0, c1 in ((br, r), (bg_, g), (bb, b)))
+        if halo > 0 and halo_color:
+            self.d.text((x * S, y * S), s, font=f, fill=self._c(halo_color)[:3], anchor=a,
+                        stroke_width=int(round(halo * S)), stroke_fill=self._c(halo_color)[:3])
         self.d.text((x * S, y * S), s, font=f, fill=(r, g, b), anchor=a)
         x0, y0, x1, y1 = self.d.textbbox((x * S, y * S), s, font=f, anchor=a)
         self._record(s, x0 / S, y0 / S, x1 / S, y1 / S, tag)

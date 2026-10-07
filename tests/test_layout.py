@@ -153,3 +153,32 @@ def test_every_topic_header_fits_two_lines():
 def test_flags_present_for_pool():
     for c in countries():
         assert flag_png(c["iso2"]).exists(), c
+
+
+@pytest.mark.parametrize("backend", ["skia", "pillow"])
+def test_line_never_shows_through_a_tick_label(backend):
+    """The line may pass a tick label at the left edge; it must go BEHIND it (halo), never over it."""
+    cfg = copy.deepcopy(get_config())
+    cfg["render"]["backend"] = backend
+    pal = cfg["render"]["palette"]
+    topic = {"id": "t", "title": "x", "subtitle": "Nuclear, % of electricity generated", "unit_format": "{:.1f}%",
+             "source": "owid", "start_year": 1990}
+    vals = [20.0 + 0.05 * k for k in range(len(YEARS))]
+    vals[1], vals[2], vals[-1] = 20.0, 18.0, 25.0          # ticks 18/20/22/24
+    probe = R.CountryView(iso3="USA", name="United States", iso2="us", color=pal[0], years=YEARS, values=vals)
+    px_per_unit = (R.CHART_H) / (probe.yhi - probe.ylo)
+    vals[0] = 20.0 + 18 / px_per_unit                       # first point lands INSIDE the "20.0%" label box
+    views = [R.CountryView(iso3="USA", name="United States", iso2="us", color=pal[0], years=YEARS, values=vals)]
+    tl = build([("USA", YEARS, vals)], 1990, 2023, cfg)
+    r = R.Renderer(topic, tl, views, cfg)
+    s = tl.slots[0]
+    rgb = r.frame_array(s.end - 0.01).astype(int)
+    accent = np.array(hex_rgb(pal[0]))
+    ticks = [b for b in r.cv.text_boxes if b[5] == "tick"]
+    assert ticks
+    crossed = r.Y(views[0], vals[0])
+    assert any(y0 <= crossed <= y1 for _, x0, y0, x1, y1, _ in ticks)   # the line really passes a label
+    for txt, x0, y0, x1, y1, _ in ticks:
+        box = rgb[int(y0) + 1:int(y1), int(x0) + 1:int(x1)]
+        line_px = (np.abs(box - accent).max(axis=2) < 40).sum()
+        assert line_px == 0, (backend, txt, line_px)

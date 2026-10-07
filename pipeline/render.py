@@ -236,11 +236,10 @@ class Renderer:
         if v.iso2:
             cv.image(v.iso2, x0, top, FLAG_W, FLAG_H, radius=8)
         cv.text(x0 + flag_w, top + FLAG_H / 2 + CAP * size / 2, name, "black", size, v.color, tag="country")
-        # chart: gridlines across the full content width, tick labels inside, just above their line
+        # chart: gridlines across the full content width (tick labels are drawn per frame, ABOVE the line)
         for tval in v.ticks:
             y = self.Y(v, tval)
             cv.line(PLOT_L, y, PLOT_R, y, rc["grid"], width=2)
-            cv.text(PLOT_L, y - 9, self.fmt(tval), "semibold", 24, rc["muted"], tag="tick")
         cv.line(PLOT_L, L["chart_b"], PLOT_R, L["chart_b"], rc["grid"], width=2)
         mid = int((self.x0 + self.x1) / 2 + 0.5)  # half-up (round() would give 2006 for 2006.5)
         for yr in (self.x0, mid, self.x1):
@@ -315,6 +314,11 @@ class Renderer:
             cv.polyline(pts, v.color, 7)
             cv.polyline(pts, "#ffffff", 2.2, alpha=0.45)
         self._draw_events(slot, v, t)
+        # tick labels sit inside the plot, just above their gridline; drawn over the line with a
+        # background halo so a line passing through them goes visibly behind and they stay readable
+        for tval in v.ticks:
+            cv.text(PLOT_L, self.Y(v, tval) - 9, self.fmt(tval), "semibold", 24, self.rc["muted"], tag="tick",
+                    halo=5, halo_color=self.rc["background"])
         if pts:
             hx, hy = pts[-1]
             pulse = 1.0
@@ -494,7 +498,7 @@ def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path,
         rc = proc.wait()
     if rc != 0:
         raise RuntimeError(f"ffmpeg exited {rc}: {errlog.read_text(errors='replace')[-800:]}")
-    guard = _true_peak_guard(tmp, cfg)
+    guard = _true_peak_guard(tmp, wav, cfg)
     tmp.replace(out_mp4)
     if thumb is not None:
         r.cv.draw_snapshot(r.end_layer())
@@ -504,9 +508,10 @@ def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path,
             "render_seconds": round(el, 1), "fps": round(tl.n_frames / el, 1), "true_peak_guard": guard}
 
 
-def _true_peak_guard(mp4: Path, cfg: dict) -> dict:
-    """Measure the encoded file. If AAC pushed the true peak above the target, re-encode only the
-    audio track turned down by the excess (video stream copied)."""
+def _true_peak_guard(mp4: Path, wav: Path, cfg: dict) -> dict:
+    """Measure the encoded file. If AAC pushed the true peak above the target, re-encode the audio
+    from the ORIGINAL WAV turned down by the excess (video stream copied). Re-encoding the decoded
+    AAC instead would add a second generation of overshoot."""
     from .verify import loudness
     target = cfg["audio"]["true_peak_db"]
     m = loudness(mp4)
@@ -515,8 +520,8 @@ def _true_peak_guard(mp4: Path, cfg: dict) -> dict:
         return {"measured_true_peak": tp, "adjusted_db": 0.0}
     cut = round(tp - target + 0.2, 2)
     fixed = mp4.with_suffix(".tp.mp4")
-    subprocess.run([shutil.which("ffmpeg"), "-y", "-v", "error", "-i", str(mp4), "-map", "0:v:0", "-map", "0:a:0",
-                    "-c:v", "copy", "-af", f"volume=-{cut}dB", "-c:a", "aac", "-aac_pns", "0", "-b:a",
+    subprocess.run([shutil.which("ffmpeg"), "-y", "-v", "error", "-i", str(mp4), "-i", str(wav),
+                    "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-af", f"volume=-{cut}dB", "-c:a", "aac", "-aac_pns", "0", "-b:a",
                     cfg["video"]["audio_bitrate"], "-ar", str(cfg["audio"]["sample_rate"]), "-movflags", "+faststart",
                     str(fixed)], check=True)
     fixed.replace(mp4)

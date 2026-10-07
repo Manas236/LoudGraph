@@ -266,7 +266,9 @@ def contact_sheet(run_id: str, cols: int = 3, tile_w: int = 360) -> dict:
         sheet.paste(im, (x, y + cap))
         dr.text((x + 8, y + 6), f"{label}  @ {t:.1f}s", font=font, fill=(230, 233, 240))
     sheet.save(d / "contact.png")
-    return {"contact": str(d / "contact.png"), "frames": [{"t": round(t, 2), "label": lbl} for t, lbl in shots]}
+    from .config import ROOT
+    rel = (d / "contact.png").relative_to(ROOT).as_posix()   # repo-relative: no machine paths in outputs
+    return {"contact": rel, "frames": [{"t": round(t, 2), "label": lbl} for t, lbl in shots]}
 
 
 def verify_run(run_id: str) -> dict:

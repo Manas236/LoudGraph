@@ -40,6 +40,11 @@ class Slot:
     knots: list[float] = field(default_factory=list)   # time of every integer year x_start..x_end
     events: list[dict] = field(default_factory=list)   # {"year","index","kind","move","t_from","t_to"}
 
+    def __post_init__(self):
+        if not self.knots:  # timelines saved before slow-mo existed: years were evenly spaced
+            n = self.x_end - self.x_start
+            self.knots = [self.draw_start + i * (self.draw_end - self.draw_start) / n for i in range(n + 1)]
+
     def year_pos(self, t: float) -> float:
         """Fractional x-axis year the line head has reached at time t (clamped)."""
         k = self.knots

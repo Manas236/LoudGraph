@@ -94,12 +94,19 @@ def _frame(video, t):
     return f(video, t)
 
 
+def _dir(run_or_dir: str):
+    """A run id, or a directory holding a run's outputs (e.g. out/v0_baseline/<run_id>)."""
+    from pathlib import Path
+    p = Path(run_or_dir)
+    return p if p.is_dir() else run_dir(run_or_dir)
+
+
 def compare_frames(old_run: str, new_run: str) -> str:
-    od, nd = run_dir(old_run), run_dir(new_run)
+    od, nd = _dir(old_run), run_dir(new_run)
     otl = Timeline.load(od / "timeline.json")
     s = otl.slots[0]
     t = (s.draw_start + s.draw_end) / 2          # mid first country (Germany) on the OLD timeline
-    crop = 1600                                  # below this the old frames carried the removed brand text
+    crop = 1600                                  # nothing is drawn below the safe area in either version
     old = _frame(od / "video.mp4", t).crop((0, 0, 1080, crop))
     new = _frame(nd / "video.mp4", t).crop((0, 0, 1080, crop))
     bar = 90
@@ -108,7 +115,7 @@ def compare_frames(old_run: str, new_run: str) -> str:
     img.paste(new, (1080 + 40, bar))
     dr = ImageDraw.Draw(img)
     f = _font(40)
-    dr.text((20, 22), f"v0 (old)  {old_run}  t={t:.2f}s", font=f, fill=(230, 233, 240))
+    dr.text((20, 22), f"v0 (old)  {od.name}  t={t:.2f}s", font=f, fill=(230, 233, 240))
     dr.text((1080 + 60, 22), f"fix pass 01 (new)  {new_run}  t={t:.2f}s", font=f, fill=(230, 233, 240))
     for x in (540, 1080 + 40 + 540):              # the centre axis, for the eye
         dr.line([(x, bar), (x, bar + 18)], fill=(255, 80, 80), width=3)
@@ -147,7 +154,7 @@ def _spectrogram(x, sr, t0, t1, fmin=60, fmax=3000, rows=360, cols=1400, n_fft=8
 
 
 def compare_spectrogram(old_run: str, new_run: str, year: int = 2020) -> str:
-    od, nd = run_dir(old_run), run_dir(new_run)
+    od, nd = _dir(old_run), run_dir(new_run)
     panels = []
     for label, d in (("v0 (old)", od), ("fix pass 01 (new)", nd)):
         tl = Timeline.load(d / "timeline.json")

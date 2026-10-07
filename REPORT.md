@@ -111,3 +111,152 @@ Put everything in `.env` (template: `.env.example`). Then run `python run.py doc
 * **Re-running a run from a stage rewrites its files in place.** `produce --run X --from render` on a published run resets it to `awaiting_approval`, and the posted video's files are overwritten.
 * **The Pillow fallback is plainer.** It has a flat fill instead of a gradient and ring-approximated glow; frames take ~58 ms vs ~38 ms with skia.
 * **Some data ends early.** `tourism_arrivals` stops in 2020 and `alcohol_consumption` in 2020 (WHO), so those videos end at those years.
+
+
+---
+
+# Fix pass 01 (2026-10-07)
+
+State before this pass is tagged `v0-first-build`. All publishers stayed in dry-run. `python -m pytest`: **89 passed**.
+
+## A. Owner's complaints
+
+### A1. One centre axis
+- **Changed:**
+  - Every centred element sits on x = 540, with symmetric 130 px side margins (`render.py`: `MARGIN`, `CX`). This also clears the right-12% zone, because 950 ≤ 88% of 1080.
+  - Text is centred by its **ink** bounds, not its advance width (`canvas.ink()`), so the measured pixel centre is exact.
+  - The flag and the country name are centred as one group.
+  - The chart's gridlines span 130–950 symmetrically. Data is inset 34 px on both sides, so the line's glow stays inside the gridlines.
+  - Y-axis tick labels are inside the plot, small and left-aligned, just above their gridline. There is no gutter.
+  - Progress dots all have the same outer size, so the active dot can't skew the row.
+- **Tests:**
+  - `test_every_centred_element_is_on_x540_in_pixels[skia|pillow]` renders mid-country, transition and end-card frames and measures each element's non-background pixel extent from the image, the same way the owner measured. It asserts a centre of 539.5 ± 2 px (the pixel centre of 0–1079) and margins equal within 4 px.
+  - `verify` repeats the same measurement on frames decoded from every MP4 (the `centred_540` check below).
+- **Measured on the new air_passengers MP4** (`r20261007-152531-9d50`, mid-Germany frame), in the same format as the owner's table:
+
+| element | x range | centre |
+|---|---|---|
+| header (metric) | 137-942 | 539.5 |
+| progress dots | 418-660 | 539.0 |
+| flag + country name | 270-808 | 539.0 |
+| chart incl. y labels | 130-949 | 539.5 |
+| year | 436-643 | 539.5 |
+| value | 322-757 | 539.5 |
+| end-card title | 148-931 | 539.5 |
+| end-card rows | 129-949 | 539.0 |
+| end-card CTA | 289-790 | 539.5 |
+
+  Before (v0): everything was centred at about 507, while the watermark sat at 540.
+
+- **Overlap fix found while reviewing contact sheets:** a line passing a tick label at the left edge used to run through the text (US "19.0%", South Africa "5.0%", Venezuela "20.0"). Tick labels are now drawn above the line with a 5 px background halo, so the line goes visibly behind them. `test_line_never_shows_through_a_tick_label[skia|pillow]` checks this, and I confirmed the test fails when the halo is turned off.
+
+### A2. No title pill
+- The pill is gone. The hook title stays only in `meta.json` as the post title.
+- The metric subtitle is now the header: bold white text, sized 54→40 px to fit on one line, or two lines at 54→34 px if it can't.
+- The stack (header → dots → country → chart → year → value) is computed by `compute_layout()` with fixed gaps and vertically centred in y 0–1536. For a one-line header it runs from y ≈ 169 to y ≈ 1367. The dead band between the subtitle and the chart is gone.
+- **Tests:** `test_no_pill_no_source_no_brand_and_text_in_safe_zone`, `test_header_is_the_metric_and_tick_labels_are_inside_the_chart`, `test_stack_is_vertically_centred_in_safe_area` (top and bottom margins within 40 px), `test_every_topic_header_fits_two_lines`.
+
+### A3. No source text, no brand
+- "Source: …" is removed from every frame, including the end card. The data credit stays in the post description (CC BY attribution).
+- `brand.name` is now `""`, and nothing is drawn when it is empty. `test_brand_draws_only_when_configured` covers the opt-in case.
+- The old channel name was removed from rendered text, meta, descriptions, tags, Telegram captions, the dashboard title (now "Pipeline"), the User-Agent, the doctor header, the CLI description, and the README (neutral placeholders: "Shorts pipeline", `/opt/shorts-pipeline`, `shorts-pipeline-bot.service`).
+- The SQLite file was renamed from the old name to `pipeline.db` (a plain file rename; all runs kept).
+- `tests/test_brand.py` greps every text file in the repo, excluding `.git`, `.venv`, `out` and `cache`, and finds no mention.
+- **Not changed:**
+  - The local folder name, as you allowed.
+  - Earlier git commits carry the old name as author name; rewriting published history is destructive, so I left it. New commits use a neutral author.
+  - Videos rendered before this pass under `out/` still have the old watermark burned in. I didn't delete them; say the word and they go.
+
+### A4. Audio follows the data
+- **Stems:** `pluck.wav`, `pad.wav` and `fx.wav` are rendered separately, levelled by measured loudness, mixed and mastered. Each stem is scaled by the master gain and kept in `out/<run>/`.
+- **Plucks lead:** the pad is set 9 LU under the plucks. Plucks decay faster (T60 0.3 s, about 250 ms audible) and have a brighter attack (brightness 0.9 plus a 2 ms high-passed pick transient).
+  - Measured pluck minus pad on all 4 new videos: see the gate table (≥ 6 required).
+- **Pitch:**
+  - The scale now covers 3 octaves (16 notes).
+  - `note_indices()` guarantees that a move of 15% or more of the range changes the note by at least 2 scale steps. `test_big_moves_always_change_the_note_by_two_steps` runs this over 300 random walks.
+- **Pad tracks the data:**
+  - The low-pass cutoff (180 → 2200 Hz) and gain (0.2 → 1.0) follow the value the line head shows, smoothed over 150 ms.
+  - Total detune is 3 cents (it was 9), so there is no audible pulsing.
+  - The constant sub under the pad is gone.
+- **Events (move ≥ 25% of range):**
+  - `timeline.py` gives the step into an event 3× the duration. The slot gets longer, and video and audio both read the new knots.
+  - The pluck stem plays a scale run from the old note to the new one: a fall is heard as a falling run, a jump as a rising one.
+  - Falls add a short 75→42 Hz sub hit and duck the pad to 5% for 0.35 s ("riser-less silence"). Jumps add a short bright accent.
+  - The head dot pulses harder and an expanding ring marks the landing point.
+  - The picker rebuilds the timeline after slow-mo and drops the least interesting country if the video would exceed 45 s; homicide_rate dropped Sweden.
+- **Tests** (`tests/test_audio.py`, synthetic 3-country track):
+
+| test | measured |
+|---|---|
+| Spearman(values, detected note), per country on the pluck stem | 0.988 / 0.988 / 0.999 |
+| Pluck vs pad stem | −12.88 vs −21.18 LUFS (**8.30 LU**) |
+| Flat-crash-recover, pad stem in the flat years (1992–2001) | RMS 0.0822, centroid 1518 Hz |
+| Same, crash year and the year after (2003–2005) | RMS 0.0010, centroid 238 Hz |
+| Event run detected on the pluck stem | 10 strictly descending notes (MIDI 86 → 52) |
+| Low band (< 90 Hz) of the fx stem around falls vs elsewhere | > 10× (`test_sub_bass_only_on_falls`) |
+
+- **Crash test clip** (`out/crash_test/analysis.json`): slow-mo step 0.36 s vs normal 0.12 s; pad stem flat years RMS 0.13285 / centroid 1050 Hz vs crash years RMS 0.00201 / centroid 172 Hz; event run intended MIDI [79, 74, 72, 67, 64, 60, 55, 52, 48] -> detected [79, 74, 72, 67, 64, 60, 55, 52, 48, 45] (10 descending); MP4 -14.2 LUFS / -2.6 dBFS, 8.6 s.
+
+## B. Known weaknesses fixed
+- **B1. Scorer noise:** shock points are scaled by 0.3 when reversals ≥ 6 (`scorer.weights.noise_*`). `test_noise_scores_clearly_below_v_and_crash`: five white-noise series score **46.8–53.8**, against **64.9** for a clean V and **81.4** for a clean crash. Before, noise scored 66.9 against the V's 65.2.
+- **B2. Low variety:**
+  - **Rule:** a set with no falling country, or with a minimum pairwise z-distance below 0.25, fails as `low variety: …`. A failed run puts the topic on cooldown, and `produce` asks the selector for another topic. If no falling country is in the top 20, the picker also searches all passing countries for one.
+  - **life_expectancy:** it now fails as `low variety: no falling country (net < -0.5)` (run `r20261007-153736-194f`) and is no longer eligible, which is the intended behaviour. The selector replaced it with **homicide_rate**.
+  - **Reason-order fix:** the first attempt (`r20261007-153708-dbea`) failed with the wrong reason, "every set already used", because only 8 countries pass and that set had been used before. The variety verdict now takes precedence over "used".
+  - Tests: `test_low_variety_when_nothing_falls`, `test_low_variety_when_shapes_are_alike`, `test_drops_countries_when_slowmo_makes_it_too_long`.
+- **B3. Telegram restarts:**
+  - The `getUpdates` offset is stored in a new `kv` table and written before each update is handled, so a crash skips an update rather than repeating it. `test_offset_survives_a_restart` covers this.
+  - The test also caught a **real bug that would have crashed the live bot**. `call()` used `timeout` both as the HTTP timeout and as the Bot API's long-poll parameter, so every `getUpdates` raised "multiple values for keyword argument 'timeout'". The HTTP timeout is now `http_timeout`.
+- **B4. Re-rendering published runs:**
+  - `produce --run X --from …` and the dashboard's Retry button refuse when the run is published or publishing, or has any uploaded/live/private_locked post.
+  - `--as-new` (or "Re-render as new run" on the dashboard) copies the run's inputs into a new run and produces that instead.
+  - Tests: `tests/test_orchestrator.py`, 4 tests.
+  - **Mistake during this pass:** to demonstrate the refusal, I ran an in-place re-render of v0 run `r20261007-135650-f350`. That run was `awaiting_approval` with only dry-run posts, so B4 correctly allowed it, and it overwrote the run's v0 video and audio with new-pipeline output.
+  - **Recovery:** I checked out `v0-first-build` in a temporary git worktree and re-rendered that run's unchanged inputs with the v0 code into `out/v0_baseline/r20261007-135650-f350/`. The result is identical: −14.02 LUFS and −1.55 dBTP, the exact values the v0 log recorded. The one deliberate difference is that `brand.name` was blanked, so this regenerated file doesn't put the old name back into an output. The A/B images use this baseline.
+- **B5. Topic weights:** log(views) is z-scored within each platform before topics are combined, and "bottom quartile" for retirement is judged per platform. `test_views_are_zscored_per_platform` shows the worst Instagram topic, despite 20× the raw views, now ranks below the best YouTube topic.
+- **B6. `.env.example` audit:**
+  - Nothing was missing and nothing extra. The code reads exactly 7 variables, all through `config.secret()`: `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `YT_CLIENT_SECRET_FILE`, `IG_USER_ID`, `IG_ACCESS_TOKEN`, `FB_PAGE_ID`. `.env.example` listed the same 7, and the names match the README and REPORT.
+  - **Diff:** comments were grouped (one for both Telegram variables, one for both Instagram variables). Each variable now has its own "what it is; where to get it" line, and a header says every variable is optional and the list is test-enforced.
+  - **Gap fixed:** the file never said that `IG_ACCESS_TOKEN` is also the Page token used for Facebook Page Reels. It does now.
+  - **Code change:** `config.SECRET_NAMES` existed but was unused. It is now authoritative: `secret()` raises on any name not in it.
+  - `tests/test_env_example.py` asserts that `.env.example` keys = names read in code = `SECRET_NAMES`, that the only direct environment access is inside `secret()`, that every variable has a "what; where" comment, and that the README uses the same names.
+
+## Other changes found during the gate
+- **AAC true peak:**
+  - With the brighter pluck attacks, AAC still overshot by up to about 0.9 dB even with PNS off. The first A/B MP4 measured −0.7 dBFS.
+  - The encoder headroom went from 0.5 to 1.3 dB.
+  - The post-encode safety guard now re-encodes from the **original WAV**. It used to re-encode the decoded AAC, which added a second generation of overshoot, so it moved −0.7 to only −0.8 while costing 0.5 LU of loudness.
+- The master loop now alternates normalise and limit until loudness is within 0.15 LU of target and true peak is under the ceiling. It used to finish around −14.45.
+- Timelines saved before slow-mo still load (linear knots).
+
+## Verification gate (fix pass 01)
+
+`python run.py verify` on every new video. All checks are measured on the final MP4, the stems and the timeline:
+
+| run | topic | size / fps | duration | LUFS | true peak | sync median (matched) | pluck - pad | min pitch rho | centring err / margin diff | passed |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `r20261007-152531-9d50` | air_passengers (same set as v0) | 1080x1920 / 30 | 44.3 s | -14.2 | -2.4 dBFS | 7.43 ms (232/232) | 8.32 LU | 0.961 | 1.0 / 2 px | yes |
+| `r20261007-153030-d91b` | landlines | 1080x1920 / 30 | 41.8 s | -14.2 | -1.7 dBFS | 7.53 ms (279/279) | 8.31 LU | 0.98 | 1.0 / 2 px | yes |
+| `r20261007-153521-6a24` | nuclear_share | 1080x1920 / 30 | 44.9 s | -14.2 | -2.6 dBFS | 7.43 ms (288/288) | 8.32 LU | 0.981 | 1.0 / 2 px | yes |
+| `r20261007-153747-82c0` | homicide_rate | 1080x1920 / 30 | 40.6 s | -14.2 | -2.3 dBFS | 7.45 ms (197/197) | 8.3 LU | 0.972 | 0.5 / 1 px | yes |
+
+Contact sheets: I looked at every new sheet. Confirmed on all four:
+- no pill
+- no source text
+- no brand text
+- everything on one centre axis
+- y labels inside the chart
+- all flags correct for their countries
+- nothing overlapping (after the tick-label halo fix above)
+
+## Paths
+- **A/B:**
+  - `out/r20261007-152531-9d50/compare.png`: v0 frame vs new frame at t = 2.60 s (mid-Germany). Red ticks mark x = 540.
+  - `out/r20261007-152531-9d50/compare_spectrogram.png`: v0 vs new, Germany segment, 60 Hz–3 kHz on a log scale, with the 2020 crash marked.
+  - v0 baseline: `out/v0_baseline/r20261007-135650-f350/`.
+- **Crash test clip:** `out/crash_test.mp4`, with stems, timeline and `analysis.json` in `out/crash_test/`.
+- **New sample videos** (each folder also holds `contact.png`, `verify.json`, `pluck.wav`/`pad.wav`/`fx.wav` and `meta.json`):
+  - air_passengers, same 8 countries as v0 run `r20261007-135650-f350`: `out/r20261007-152531-9d50/video.mp4`
+  - landlines: `out/r20261007-153030-d91b/video.mp4`
+  - nuclear_share: `out/r20261007-153521-6a24/video.mp4`
+  - homicide_rate (replaces life_expectancy, which correctly fails as low variety): `out/r20261007-153747-82c0/video.mp4`
