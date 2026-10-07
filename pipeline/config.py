@@ -61,6 +61,12 @@ def country_by_iso3() -> dict[str, dict]:
 def setup_logging(level: int = logging.INFO) -> None:
     if logging.getLogger().handlers:
         return
+    # Windows consoles default to cp1252; captions and alerts contain emoji and non-ASCII names
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     log_dir = path("cache") / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S")
