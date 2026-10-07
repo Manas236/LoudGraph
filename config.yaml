@@ -80,7 +80,7 @@ audio:
   keys: [A2, C3, E3, G2, D3, A3, E2, G3]
   pluck_register: [52, 63]      # lowest scale note is moved into this MIDI range
   pluck_gain: 0.55
-  pluck_decay: 0.9965
+  pluck_t60: 1.2                # seconds for a pluck to decay by 60 dB
   pluck_length: 0.9
   pad_gain: 0.16
   pad_cutoff_hz: 900
