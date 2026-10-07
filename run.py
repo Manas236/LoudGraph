@@ -9,6 +9,7 @@
     python run.py publish [--run RUN_ID]
     python run.py stats
     python run.py dashboard
+    python run.py verify [--run RUN_ID ...]
 """
 from __future__ import annotations
 
@@ -70,6 +71,20 @@ def cmd_dashboard(a):
     return main()
 
 
+def cmd_verify(a):
+    import json
+    from pipeline import db
+    from pipeline.verify import verify_run
+    ids = a.run or [r["id"] for r in db.list_runs(limit=500) if r["stage"] in
+                    ("awaiting_approval", "approved", "publishing", "published", "rendered")][: a.last]
+    ok = True
+    for rid in ids:
+        res = verify_run(rid)
+        ok &= res["passed"]
+        print(json.dumps({k: res[k] for k in ("run_id", "passed", "checks", "loudness", "sync", "contact")}, indent=1))
+    return 0 if ok else 1
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="run.py", description="LoudGraphs data-sonification pipeline")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -93,6 +108,10 @@ def main(argv=None):
     s.set_defaults(fn=cmd_publish)
     sub.add_parser("stats").set_defaults(fn=cmd_stats)
     sub.add_parser("dashboard").set_defaults(fn=cmd_dashboard)
+    s = sub.add_parser("verify", help="ffprobe + loudness + A/V sync + contact sheet for rendered runs")
+    s.add_argument("--run", nargs="*", help="run ids (default: the most recent rendered runs)")
+    s.add_argument("--last", type=int, default=3)
+    s.set_defaults(fn=cmd_verify)
     a = p.parse_args(argv)
     setup_logging()
     return a.fn(a) or 0

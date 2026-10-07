@@ -252,7 +252,7 @@ def synthesize(tl: Timeline, values: dict[str, list[float]], seed: int = 0, cfg:
     add(karplus_strong(midi_to_hz(min(chord_notes) + 12), 2.5, sr, 2.5, rng), tl.end_start, ac["pluck_gain"] * 0.8)
 
     mix = mix[:n_total]
-    out, stats = master(mix, sr, ac["target_lufs"], ac["true_peak_db"])
+    out, stats = master(mix, sr, ac["target_lufs"], ac["true_peak_db"] - ac.get("aac_headroom_db", 0.0))
     info = {"sample_rate": sr, "notes": notes_log, "roots": roots, "chord": chord_notes, **stats}
     return out.astype(np.float32), info
 

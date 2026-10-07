@@ -92,7 +92,8 @@ audio:
   whoosh_gain: 0.22
   end_chord_gain: 0.20
   target_lufs: -14.0
-  true_peak_db: -1.0
+  true_peak_db: -1.0            # for the delivered MP4
+  aac_headroom_db: 1.5          # AAC overshoots sharp plucks by ~1.1 dB, so the WAV is mastered this much lower
 
 render:
   backend: auto                 # auto (skia, else pillow) | skia | pillow
