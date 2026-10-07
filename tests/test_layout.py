@@ -56,6 +56,19 @@ def test_rendered_text_stays_in_safe_zone(tmp_path, which):
         assert y0 >= R.SAFE_TOP - 1 and y1 <= R.SAFE_BOTTOM + 1, (tag, s, y0, y1)
 
 
+def test_pillow_fallback_renders_in_safe_zone(tmp_path):
+    import copy
+    cfg = copy.deepcopy(get_config())
+    cfg["render"]["backend"] = "pillow"
+    topic, tl, views = _views_and_timeline()
+    s = tl.slots[3]
+    boxes = R.render_still(topic, tl, views, s.end - 0.01, tmp_path / "p.png", cfg=cfg)
+    assert (tmp_path / "p.png").stat().st_size > 10000
+    for txt, x0, y0, x1, y1, tag in boxes:
+        if tag != "watermark":
+            assert R.SAFE_LEFT - 1 <= x0 and x1 <= R.SAFE_RIGHT + 1 and y1 <= R.SAFE_BOTTOM + 1, (tag, txt)
+
+
 def _luminance(rgb):
     def ch(c):
         c = c / 255

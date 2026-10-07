@@ -258,9 +258,9 @@ class PillowCanvas(BaseCanvas):
         S = self.S
         if blur > 0:  # approximate a blurred disc with fading rings
             for k in range(4, 0, -1):
-                rr = r + blur * k / 2
+                rr = r * 0.6 + blur * k / 5
                 self.d.ellipse([(cx - rr) * S, (cy - rr) * S, (cx + rr) * S, (cy + rr) * S],
-                               fill=self._c(color, alpha * 0.18))
+                               fill=self._c(color, alpha * 0.14))
             return
         box = [(cx - r) * S, (cy - r) * S, (cx + r) * S, (cy + r) * S]
         if stroke:
@@ -300,7 +300,11 @@ class PillowCanvas(BaseCanvas):
         S = self.S
         f = self._font(font, size)
         a = {"l": "ls", "m": "ms", "r": "rs"}[anchor]
-        self.d.text((x * S, y * S), s, font=f, fill=self._c(color, alpha), anchor=a)
+        r, g, b, _ = self._c(color)
+        if alpha < 1:  # Pillow ignores fill alpha for text on RGB images: blend against the pixel under it
+            br, bg_, bb = self.img.getpixel((min(int(x * S), self.img.width - 1), min(int(y * S), self.img.height - 1)))
+            r, g, b = (int(c0 + (c1 - c0) * alpha) for c0, c1 in ((br, r), (bg_, g), (bb, b)))
+        self.d.text((x * S, y * S), s, font=f, fill=(r, g, b), anchor=a)
         x0, y0, x1, y1 = self.d.textbbox((x * S, y * S), s, font=f, anchor=a)
         self._record(s, x0 / S, y0 / S, x1 / S, y1 / S, tag)
         return (x1 - x0) / S
