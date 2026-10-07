@@ -245,10 +245,12 @@ def fail(run_id: str, stage: str, error: str) -> None:
     transition(run_id, "failed", f"failed at {stage}: {error}", failed_stage=stage, error=error[:2000])
 
 
-def used_country_sets(topic_id: str) -> set[str]:
+def used_country_sets(topic_id: str, except_run: str | None = None) -> set[str]:
+    """Country sets already used for a topic by other runs (re-running a run may keep its own set)."""
     with db() as c:
         rows = c.execute(
-            "SELECT country_set FROM runs WHERE topic_id=? AND country_set IS NOT NULL", (topic_id,)
+            "SELECT country_set FROM runs WHERE topic_id=? AND country_set IS NOT NULL AND id IS NOT ?",
+            (topic_id, except_run),
         ).fetchall()
     return {r["country_set"] for r in rows}
 

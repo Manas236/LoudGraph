@@ -19,6 +19,9 @@ data:
   owid_bulk:                    # used by topics whose code starts with "github:<dataset>/"
     energy-data: "https://raw.githubusercontent.com/owid/energy-data/master/owid-energy-data.csv"
     co2-data: "https://raw.githubusercontent.com/owid/co2-data/master/owid-co2-data.csv"
+  owid_codebook:                # column titles + original sources for the bulk datasets
+    energy-data: "https://raw.githubusercontent.com/owid/energy-data/master/owid-energy-codebook.csv"
+    co2-data: "https://raw.githubusercontent.com/owid/co2-data/master/owid-co2-codebook.csv"
   http_timeout: 60
   verify_min_countries: 25      # topics-verify: usable pool countries required to keep a topic
   max_stale_years: 3            # a series must reach within N years of the topic's latest year
@@ -93,7 +96,8 @@ audio:
   end_chord_gain: 0.20
   target_lufs: -14.0
   true_peak_db: -1.0            # for the delivered MP4
-  aac_headroom_db: 1.5          # AAC overshoots sharp plucks by ~1.1 dB, so the WAV is mastered this much lower
+  aac_headroom_db: 0.5          # small margin for AAC rounding (PNS is disabled in render.py, see there)
+  master_lowpass_hz: 15000      # band-limit before limiting so AAC does not create new peaks
 
 render:
   backend: auto                 # auto (skia, else pillow) | skia | pillow

@@ -180,9 +180,13 @@ def limit(x: np.ndarray, ceiling: float, sr: int, window_ms: float = 6.0) -> np.
     return x * g[:, None]
 
 
-def master(x: np.ndarray, sr: int, target_lufs: float, tp_db: float) -> tuple[np.ndarray, dict]:
+def master(x: np.ndarray, sr: int, target_lufs: float, tp_db: float, lowpass_hz: float | None = None) -> tuple[np.ndarray, dict]:
     sos = butter(2, 30, "high", fs=sr, output="sos")
     x = sosfilt(sos, x, axis=0)
+    if lowpass_hz:
+        # AAC drops content above ~16 kHz; removing it here first means the limiter shapes the same
+        # transients the encoder keeps (measured: AAC overshoot fell from +3.7 dB to +1.0 dB).
+        x = sosfilt(butter(8, lowpass_hz, "low", fs=sr, output="sos"), x, axis=0)
     meter = pyln.Meter(sr)
     ceiling_db = tp_db - 0.4
     for _ in range(10):
@@ -252,7 +256,8 @@ def synthesize(tl: Timeline, values: dict[str, list[float]], seed: int = 0, cfg:
     add(karplus_strong(midi_to_hz(min(chord_notes) + 12), 2.5, sr, 2.5, rng), tl.end_start, ac["pluck_gain"] * 0.8)
 
     mix = mix[:n_total]
-    out, stats = master(mix, sr, ac["target_lufs"], ac["true_peak_db"] - ac.get("aac_headroom_db", 0.0))
+    out, stats = master(mix, sr, ac["target_lufs"], ac["true_peak_db"] - ac.get("aac_headroom_db", 0.0),
+                        ac.get("master_lowpass_hz"))
     info = {"sample_rate": sr, "notes": notes_log, "roots": roots, "chord": chord_notes, **stats}
     return out.astype(np.float32), info
 

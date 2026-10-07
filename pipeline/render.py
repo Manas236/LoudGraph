@@ -202,7 +202,7 @@ class Renderer:
             cv.line(self.plot_l, y, CHART_R, y, rc["grid"], width=2)
             cv.text(self.plot_l - 12, y + 8.5, self.fmt(tval), "semibold", 24, rc["muted"], anchor="r", tag="tick")
         cv.line(self.plot_l, CHART_B, CHART_R, CHART_B, rc["grid"], width=2)
-        mid = round((self.x0 + self.x1) / 2)
+        mid = int((self.x0 + self.x1) / 2 + 0.5)  # half-up (round() would give 2006 for 2006.5)
         cv.text(self.plot_l, XLAB_BASE, str(self.x0), "semibold", 26, rc["muted"], tag="xlabel")
         cv.text(self.X(mid), XLAB_BASE, str(mid), "semibold", 26, rc["muted"], anchor="m", tag="xlabel")
         cv.text(CHART_R, XLAB_BASE, str(self.x1), "semibold", 26, rc["muted"], anchor="r", tag="xlabel")
@@ -408,7 +408,9 @@ def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path,
         "-vf", "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p",
         "-c:v", "libx264", "-preset", vc["preset"], "-crf", str(vc["crf"]), "-pix_fmt", "yuv420p",
         "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
-        "-c:a", "aac", "-b:a", vc["audio_bitrate"], "-ar", str(cfg["audio"]["sample_rate"]),
+        # -aac_pns 0: the native encoder's Perceptual Noise Substitution re-synthesises the plucks'
+        # noise-burst attacks and created peaks up to +6 dB over the WAV; without it TP matches the WAV.
+        "-c:a", "aac", "-aac_pns", "0", "-b:a", vc["audio_bitrate"], "-ar", str(cfg["audio"]["sample_rate"]),
         "-movflags", "+faststart", str(tmp),
     ]
     errlog = out_mp4.parent / "ffmpeg.log"
@@ -428,13 +430,34 @@ def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path,
         rc = proc.wait()
     if rc != 0:
         raise RuntimeError(f"ffmpeg exited {rc}: {errlog.read_text(errors='replace')[-800:]}")
+    guard = _true_peak_guard(tmp, cfg)
     tmp.replace(out_mp4)
     if thumb is not None:
         r.cv.draw_snapshot(r.end_layer())
         jpg_from_canvas(r.cv, thumb)
     el = time.time() - t0
     return {"backend": r.backend, "backend_note": r.cv.backend_note, "frames": tl.n_frames,
-            "render_seconds": round(el, 1), "fps": round(tl.n_frames / el, 1)}
+            "render_seconds": round(el, 1), "fps": round(tl.n_frames / el, 1), "true_peak_guard": guard}
+
+
+def _true_peak_guard(mp4: Path, cfg: dict) -> dict:
+    """Measure the encoded file. If AAC pushed the true peak above the target, re-encode only the
+    audio track turned down by the excess (video stream copied)."""
+    from .verify import loudness
+    target = cfg["audio"]["true_peak_db"]
+    m = loudness(mp4)
+    tp = m["true_peak_dbfs"]
+    if tp is None or tp <= target:
+        return {"measured_true_peak": tp, "adjusted_db": 0.0}
+    cut = round(tp - target + 0.2, 2)
+    fixed = mp4.with_suffix(".tp.mp4")
+    subprocess.run([shutil.which("ffmpeg"), "-y", "-v", "error", "-i", str(mp4), "-map", "0:v:0", "-map", "0:a:0",
+                    "-c:v", "copy", "-af", f"volume=-{cut}dB", "-c:a", "aac", "-aac_pns", "0", "-b:a", cfg["video"]["audio_bitrate"],
+                    "-ar", str(cfg["audio"]["sample_rate"]), "-movflags", "+faststart", str(fixed)], check=True)
+    fixed.replace(mp4)
+    after = loudness(mp4)
+    log.info("true-peak guard: MP4 peak %.1f dBFS > %.1f, audio turned down %.2f dB -> %s", tp, target, cut, after)
+    return {"measured_true_peak": tp, "adjusted_db": -cut, "after": after}
 
 
 def jpg_from_canvas(cv, p: Path):

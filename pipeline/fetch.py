@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import math
+import re
 import time
 from datetime import datetime, timezone
 
@@ -189,6 +190,19 @@ def _fetch_owid(topic: dict) -> dict:
         name = f"{column} (OWID {dataset})"
         citation = f"Our World in Data, owid/{dataset}"
         unit = None
+        cb_url = cfg["data"].get("owid_codebook", {}).get(dataset)
+        if cb_url:
+            try:
+                cb = pd.read_csv(io.StringIO(_http_get(cb_url).text))
+                row = cb[cb["column"] == column]
+                if not row.empty:
+                    r0 = row.iloc[0]
+                    name = str(r0.get("title") or name)
+                    unit = None if pd.isna(r0.get("unit")) else str(r0.get("unit"))
+                    if not pd.isna(r0.get("source")):
+                        citation = re.sub(r"\s*\[https?://[^\]]*\]", "", str(r0["source"])).strip()
+            except Exception as e:  # noqa: BLE001 - the codebook only improves labels
+                log.warning("OWID codebook for %s unavailable: %s", dataset, e)
     else:
         r = _http_get(cfg["data"]["owid_grapher_url"].format(slug=slug))
         df = pd.read_csv(io.StringIO(r.text))

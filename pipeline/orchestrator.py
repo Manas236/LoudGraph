@@ -58,7 +58,7 @@ def step_fetch(run_id: str, topic: dict) -> tuple[str, dict]:
 def step_pick(run_id: str, topic: dict) -> tuple[str, dict]:
     from .picker import pick
     data, scored = _read(run_id, "data.json"), _read(run_id, "scores.json")
-    exclude = db.used_country_sets(topic["id"])
+    exclude = db.used_country_sets(topic["id"], except_run=run_id)
     seed = zlib.crc32(run_id.encode())
     p = pick(scored, data["series"], topic, exclude_sets=exclude, seed=seed)
     _write(run_id, "pick.json", p)
