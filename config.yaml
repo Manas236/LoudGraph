@@ -141,17 +141,17 @@ youtube:
 instagram:
   enabled: true
   graph_base: "https://graph.facebook.com"
-  api_version: "v23.0"
+  api_version: "v25.0"           # verified in Meta docs 2026-10-07
   upload_mode: resumable        # resumable (local file) | video_url (needs public_base_url)
   public_base_url: ""           # e.g. https://files.example.com/reels/ -> <base><run_id>.mp4
   share_to_feed: true
-  poll_seconds: 10
-  poll_max_minutes: 15
+  poll_seconds: 30              # Meta suggests ~1 query/min; 30 s keeps it light
+  poll_max_minutes: 10
 
 facebook:
   enabled: false                # optional Page Reels
   graph_base: "https://graph.facebook.com"
-  api_version: "v23.0"
+  api_version: "v25.0"           # verified in Meta docs 2026-10-07
 
 analytics:
   min_age_hours: 72
