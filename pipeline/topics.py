@@ -139,7 +139,7 @@ def verify_topics(force: bool = False) -> int:
             kept.append(tid)
             new_chunks.append(chunk)
             log.info("OK   %-28s usable=%d passing=%d  %s", tid, info["usable"], info["passing"], info["indicator_name"][:60])
-    TOPICS_FILE.write_text("".join(new_chunks), encoding="utf-8")
+    TOPICS_FILE.write_text("".join(new_chunks), encoding="utf-8", newline="\n")
     (path("cache") / "topics_verify.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
     print(f"\nverified {len(kept)} topics, dropped {len(dropped)}")
     for tid, r in dropped:
