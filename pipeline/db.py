@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS stats (
     raw TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_stats_post ON stats(post_id);
+CREATE TABLE IF NOT EXISTS kv (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS topic_weights (
     topic_id TEXT PRIMARY KEY,
     weight REAL,
@@ -340,3 +345,20 @@ def topic_weights() -> dict[str, dict]:
     init()
     with db() as c:
         return {r["topic_id"]: dict(r) for r in c.execute("SELECT * FROM topic_weights").fetchall()}
+
+
+# ---------------------------------------------------------------- small persistent settings
+
+def kv_get(key: str, default: str | None = None) -> str | None:
+    init()
+    with db() as c:
+        r = c.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+    return r["value"] if r else default
+
+
+def kv_set(key: str, value: str) -> None:
+    init()
+    with db() as c:
+        c.execute("INSERT INTO kv(key, value, updated_at) VALUES (?,?,?) "
+                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                  (key, value, now()))

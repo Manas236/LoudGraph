@@ -58,3 +58,28 @@ def test_double_tap_is_harmless(tg):
     bot.handle_callback(_cq(f"r:{rid}"))
     assert db.get_run(rid)["stage"] == "approved"
     assert "already approved" in calls[-2][1]["text"]
+
+
+def test_offset_survives_a_restart(temp_db, monkeypatch):
+    """B3: the getUpdates offset lives in the DB, so a restarted bot never re-delivers a button press."""
+    from pipeline import actions, approve_telegram as bot
+    db = temp_db
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "555")
+    monkeypatch.setattr(actions, "spawn", lambda *a: 0)
+    rid = _waiting_run(db)
+    queue = [{"update_id": 41, "callback_query": _cq(f"a:{rid}")}]
+    seen = []
+
+    def fake_call(method, http_timeout=30, **kw):
+        if method == "getUpdates":     # Telegram semantics: only updates >= offset are returned
+            seen.append(kw.get("offset"))
+            return [u for u in queue if u["update_id"] >= kw.get("offset", 0)]
+        return {"message_id": 1}
+    monkeypatch.setattr(bot, "call", fake_call)
+    assert bot.poll_once(1) == 1      # (this call also proves the long-poll `timeout` param no longer clashes)
+    assert db.get_run(rid)["stage"] == "approved"
+    assert db.kv_get("telegram_offset") == "42"
+    # "restart": a fresh poll reads the offset from the DB and gets nothing again
+    assert bot.poll_once(1) == 0
+    assert seen == [None, 42]

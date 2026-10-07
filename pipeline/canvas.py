@@ -164,14 +164,20 @@ class SkiaCanvas(BaseCanvas):
     def text_width(self, s, font, size):
         return self._font(font, size).measureText(s)
 
+    def ink(self, s, font, size) -> tuple[float, float, float, float]:
+        """Tight ink bounds (left, right, top, bottom) relative to the text origin/baseline."""
+        b = self.sk.Rect()
+        self._font(font, size).measureText(s, self.sk.TextEncoding.kUTF8, b)
+        return b.left(), b.right(), b.top(), b.bottom()
+
     def text(self, x, y, s, font, size, color, anchor="l", alpha=1.0, tag="text"):
+        """anchor l/m/r positions the INK (not the advance box) at x, so pixel centring is exact."""
         f = self._font(font, size)
-        w = f.measureText(s)
-        x0 = x - w / 2 if anchor == "m" else (x - w if anchor == "r" else x)
+        l, r, t, b = self.ink(s, font, size)
+        x0 = x - (l + r) / 2 if anchor == "m" else (x - r if anchor == "r" else x - l)
         self.c.drawString(s, x0, y, f, self._paint(color, alpha))
-        m = f.getMetrics()
-        self._record(s, x0, y + m.fAscent, x0 + w, y + m.fDescent, tag)
-        return w
+        self._record(s, x0 + l, y + t, x0 + r, y + b, tag)
+        return r - l
 
     def load_image(self, key, p: Path):
         if key not in self.images:
@@ -296,10 +302,16 @@ class PillowCanvas(BaseCanvas):
     def text_width(self, s, font, size):
         return self._font(font, size).getlength(s) / self.S
 
+    def ink(self, s, font, size) -> tuple[float, float, float, float]:
+        l, t, r, b = self._font(font, size).getbbox(s, anchor="ls")
+        return l / self.S, r / self.S, t / self.S, b / self.S
+
     def text(self, x, y, s, font, size, color, anchor="l", alpha=1.0, tag="text"):
         S = self.S
         f = self._font(font, size)
-        a = {"l": "ls", "m": "ms", "r": "rs"}[anchor]
+        il, ir, _, _ = self.ink(s, font, size)
+        x = x - (il + ir) / 2 if anchor == "m" else (x - ir if anchor == "r" else x - il)
+        a = "ls"
         r, g, b, _ = self._c(color)
         if alpha < 1:  # Pillow ignores fill alpha for text on RGB images: blend against the pixel under it
             br, bg_, bb = self.img.getpixel((min(int(x * S), self.img.width - 1), min(int(y * S), self.img.height - 1)))

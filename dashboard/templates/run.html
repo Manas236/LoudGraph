@@ -22,6 +22,9 @@
   <form class="inline" method="post" action="{{ url_for('retry', run_id=run.id) }}"><input type="hidden" name="csrf" value="{{ csrf }}">
     <select name="step">{% for s in steps %}<option value="{{ s }}" {{ 'selected' if s == (run.failed_stage or 'render') }}>{{ s }}</option>{% endfor %}</select>
     <button>↻ Retry from stage</button></form>
+  <form class="inline" method="post" action="{{ url_for('rerender', run_id=run.id) }}"><input type="hidden" name="csrf" value="{{ csrf }}">
+    <select name="step">{% for s in steps %}<option value="{{ s }}" {{ 'selected' if s == 'render' }}>{{ s }}</option>{% endfor %}</select>
+    <button>⧉ Re-render as new run</button></form>
   {% if run.stage == 'approved' %}
   <form class="inline" method="post" action="{{ url_for('publish', run_id=run.id) }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="go">🚀 Publish now</button></form>
   {% endif %}

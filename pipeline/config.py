@@ -46,6 +46,9 @@ def run_dir(run_id: str) -> Path:
 
 
 def secret(name: str) -> str | None:
+    """The ONLY way code reads the environment. SECRET_NAMES must match .env.example (a test checks)."""
+    if name not in SECRET_NAMES:
+        raise KeyError(f"{name} is not a known secret; add it to SECRET_NAMES and .env.example")
     v = os.environ.get(name, "").strip()
     return v or None
 

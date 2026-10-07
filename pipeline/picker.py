@@ -6,11 +6,15 @@ import random
 import numpy as np
 
 from .config import get_config
-from .timeline import country_count_bounds
+from .timeline import build, country_count_bounds
 
 
 class NotEnoughData(RuntimeError):
     pass
+
+
+class LowVariety(NotEnoughData):
+    """The best set we can build is bland (no falling country, or shapes too alike)."""
 
 
 def z_curve(rows, x0: int, x1: int, m: int = 64) -> np.ndarray:
@@ -53,8 +57,8 @@ def _greedy(pool: list[dict], n: int, curves: dict, pc: dict) -> list[str]:
                                            by[iso]["score"]))
 
     constraints = [
+        lambda s: s["net"] < pc["net_down"],   # falling first: it is the hard one (B2)
         lambda s: s["net"] > pc["net_up"],
-        lambda s: s["net"] < pc["net_down"],
         lambda s: s["reversals"] >= pc["reversal_story"],
     ]
     for ok in constraints:
@@ -69,19 +73,37 @@ def _greedy(pool: list[dict], n: int, curves: dict, pc: dict) -> list[str]:
     return sel
 
 
+def _variety_problem(sel: list[str], by: dict, curves: dict, pc: dict) -> str | None:
+    if pc.get("require_falling", True) and not any(by[c]["net"] < pc["net_down"] for c in sel):
+        return f"no falling country (net < {pc['net_down']})"
+    d = min_pairwise(curves, sel)
+    if d < pc.get("min_variety_distance", 0.0):
+        return f"shapes too alike (min pairwise distance {d:.3f} < {pc['min_variety_distance']})"
+    return None
+
+
+def _rows_in(series_rows, x0, x1):
+    return [(int(y), float(v)) for y, v in series_rows if x0 <= y <= x1]
+
+
 def pick(scored: list[dict], series: dict, topic: dict, exclude_sets: set[str] | None = None,
          seed: int | None = None, cfg: dict | None = None) -> dict:
     cfg = cfg or get_config()
     pc = cfg["picker"]
     exclude_sets = exclude_sets or set()
-    passing = [s for s in scored if s["ok"]]
+    passing = sorted((s for s in scored if s["ok"]), key=lambda s: -s["score"])
     n = target_count(len(passing), cfg)
-    cands = sorted(passing, key=lambda s: -s["score"])[: pc["top_k"]]
+    cands = passing[: pc["top_k"]]
+    if not any(s["net"] < pc["net_down"] for s in cands):
+        falling = [s for s in passing if s["net"] < pc["net_down"]]
+        if falling:
+            cands = cands + falling[:1]
     x0 = topic["start_year"]
     x1 = max(s["last_year"] for s in cands)
     curves = {s["iso3"]: z_curve(series[s["iso3"]], x0, x1) for s in cands}
+    by = {s["iso3"]: s for s in cands}
     rng = random.Random(seed)
-    key, sel, attempts = None, [], 0
+    sel, attempts, problem = None, 0, None
     for attempt in range(pc["max_attempts"]):
         if attempt == 0:
             pool = cands
@@ -91,22 +113,47 @@ def pick(scored: list[dict], series: dict, topic: dict, exclude_sets: set[str] |
             # random restart: drop a random subset (keeping >= n) so a different set comes out
             pool = sorted(rng.sample(cands, rng.randint(n, len(cands) - 1)), key=lambda s: -s["score"])
         attempts += 1
-        sel = _greedy(pool, n, curves, pc)
-        key = ",".join(sorted(sel))
-        if key not in exclude_sets:
-            break
-        key = None
-    if key is None:
-        raise NotEnoughData("every country set we can build for this topic has already been used")
-    by = {s["iso3"]: s for s in cands}
+        trial = _greedy(pool, n, curves, pc)
+        if ",".join(sorted(trial)) in exclude_sets:
+            problem = problem or "every country set we can build for this topic has already been used"
+            continue
+        why = _variety_problem(trial, by, curves, pc)
+        if why:
+            problem = why
+            continue
+        sel = trial
+        break
+    if sel is None:
+        if problem and problem.startswith("every"):
+            raise NotEnoughData(problem)
+        raise LowVariety(f"low variety: {problem}")
     ordered = sorted(sel, key=lambda iso: by[iso]["score"])  # lowest drama first, best LAST
+
+    # Slow-mo events lengthen the video: drop the least interesting country until it fits.
+    dropped = []
+    vmax = cfg["video"]["max_seconds"]
+    while True:
+        rows = {c: _rows_in(series[c], x0, x1) for c in ordered}
+        tl = build([(c, [y for y, _ in rows[c]], [v for _, v in rows[c]]) for c in ordered], x0, x1, cfg)
+        if tl.duration <= vmax + 1e-6:
+            break
+        if len(ordered) <= pc["min_countries"]:
+            raise NotEnoughData(f"video {tl.duration:.1f}s > {vmax}s even with {len(ordered)} countries")
+        removable = [c for c in ordered
+                     if _variety_problem([x for x in ordered if x != c], by, curves, pc) is None] or ordered
+        drop = min(removable, key=lambda c: by[c]["score"])
+        ordered.remove(drop)
+        dropped.append(drop)
     chosen = [by[i] for i in ordered]
+    key = ",".join(sorted(ordered))
     return {
         "countries": ordered,
         "country_set": key,
-        "n": n,
+        "n": len(ordered),
         "x_start": x0,
         "x_end": x1,
+        "duration_seconds": tl.duration,
+        "dropped_for_length": dropped,
         "min_pairwise_distance": round(min_pairwise(curves, ordered), 4),
         "constraints": {
             "net_up": any(s["net"] > pc["net_up"] for s in chosen),

@@ -1,7 +1,7 @@
-# LoudGraphs build report (2026-10-07)
+# Build report (2026-10-07)
 
 Built on Windows 11, Python 3.11.0 venv (`.venv`), FFmpeg 9.0.2, i5 with 6 threads and 8 GB RAM.
-Everything lives in the project root (`LoudGraphs/`). 15 commits, one or more per milestone (`git log`).
+Everything lives in the project root folder. 15 commits, one or more per milestone (`git log`).
 All publishers stayed in dry-run. No credentials were present, so nothing was posted anywhere.
 
 ## What works

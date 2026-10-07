@@ -28,12 +28,14 @@ def _url(method: str) -> str:
     return f"{get_config()['telegram']['api_base']}/bot{secret('TELEGRAM_BOT_TOKEN')}/{method}"
 
 
-def call(method: str, timeout: float = 30, files=None, **params):
+def call(method: str, http_timeout: float = 30, files=None, **params):
+    """Bot API call. `http_timeout` is the HTTP timeout; Bot API params (incl. getUpdates' own
+    long-poll `timeout`) go in **params."""
     if files:
         data = {k: (json.dumps(v) if isinstance(v, (dict, list)) else v) for k, v in params.items()}
-        r = requests.post(_url(method), data=data, files=files, timeout=timeout)
+        r = requests.post(_url(method), data=data, files=files, timeout=http_timeout)
     else:
-        r = requests.post(_url(method), json=params, timeout=timeout)
+        r = requests.post(_url(method), json=params, timeout=http_timeout)
     try:
         d = r.json()
     except ValueError:
@@ -86,7 +88,7 @@ def send_for_approval(run_id: str) -> None:
     cap = caption(run_id)
     if video.stat().st_size <= MAX_VIDEO_BYTES:
         with open(video, "rb") as f:
-            msg = call("sendVideo", timeout=300, files={"video": ("video.mp4", f, "video/mp4")}, chat_id=chat,
+            msg = call("sendVideo", http_timeout=300, files={"video": ("video.mp4", f, "video/mp4")}, chat_id=chat,
                        caption=cap, supports_streaming="true", width=1080, height=1920,
                        reply_markup=keyboard(run_id))
     else:
@@ -189,6 +191,24 @@ def _scan() -> None:
             actions.publish(r["id"], "bot (approved run not yet published)")
 
 
+def poll_once(timeout: int) -> int:
+    """One getUpdates round using the offset persisted in the DB, so a restart never re-delivers
+    button presses. Returns the number of updates handled."""
+    saved = db.kv_get("telegram_offset")
+    params = {"timeout": timeout, "allowed_updates": ["callback_query", "message"]}
+    if saved:
+        params["offset"] = int(saved)
+    n = 0
+    for u in call("getUpdates", http_timeout=timeout + 15, **params):
+        db.kv_set("telegram_offset", str(u["update_id"] + 1))  # before handling: a crash skips, never repeats
+        if "callback_query" in u:
+            handle_callback(u["callback_query"])
+        elif "message" in u:
+            handle_message(u["message"])
+        n += 1
+    return n
+
+
 def run_bot() -> int:
     db.init()
     tg = enabled()
@@ -200,7 +220,7 @@ def run_bot() -> int:
         log.info("telegram: %s", detail)
         if not ok:
             return 1
-    offset, last_scan = None, 0.0
+    last_scan = 0.0
     timeout = get_config()["telegram"]["poll_timeout"]
     while True:
         try:
@@ -210,15 +230,7 @@ def run_bot() -> int:
             if not tg:
                 time.sleep(30)
                 continue
-            params = {"timeout": timeout, "allowed_updates": ["callback_query", "message"]}
-            if offset is not None:
-                params["offset"] = offset
-            for u in call("getUpdates", timeout=timeout + 15, **params):
-                offset = u["update_id"] + 1
-                if "callback_query" in u:
-                    handle_callback(u["callback_query"])
-                elif "message" in u:
-                    handle_message(u["message"])
+            poll_once(timeout)
         except KeyboardInterrupt:
             log.info("bot stopped")
             return 0

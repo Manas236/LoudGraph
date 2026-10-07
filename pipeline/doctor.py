@@ -94,7 +94,7 @@ def check_credentials() -> list:
 
 
 def doctor() -> int:
-    print(f"LoudGraphs doctor  (root: {ROOT})")
+    print(f"Pipeline doctor  (root: {ROOT})")
     results = []
     for fn in (check_ffmpeg, check_dirs, check_assets, check_render_backend, check_credentials):
         try:

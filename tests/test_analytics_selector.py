@@ -6,8 +6,8 @@ from pipeline.analytics import compute_weights
 NOW = datetime(2026, 10, 7, tzinfo=timezone.utc)
 
 
-def row(topic, views, hours_ago):
-    return {"topic_id": topic, "views": views,
+def row(topic, views, hours_ago, platform="youtube"):
+    return {"topic_id": topic, "views": views, "platform": platform,
             "posted_at": (NOW - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
@@ -17,10 +17,23 @@ def test_weights_shrink_and_age_filter():
             row("c", 999999, 10)]          # too young, ignored
     w = compute_weights(rows, 72, 3, 3, now=NOW)
     assert "c" not in w
-    assert w["a"]["n_posts"] == 3 and w["a"]["weight"] == w["a"]["mean_log_views"]
+    assert w["a"]["n_posts"] == 3 and w["a"]["weight"] == w["a"]["mean_z"]
     # b has 1 post: pulled toward the global mean, so above its own mean
-    assert w["b"]["weight"] > w["b"]["mean_log_views"]
+    assert w["b"]["weight"] > w["b"]["mean_z"]
     assert w["a"]["weight"] > w["b"]["weight"]
+
+
+def test_views_are_zscored_per_platform():
+    """B5: Instagram's bigger raw numbers must not dominate. Topic 'yt' is the best YouTube topic,
+    'ig' is the WORST Instagram topic but has far more raw views than anything on YouTube."""
+    rows = ([row("yt", v, 100, "youtube") for v in (900, 1000, 1100)]
+            + [row("ytlow", v, 100, "youtube") for v in (90, 100, 110)]
+            + [row("ig", v, 100, "instagram") for v in (20000, 21000, 22000)]
+            + [row("igtop", v, 100, "instagram") for v in (200000, 210000, 220000)])
+    w = compute_weights(rows, 72, 3, 3, now=NOW)
+    assert w["yt"]["weight"] > w["ig"]["weight"]
+    assert w["igtop"]["weight"] > w["ig"]["weight"] and w["yt"]["weight"] > w["ytlow"]["weight"]
+    assert abs(w["yt"]["weight"] - w["igtop"]["weight"]) < 0.05   # both are "the best on their platform"
 
 
 def test_retire_after_three_bottom_quartile_posts():

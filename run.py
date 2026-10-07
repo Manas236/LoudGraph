@@ -1,15 +1,17 @@
-"""LoudGraphs CLI.
+"""Data-sonification pipeline CLI.
 
     python run.py doctor
     python run.py fetch [--topic ID] [--force]
     python run.py topics-verify [--force]
     python run.py produce [--count N] [--topic ID]
-    python run.py produce --run RUN_ID --from {fetch,pick,label,render,notify}
+    python run.py produce --run RUN_ID --from {fetch,pick,label,render,notify} [--as-new]
     python run.py bot
     python run.py publish [--run RUN_ID]
     python run.py stats
     python run.py dashboard
     python run.py verify [--run RUN_ID ...]
+    python run.py crash-test
+    python run.py compare --old RUN_ID --new RUN_ID
 """
 from __future__ import annotations
 
@@ -45,7 +47,16 @@ def cmd_topics_verify(a):
 def cmd_produce(a):
     from pipeline import orchestrator
     if a.run:
-        ok = orchestrator.run_pipeline(a.run, from_step=a.from_step or "fetch")
+        step = a.from_step or "fetch"
+        run_id = a.run
+        if a.as_new:
+            run_id = orchestrator.copy_run(a.run, step)
+            log.info("re-rendering %s as new run %s (inputs copied up to %s)", a.run, run_id, step)
+        try:
+            ok = orchestrator.run_pipeline(run_id, from_step=step)
+        except orchestrator.RefuseRerun as e:
+            log.error("refused: %s", e)
+            return 2
         return 0 if ok else 1
     from pipeline.config import get_config
     count = a.count or get_config()["cadence"]["videos_per_day"]
@@ -87,8 +98,23 @@ def cmd_verify(a):
     return 0 if ok else 1
 
 
+def cmd_crash_test(a):
+    import json
+    from pipeline.compare import crash_test
+    res = crash_test()
+    print(json.dumps({k: v for k, v in res.items() if k != "render"}, indent=1))
+    return 0
+
+
+def cmd_compare(a):
+    import json
+    from pipeline.compare import compare_runs
+    print(json.dumps(compare_runs(a.old, a.new), indent=1))
+    return 0
+
+
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="run.py", description="LoudGraphs data-sonification pipeline")
+    p = argparse.ArgumentParser(prog="run.py", description="Data-sonification Shorts/Reels pipeline")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
     s = sub.add_parser("fetch")
@@ -103,6 +129,8 @@ def main(argv=None):
     s.add_argument("--topic", help="force a topic id instead of the selector")
     s.add_argument("--run", help="re-run an existing run")
     s.add_argument("--from", dest="from_step", choices=["fetch", "pick", "label", "render", "notify"])
+    s.add_argument("--as-new", action="store_true",
+                   help="copy the run's inputs into a NEW run and run that (required for published/live runs)")
     s.set_defaults(fn=cmd_produce)
     sub.add_parser("bot").set_defaults(fn=cmd_bot)
     s = sub.add_parser("publish")
@@ -114,6 +142,12 @@ def main(argv=None):
     s.add_argument("--run", nargs="*", help="run ids (default: the most recent rendered runs)")
     s.add_argument("--last", type=int, default=3)
     s.set_defaults(fn=cmd_verify)
+    sub.add_parser("crash-test", help="render out/crash_test.mp4 from a synthetic flat-crash-recover series").set_defaults(
+        fn=cmd_crash_test)
+    s = sub.add_parser("compare", help="old vs new frame + spectrogram for two runs of the same set")
+    s.add_argument("--old", required=True)
+    s.add_argument("--new", required=True)
+    s.set_defaults(fn=cmd_compare)
     a = p.parse_args(argv)
     setup_logging()
     return a.fn(a) or 0

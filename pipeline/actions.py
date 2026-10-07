@@ -52,12 +52,29 @@ def regenerate(run_id: str, by: str) -> str:
     return new_id
 
 
+STEPS = ("fetch", "pick", "label", "render", "notify")
+
+
 def retry(run_id: str, from_step: str, by: str) -> str:
-    if from_step not in ("fetch", "pick", "label", "render", "notify"):
+    """Re-run a run in place from a stage. Refused for published runs / runs with live posts."""
+    from .orchestrator import rerun_blocker
+    if from_step not in STEPS:
         raise ValueError(f"bad step {from_step}")
+    why = rerun_blocker(run_id)
+    if why:
+        raise ValueError(f"refused: {why}. Use 're-render as new run' instead.")
     db.log(run_id, db.get_run(run_id)["stage"], f"retry from {from_step} requested via {by}")
     spawn("produce", "--run", run_id, "--from", from_step)
     return "retrying"
+
+
+def rerender_as_new(run_id: str, from_step: str, by: str) -> str:
+    """Copy the run's inputs (up to from_step) into a new run and produce that one."""
+    if from_step not in STEPS:
+        raise ValueError(f"bad step {from_step}")
+    db.log(run_id, db.get_run(run_id)["stage"], f"re-render as new run from {from_step} requested via {by}")
+    spawn("produce", "--run", run_id, "--from", from_step, "--as-new")
+    return "re-rendering as a new run (see the board)"
 
 
 def publish(run_id: str, by: str) -> str:

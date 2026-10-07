@@ -28,7 +28,7 @@ CSRF = secrets.token_hex(16)
 
 @app.context_processor
 def inject():
-    return {"csrf": CSRF, "brand": get_config()["brand"]["name"], "names": country_by_iso3()}
+    return {"csrf": CSRF, "brand": get_config()["brand"]["name"] or "Pipeline", "names": country_by_iso3()}
 
 
 @app.before_request
@@ -133,6 +133,14 @@ def retry(run_id):
     if step not in STEPS:
         abort(400)
     return _act(run_id, lambda rid, by: actions.retry(rid, step, by), "dashboard")
+
+
+@app.post("/run/<run_id>/rerender")
+def rerender(run_id):
+    step = request.form.get("step", "")
+    if step not in STEPS:
+        abort(400)
+    return _act(run_id, lambda rid, by: actions.rerender_as_new(rid, step, by), "dashboard")
 
 
 @app.post("/run/<run_id>/publish")

@@ -110,7 +110,8 @@ def score_series(rows, start_year: int, min_meaningful: float, cfg: dict | None 
     parts = {
         "swing": min(swing / w["swing_full"], 1.0) * w["swing_max"],
         "reversals": rev_table.get(reversals, w["reversals"]["other"]),
-        "shock": min(shock / w["shock_full"], 1.0) * w["shock_max"],
+        "shock": min(shock / w["shock_full"], 1.0) * w["shock_max"]
+                 * (w.get("noise_shock_factor", 1.0) if reversals >= w.get("noise_reversals", 10 ** 9) else 1.0),
         "smooth": (1.0 - interp) * w["smooth_max"],
     }
     out["parts"] = {k2: round(v, 2) for k2, v in parts.items()}

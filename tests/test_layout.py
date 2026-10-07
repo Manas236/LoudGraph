@@ -1,4 +1,6 @@
-"""Safe zones: no text in the bottom 20% or the right-most 12% (except the watermark)."""
+"""Layout: one centre axis measured in PIXELS, symmetric margins, safe zones, no pill/source/brand."""
+import copy
+
 import numpy as np
 import pytest
 
@@ -8,65 +10,117 @@ from pipeline.canvas import SkiaCanvas, hex_rgb
 from pipeline.config import countries, get_config
 from pipeline.timeline import build
 from pipeline.topics import load_topics
+from pipeline.verify import measure_band
+
+YEARS = list(range(1990, 2024))
+T = np.arange(len(YEARS))
+CENTRED = ["header_band", "dots_band", "country_band", "chart_band", "year_band", "value_band"]
+END = ["end_title_band", "end_rows_band", "end_cta_band"]
 
 
 def test_safe_zone_constants():
-    assert R.SAFE_RIGHT == int(R.W * 0.88) == 950
+    assert R.SAFE_LEFT == R.MARGIN and R.SAFE_RIGHT == R.W - R.MARGIN       # symmetric
+    assert R.MARGIN >= 130
+    assert R.SAFE_RIGHT <= int(R.W * (1 - R.SAFE_RIGHT_FRAC))               # also clears the right 12%
     assert R.SAFE_BOTTOM == int(R.H * 0.80) == 1536
-    assert R.CHART_R <= R.SAFE_RIGHT
-    # every text baseline plus a generous descent stays above the bottom safe line
-    for base, size in [(R.YEAR_BASE, 104), (R.VALUE_BASE, 128), (R.SOURCE_BASE, 26), (R.XLAB_BASE, 26),
-                       (R.END_CTA_BASE, 46), (R.END_SOURCE_BASE, 26)]:
-        assert base + 0.3 * size <= R.SAFE_BOTTOM, base
-    assert R.END_ROWS_B <= R.END_CTA_BASE - 46
-    assert R.PILL_Y >= R.SAFE_TOP
+    assert R.CX == R.W / 2
+    assert (R.PLOT_L, R.PLOT_R) == (R.SAFE_LEFT, R.SAFE_RIGHT)
 
 
-def _views_and_timeline(labelled=True):
-    years = list(range(1990, 2024))
-    t = np.arange(len(years))
-    names = ["GBR", "SAU", "ZAF", "USA", "KOR", "NZL", "IND", "BRA"]  # long names on purpose
-    tl = build([(c, years) for c in names], 1990, 2023)
+def _video(names=("GBR", "SAU", "ZAF", "USA", "KOR", "NZL", "IND", "BRA"), events=True):
     pal = get_config()["render"]["palette"]
     by = {c["iso3"]: c for c in countries()}
+    rows = []
     views = []
     for i, c in enumerate(names):
-        vals = list(1000 + 900 * np.sin(t / (2 + i)) + 40 * t)  # wide values -> wide tick labels
-        lab = {"year": 2008, "label": "Global financial crisis"[:24]} if labelled else None
-        views.append(R.CountryView(iso3=c, name=by[c]["name"], iso2=by[c]["iso2"], color=pal[i], years=years,
-                                   values=vals, label=lab))
+        vals = list(1000 + 900 * np.sin(T / (2 + i)) + 40 * T)
+        if events and i % 2 == 0:
+            vals[20] -= 1600     # a crash -> slow-mo event
+        rows.append((c, YEARS, vals))
+        views.append(R.CountryView(iso3=c, name=by[c]["name"], iso2=by[c]["iso2"], color=pal[i], years=YEARS,
+                                   values=vals, label={"year": 2008, "label": "Global financial crisis"[:24]}))
+    tl = build(rows, 1990, 2023)
     topic = {"id": "t", "title": "What your carbon footprint sounds like",
-             "subtitle": "CO2 from fossil fuels & industry, tonnes per person, every year", "unit_format": "${:,.0f}",
+             "subtitle": "CO2 from fossil fuels & industry, tonnes per person", "unit_format": "${:,.0f}",
              "source": "owid", "start_year": 1990}
     return topic, tl, views
 
 
-@pytest.mark.parametrize("which", ["mid0", "end0", "mid7", "end7", "endcard", "intro"])
-def test_rendered_text_stays_in_safe_zone(tmp_path, which):
-    topic, tl, views = _views_and_timeline()
-    s0, s7 = tl.slots[0], tl.slots[-1]
-    t = {"mid0": (s0.draw_start + s0.draw_end) / 2, "end0": s0.end - 0.01, "mid7": (s7.draw_start + s7.draw_end) / 2,
-         "end7": s7.end - 0.01, "endcard": tl.end_start + 2, "intro": 0.1}[which]
-    boxes = R.render_still(topic, tl, views, t, tmp_path / "f.png")
-    assert boxes
-    for s, x0, y0, x1, y1, tag in boxes:
-        if tag == "watermark":
-            continue
-        assert x0 >= R.SAFE_LEFT - 1 and x1 <= R.SAFE_RIGHT + 1, (tag, s, x0, x1)
-        assert y0 >= R.SAFE_TOP - 1 and y1 <= R.SAFE_BOTTOM + 1, (tag, s, y0, y1)
+def _frames(tl):
+    s3, s4 = tl.slots[3], tl.slots[4]
+    return {"mid": (s3.draw_start + s3.draw_end) / 2,
+            "transition": s4.start + 0.75 * tl.transition,
+            "end": tl.end_start + 2.0}
 
 
-def test_pillow_fallback_renders_in_safe_zone(tmp_path):
-    import copy
+@pytest.mark.parametrize("backend", ["skia", "pillow"])
+def test_every_centred_element_is_on_x540_in_pixels(backend):
+    """A1: render real frames and measure each element's bbox from the IMAGE (non-background pixels),
+    the same way the owner measured the MP4. Centre must be 539.5 +-2 px (pixel centre of 0..1079)
+    and the left/right margins must match within 4 px."""
     cfg = copy.deepcopy(get_config())
-    cfg["render"]["backend"] = "pillow"
-    topic, tl, views = _views_and_timeline()
-    s = tl.slots[3]
-    boxes = R.render_still(topic, tl, views, s.end - 0.01, tmp_path / "p.png", cfg=cfg)
-    assert (tmp_path / "p.png").stat().st_size > 10000
-    for txt, x0, y0, x1, y1, tag in boxes:
-        if tag != "watermark":
-            assert R.SAFE_LEFT - 1 <= x0 and x1 <= R.SAFE_RIGHT + 1 and y1 <= R.SAFE_BOTTOM + 1, (tag, txt)
+    cfg["render"]["backend"] = backend
+    topic, tl, views = _video()
+    r = R.Renderer(topic, tl, views, cfg)
+    for name, t in _frames(tl).items():
+        rgb = r.frame_array(t)
+        bands = END if name == "end" else CENTRED
+        for b in bands:
+            m = measure_band(rgb, *r.L[b])
+            if m is None and name == "transition" and b in ("year_band", "value_band"):
+                continue   # the incoming country's year/value appear with its first note
+            assert m is not None, (name, b)
+            assert abs(m["centre"] - 539.5) <= 2, (backend, name, b, m)
+            assert abs(m["left"] - m["right"]) <= 4, (backend, name, b, m)
+
+
+def test_stack_is_vertically_centred_in_safe_area():
+    topic, tl, views = _video()
+    r = R.Renderer(topic, tl, views)
+    rgb = r.frame_array(_frames(tl)["mid"])
+    rows = np.nonzero((np.abs(rgb.astype(int) - np.array([11, 13, 18])).max(axis=2) > 16).any(axis=1))[0]
+    top, bottom = rows[0], rows[-1]
+    assert bottom < R.SAFE_BOTTOM
+    assert abs(top - (R.SAFE_BOTTOM - 1 - bottom)) <= 40, (top, bottom)
+
+
+@pytest.mark.parametrize("which", ["mid0", "end7", "endcard", "intro", "transition"])
+def test_no_pill_no_source_no_brand_and_text_in_safe_zone(tmp_path, which):
+    topic, tl, views = _video()
+    s0, s7 = tl.slots[0], tl.slots[-1]
+    t = {"mid0": (s0.draw_start + s0.draw_end) / 2, "end7": s7.end - 0.01, "endcard": tl.end_start + 2,
+         "intro": 0.1, "transition": tl.slots[2].start + 0.3}[which]
+    boxes = R.render_still(topic, tl, views, t, tmp_path / "f.png")
+    texts = [b[0] for b in boxes]
+    assert topic["title"] not in texts                       # A2: no title pill
+    assert not any(s.startswith("Source") for s in texts)    # A3: no source line
+    assert not any(b[5] == "watermark" for b in boxes)       # A3: no brand by default
+    for s, x0, y0, x1, y1, tag in boxes:
+        assert R.SAFE_LEFT - 1 <= x0 and x1 <= R.SAFE_RIGHT + 1, (tag, s, x0, x1)
+        assert y1 <= R.SAFE_BOTTOM, (tag, s, y1)
+
+
+def test_header_is_the_metric_and_tick_labels_are_inside_the_chart(tmp_path):
+    topic, tl, views = _video()
+    r = R.Renderer(topic, tl, views)
+    r.draw_frame(_frames(tl)["mid"])
+    boxes = r.cv.text_boxes
+    header = [b for b in boxes if b[5] == "header"]
+    assert " ".join(b[0] for b in header) == topic["subtitle"] and len(header) <= 2
+    ticks = [b for b in boxes if b[5] == "tick"]
+    assert ticks
+    for s, x0, y0, x1, y1, tag in ticks:
+        assert R.PLOT_L <= x0 + 1 and x1 <= R.PLOT_R
+        assert r.L["chart_t"] - 40 <= y0 and y1 <= r.L["chart_b"]
+
+
+def test_brand_draws_only_when_configured(tmp_path):
+    cfg = copy.deepcopy(get_config())
+    assert cfg["brand"]["name"] == ""
+    cfg["brand"]["name"] = "Example Channel"
+    topic, tl, views = _video()
+    boxes = R.render_still(topic, tl, views, 0.1, tmp_path / "b.png", cfg=cfg)
+    assert any(b[5] == "watermark" and b[0] == "Example Channel" for b in boxes)
 
 
 def _luminance(rgb):
@@ -87,11 +141,13 @@ def test_palette_contrast():
         assert ratio >= 4.5, (c, ratio)
 
 
-def test_every_topic_title_and_subtitle_fit():
+def test_every_topic_header_fits_two_lines():
     cv = SkiaCanvas(R.W, R.H, font_files())
     for t in load_topics():
-        assert cv.text_width(t["title"], "bold", 30) <= R.CONTENT_W - 72, t["id"]
-        assert len(cv.wrap(t["subtitle"], "regular", 32, R.CONTENT_W)) <= 2, t["id"]
+        size, lines = R.header_fit(cv, t["subtitle"])
+        assert size >= 34 and 1 <= len(lines) <= 2, t["id"]
+        assert " ".join(lines) == t["subtitle"], t["id"]
+        assert all(cv.text_width(ln, "bold", size) <= R.CONTENT_W for ln in lines), t["id"]
 
 
 def test_flags_present_for_pool():

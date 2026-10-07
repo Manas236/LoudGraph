@@ -1,13 +1,13 @@
 # All tunables for the pipeline. Secrets go in .env, never here.
 
 brand:
-  name: "LoudGraphs"            # watermark + Telegram captions
+  name: ""                      # optional on-screen watermark; empty = nothing is drawn
 
 paths:                          # relative to the project root
   cache: cache
   out: out
   tokens: tokens
-  db: loudgraphs.db
+  db: pipeline.db
   fonts: assets/fonts
   flags: assets/flags
 
@@ -43,6 +43,8 @@ timing:                         # timeline.py is the only consumer; everything e
   transition: 0.4               # whoosh + crossfade at the start of each country
   hold: 0.5                     # line finished, final value on screen
   end_card: 3.5
+  event_threshold: 0.25         # a year-to-year move >= 25% of the country's range is an EVENT
+  event_slowmo: 3.0             # ...and the step into it lasts 3x longer (video + audio)
 
 scorer:
   min_points: 20
@@ -58,6 +60,8 @@ scorer:
     reversals: {0: 8, 1: 25, 2: 30, 3: 25, 4: 15, other: 5}
     shock_max: 25
     shock_full: 0.5             # a single-year move of half the range earns full shock points
+    noise_reversals: 6          # with this many reversals the series is noise...
+    noise_shock_factor: 0.3     # ...and its shock points are scaled down (big jumps are just noise)
     smooth_max: 10              # (1 - interp) * smooth_max
 
 picker:
@@ -68,6 +72,8 @@ picker:
   net_down: -0.5
   reversal_story: 2
   max_attempts: 60              # random restarts when looking for a not-yet-used country set
+  require_falling: true         # no country with net < net_down -> run fails "low variety"
+  min_variety_distance: 0.25    # min pairwise z-distance below this -> run fails "low variety"
 
 topic_cooldown_days: 21         # same topic may come back (with a different set) after this
 
@@ -77,23 +83,41 @@ cadence:
 audio:
   sample_rate: 48000
   scale: minor_pentatonic       # minor_pentatonic | major_pentatonic | natural_minor | dorian | major
-  scale_octaves: 2
+  scale_octaves: 3              # 3 octaves of the scale = 16 notes per country
   # one root per country, cycled. All from A minor pentatonic so the end-card chord of
   # every root has no semitone clashes.
   keys: [A2, C3, E3, G2, D3, A3, E2, G3]
-  pluck_register: [52, 63]      # lowest scale note is moved into this MIDI range
-  pluck_gain: 0.55
-  pluck_t60: 1.2                # seconds for a pluck to decay by 60 dB
-  pluck_length: 0.9
-  pad_gain: 0.16
-  pad_cutoff_hz: 900
-  pad_detune_cents: 9
+  pluck_register: [48, 55]      # lowest scale note is moved into this MIDI range (C3..G3)
+  # --- pluck stem (the lead)
+  pluck_t60: 0.3                # short decay (~250 ms audible) so notes do not smear
+  pluck_length: 0.35
+  pluck_brightness: 0.9         # 1 = raw noise burst (brightest attack)
+  pluck_click: 0.25             # 2 ms high-passed pick transient
+  move_threshold: 0.15          # a move of >= 15% of the range ...
+  move_min_steps: 2             # ... always changes the note by >= 2 scale steps
+  run_max_notes: 9              # event scale run: at most this many notes between old and new note
+  run_gain: 0.75
+  run_t60: 0.18
+  event_note_gain: 1.15         # the arrival note of an event
+  # --- pad stem (follows the data)
+  pad_detune_cents: 3           # total spread of the 3 saws (no audible beating)
+  pad_cutoff_min_hz: 180        # cutoff at the country's minimum value ...
+  pad_cutoff_max_hz: 2200       # ... and at its maximum
+  pad_gain_min: 0.2             # gain at the minimum value (1.0 at the maximum)
+  pad_smooth_s: 0.15
   pad_attack: 0.5
   pad_release: 0.7
-  sub_bass: true
-  sub_gain: 0.10
-  whoosh_gain: 0.22
-  end_chord_gain: 0.20
+  duck_level: 0.05              # after a fall the pad drops to this for duck_seconds ("riser-less silence")
+  duck_seconds: 0.35
+  end_chord_gain: 0.8           # relative to the country pads
+  # --- fx stem (relative levels inside the stem)
+  whoosh_gain: 0.5
+  sub_hit_gain: 1.0             # falls only; sub-bass appears nowhere else
+  accent_gain: 0.7              # jumps only
+  # --- balance: stems are levelled by measured loudness relative to the pluck stem
+  pad_below_pluck_lu: 9         # verification requires >= 6
+  fx_below_pluck_lu: 6
+  # --- master
   target_lufs: -14.0
   true_peak_db: -1.0            # for the delivered MP4
   aac_headroom_db: 0.5          # small margin for AAC rounding (PNS is disabled in render.py, see there)

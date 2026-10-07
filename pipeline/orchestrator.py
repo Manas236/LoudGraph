@@ -82,26 +82,34 @@ def step_label(run_id: str, topic: dict) -> tuple[str, dict]:
 def step_render(run_id: str, topic: dict) -> tuple[str, dict]:
     from . import audio, render
     from .lock import exclusive
-    from .timeline import build
+    from .timeline import build, fits
     d = run_dir(run_id)
     data, p, labels = _read(run_id, "data.json"), _read(run_id, "pick.json"), _read(run_id, "labels.json")
     with exclusive("render", on_wait=lambda: db.log(run_id, "labelled", "waiting for another render to finish")):
         series = data["series"]
-        tl = build([(c, [y for y, _ in series[c] if p["x_start"] <= y <= p["x_end"]]) for c in p["countries"]],
+        rows = {c: [(y, v) for y, v in series[c] if p["x_start"] <= y <= p["x_end"]] for c in p["countries"]}
+        tl = build([(c, [y for y, _ in rows[c]], [v for _, v in rows[c]]) for c in p["countries"]],
                    p["x_start"], p["x_end"])
+        if not fits(tl):
+            raise RuntimeError(f"timeline is {tl.duration:.1f}s with slow-mo events, outside "
+                               f"{get_config()['video']['min_seconds']}-{get_config()['video']['max_seconds']}s; re-pick")
         tl.save(d / "timeline.json")
-        values = {s.iso3: [dict((y, v) for y, v in series[s.iso3])[y] for y in s.years] for s in tl.slots}
-        wav, ainfo = audio.synthesize(tl, values, seed=zlib.crc32(run_id.encode()))
+        values = {s.iso3: [dict(rows[s.iso3])[y] for y in s.years] for s in tl.slots}
+        wav, stems, ainfo = audio.synthesize(tl, values, seed=zlib.crc32(run_id.encode()))
         audio.write_wav(d / "audio.wav", wav, ainfo["sample_rate"])
+        for name, x in stems.items():
+            audio.write_wav(d / f"{name}.wav", x, ainfo["sample_rate"])
         _write(run_id, "audio.json", ainfo)
         views = render.build_views(topic, p, data, labels, tl)
         info = render.render_video(topic, tl, views, d / "audio.wav", d / "video.mp4", thumb=d / "thumb.jpg")
         meta = render.build_meta(run_id, topic, data, p, labels, views, tl, ainfo)
         meta["render"] = info
         _write(run_id, "meta.json", meta)
-    msg = (f"rendered {tl.n_frames} frames ({tl.n_frames / tl.fps:.1f}s) with {info['backend']} backend "
-           f"[{info['backend_note']}] in {info['render_seconds']}s; audio {ainfo['lufs']} LUFS, "
-           f"true peak {ainfo['true_peak_db']} dBTP")
+    n_ev = sum(len(s.events) for s in tl.slots)
+    msg = (f"rendered {tl.n_frames} frames ({tl.n_frames / tl.fps:.1f}s, {n_ev} slow-mo events) with "
+           f"{info['backend']} backend [{info['backend_note']}] in {info['render_seconds']}s; audio "
+           f"{ainfo['lufs']} LUFS, true peak {ainfo['true_peak_db']} dBTP, pluck stem "
+           f"{ainfo['pluck_minus_pad_lu']} LU above pad")
     return msg, {}
 
 
@@ -118,6 +126,43 @@ def _telegram_on() -> bool:
 
 
 STEP_FN = {"fetch": step_fetch, "pick": step_pick, "label": step_label, "render": step_render, "notify": step_notify}
+LIVE = {"uploaded", "live", "private_locked"}
+INPUTS = {"pick": ["data.json", "scores.json"], "label": ["data.json", "scores.json", "pick.json"],
+          "render": ["data.json", "scores.json", "pick.json", "labels.json"],
+          "notify": ["data.json", "scores.json", "pick.json", "labels.json", "timeline.json", "audio.wav",
+                     "pluck.wav", "pad.wav", "fx.wav", "audio.json", "video.mp4", "meta.json", "thumb.jpg"]}
+
+
+class RefuseRerun(RuntimeError):
+    pass
+
+
+def rerun_blocker(run_id: str) -> str | None:
+    """A run that is published or has a live post must never be re-rendered in place."""
+    run = db.get_run(run_id)
+    if run["stage"] in ("published", "publishing"):
+        return f"run {run_id} is {run['stage']}"
+    live = [p["platform"] for p in db.get_posts(run_id) if p["status"] in LIVE]
+    if live:
+        return f"run {run_id} has live posts on {', '.join(live)}"
+    return None
+
+
+def copy_run(run_id: str, from_step: str) -> str:
+    """New run with the same topic whose inputs up to `from_step` are copied from `run_id`."""
+    import shutil
+    src = db.get_run(run_id)
+    new_id = db.create_run(src["topic_id"], regen_of=run_id)
+    sd, nd = run_dir(run_id), run_dir(new_id)
+    for name in INPUTS.get(from_step, []):
+        if (sd / name).exists():
+            shutil.copy2(sd / name, nd / name)
+    fields = {}
+    for step in STEPS[:STEPS.index(from_step)]:
+        if step == "pick":
+            fields = {"countries": src["countries"], "country_set": src["country_set"], "score": src["score"]}
+        db.transition(new_id, AFTER[step], f"copied {step} outputs from {run_id}", **(fields if step == "pick" else {}))
+    return new_id
 
 
 def run_pipeline(run_id: str, from_step: str = "fetch") -> bool:
@@ -126,6 +171,11 @@ def run_pipeline(run_id: str, from_step: str = "fetch") -> bool:
     if not run:
         raise SystemExit(f"no run {run_id}")
     topic = get_topic(run["topic_id"])
+    why = rerun_blocker(run_id)
+    if why:
+        db.log(run_id, run["stage"], f"refused to re-run from {from_step}: {why}")
+        raise RefuseRerun(f"{why}; re-render it as a new run instead "
+                          f"(python run.py produce --run {run_id} --from {from_step} --as-new)")
     if run["stage"] != BEFORE[from_step]:
         db.transition(run_id, BEFORE[from_step], f"retry from {from_step}", reset=True)
     for step in STEPS[STEPS.index(from_step):]:

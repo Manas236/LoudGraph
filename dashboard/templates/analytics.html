@@ -16,7 +16,7 @@
 {% else %}<p class="muted">No posts yet. Stats are pulled daily by <code>python run.py stats</code>.</p>{% endif %}
 
 <h3 class="muted" style="margin-top:28px">Topic weights</h3>
-<p class="small muted">Weight = mean log(views) of a topic's posts older than 72 h, shrunk toward the global mean below 3 posts.
+<p class="small muted">Weight = mean z-score of log(views) (z-scored within each platform) of a topic's posts older than 72 h, shrunk toward the global mean below 3 posts.
   The selector picks 70% by weight and 30% from the least-tried topics.</p>
 {% if weights %}
 <table><tr><th>Topic</th><th>Weight</th><th>Mean log views</th><th>Posts</th><th>Retired</th><th>Updated</th></tr>

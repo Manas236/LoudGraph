@@ -71,6 +71,59 @@ def test_not_enough_data():
 
 
 def test_five_passing_is_allowed():
-    series, scored = make_pool(n=5)
-    r = pick(scored, series, TOPIC)
+    rng = np.random.default_rng(1)
+    crash = 50 + 0.6 * T
+    crash[20:] -= 25
+    shapes = [10 + 0.8 * T, 60 - 0.9 * T, 30 + 10 * np.sin(T / 3), np.abs(T - 12) * 1.5 + 15, crash]
+    series = {f"F{i}": [[y, float(x)] for y, x in zip(YEARS, v + rng.normal(0, 0.3, len(T)))]
+              for i, v in enumerate(shapes)}
+    r = pick(_scored(series), series, TOPIC)
     assert r["n"] == 5
+
+
+def _scored(series):
+    out = []
+    for iso, rows in series.items():
+        s = score_series(rows, 1990, 0.1)
+        s["iso3"] = iso
+        out.append(s)
+    return out
+
+
+def test_low_variety_when_nothing_falls():
+    """B2: no country with net < -0.5 -> the run must fail as low variety, not render a bland set."""
+    from pipeline.picker import LowVariety
+    rng = np.random.default_rng(3)
+    series = {f"R{i:02d}": [[y, float(x)] for y, x in zip(YEARS, 10 + (0.5 + 0.05 * i) * T + 3 * np.sin(T / (2 + i))
+                                                         + rng.normal(0, 0.3, len(T)))] for i in range(12)}
+    with pytest.raises(LowVariety, match="low variety: no falling country"):
+        pick(_scored(series), series, TOPIC)
+
+
+def test_low_variety_when_shapes_are_alike():
+    from pipeline.picker import LowVariety
+    rng = np.random.default_rng(4)
+    base = np.abs(T - 17) * 1.5 + 20
+    series = {}
+    for i in range(12):   # the same V (with a falling tail) for everyone
+        v = base.copy()
+        v[25:] = v[25] - (T[25:] - 25) * 4
+        series[f"S{i:02d}"] = [[y, float(x)] for y, x in zip(YEARS, v * (1 + 0.01 * i) + rng.normal(0, 0.2, len(T)))]
+    with pytest.raises(LowVariety, match="shapes too alike"):
+        pick(_scored(series), series, TOPIC)
+
+
+def test_drops_countries_when_slowmo_makes_it_too_long():
+    rng = np.random.default_rng(5)
+    series = {}
+    for i in range(16):   # every series has several >= 25% one-year moves (events)
+        v = 50 + 30 * np.sign(np.sin(T / (1.6 + 0.1 * i))) + rng.normal(0, 0.5, len(T))
+        if i % 3 == 0:
+            v = v - 2.5 * T          # falling ones
+        elif i % 3 == 1:
+            v = v + 2.5 * T          # rising ones
+        series[f"E{i:02d}"] = [[y, float(x)] for y, x in zip(YEARS, v)]
+    r = pick(_scored(series), series, TOPIC)
+    assert r["duration_seconds"] <= 45 + 1e-6
+    assert r["dropped_for_length"] and r["n"] < 8
+    assert r["constraints"]["net_down"]

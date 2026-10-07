@@ -3,7 +3,7 @@
 YouTube Data API -> views; YouTube Analytics API -> averageViewPercentage;
 Instagram media insights -> views / reach / likes / comments (metric names verified against the
 Meta docs on 2026-10-07: `plays` is gone, `views` is current). Then topic weights are recomputed
-and a daily summary goes to Telegram.
+(views z-scored per platform) and a daily summary goes to Telegram.
 """
 from __future__ import annotations
 
@@ -92,27 +92,37 @@ def fetch_instagram() -> int:
 
 def compute_weights(rows: list[dict], min_age_hours: float, shrink_n: int, retire_after: int,
                     now: datetime | None = None) -> dict[str, dict]:
-    """rows: latest stats per post with topic_id, views, posted_at (ISO Z).
-    weight = mean log(views) of a topic's posts older than min_age_hours, shrunk toward the global
-    mean when it has fewer than shrink_n posts. A topic is retired when it has >= retire_after posts
-    and all of them are in the bottom quartile of views."""
+    """rows: latest stats per post with topic_id, platform, views, posted_at (ISO Z).
+
+    Views are compared WITHIN each platform first: log(views) is z-scored per platform, so one
+    platform's scale cannot dominate. weight = mean z of a topic's posts older than min_age_hours,
+    shrunk toward the global mean when it has fewer than shrink_n posts. A topic is retired when it
+    has >= retire_after posts and every one of them is in the bottom quartile of its platform."""
     now = now or datetime.now(timezone.utc)
     ok = [r for r in rows if r.get("views") is not None
           and (now - db.parse_ts(r["posted_at"])).total_seconds() >= min_age_hours * 3600]
     if not ok:
         return {}
-    logs = {id(r): math.log1p(r["views"]) for r in ok}
-    g = float(np.mean(list(logs.values())))
-    q1 = float(np.percentile([r["views"] for r in ok], 25))
+    z, q1 = {}, {}
+    for plat in {r.get("platform", "") for r in ok}:
+        mine = [r for r in ok if r.get("platform", "") == plat]
+        logs = np.array([math.log1p(r["views"]) for r in mine])
+        mu, sd = float(logs.mean()), float(logs.std())
+        for r, x in zip(mine, logs):
+            z[id(r)] = (x - mu) / sd if sd > 0 else 0.0
+        q1[plat] = float(np.percentile([r["views"] for r in mine], 25))
+    g = float(np.mean(list(z.values())))
     out = {}
     for tid in sorted({r["topic_id"] for r in ok}):
         mine = [r for r in ok if r["topic_id"] == tid]
         n = len(mine)
-        m = float(np.mean([logs[id(r)] for r in mine]))
+        m = float(np.mean([z[id(r)] for r in mine]))
         w = m if n >= shrink_n else (n * m + (shrink_n - n) * g) / shrink_n
-        retired = n >= retire_after and all(r["views"] <= q1 for r in mine)
-        out[tid] = {"weight": round(w, 4), "n_posts": n, "mean_log_views": round(m, 4), "retired": retired,
-                    "retired_reason": f"{n} posts all in bottom quartile (<= {q1:.0f} views)" if retired else None}
+        retired = n >= retire_after and all(r["views"] <= q1[r.get("platform", "")] for r in mine)
+        out[tid] = {"weight": round(w, 4), "n_posts": n,
+                    "mean_log_views": round(float(np.mean([math.log1p(r["views"]) for r in mine])), 4),
+                    "mean_z": round(m, 4), "retired": retired,
+                    "retired_reason": f"{n} posts all in the bottom quartile of their platform" if retired else None}
     return out
 
 

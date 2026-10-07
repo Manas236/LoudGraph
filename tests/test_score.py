@@ -64,8 +64,7 @@ def test_v_shape_scores_one_reversal_and_beats_monotone_and_noise():
     noisy = S(20 + rng.normal(0, 4, len(T)))
     assert noisy["ok"] and noisy["reversals"] >= 6
     assert sv["score"] > mono["score"]
-    # Spec weights: noise gets the minimum reversal points. (Its big year-to-year jumps still earn
-    # shock points, so pure white noise can tie a clean V on total score; see REPORT known weaknesses.)
+    # noise gets the minimum reversal points (and, since fix pass 01, damped shock points)
     assert noisy["parts"]["reversals"] == 5
     assert sv["parts"]["reversals"] - noisy["parts"]["reversals"] == 20
 
@@ -90,3 +89,15 @@ def test_zigzag_counts():
     y = np.array([0, 5, 10, 5, 0, 5, 10], dtype=float)
     piv, rev = zigzag(y, 3)
     assert rev == 2 and piv == [0, 2, 4, 6]
+
+
+def test_noise_scores_clearly_below_v_and_crash():
+    """B1: with >= 6 reversals the shock points are scaled down, so white noise no longer ties a story."""
+    r = np.random.default_rng(7)
+    noisy = [S(20 + r.normal(0, 4, len(T)))["score"] for _ in range(5)]
+    v = S(np.abs(T - 17) * 1.5 + 20 + r.normal(0, 0.3, len(T)))["score"]
+    c = 50 + 0.6 * T
+    c[20:] -= 25
+    crash = S(c + r.normal(0, 0.2, len(T)))["score"]
+    assert max(noisy) < v - 10, (noisy, v)
+    assert max(noisy) < crash - 10, (noisy, crash)

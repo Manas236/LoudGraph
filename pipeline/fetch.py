@@ -24,7 +24,7 @@ import requests
 from .config import country_by_iso3, get_config, path
 
 log = logging.getLogger(__name__)
-UA = {"User-Agent": "LoudGraphs/1.0 (data sonification; contact via repo owner)"}
+UA = {"User-Agent": "data-sonification-pipeline/1.0 (contact via repo owner)"}
 
 
 class FetchError(RuntimeError):
