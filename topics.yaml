@@ -1,0 +1,428 @@
+# Curated topics. `python run.py topics-verify` fetches every active topic and comments out
+# (with a reason) any that cannot produce a video. Keep each topic block starting with "- id:".
+#
+# source: worldbank -> code is a WDI indicator code
+# source: owid      -> code is "<grapher-slug>/<column>" or "github:<energy-data|co2-data>/<column>"
+# subtitle is shown on screen and must say what the number IS.
+# value_scale (optional) multiplies raw values before unit_format, e.g. 1.0e-6 for millions.
+# category is used only for the dashboard.
+
+# ------------------------------------------------------------------ economy
+- id: inflation
+  category: economy
+  source: worldbank
+  code: FP.CPI.TOTL.ZG
+  title: "If inflation had a sound"
+  subtitle: "Consumer prices, % rise vs the year before"
+  unit_format: "{:.1f}%"
+  start_year: 1990
+  min_meaningful: 2.0
+  modelled_data_warning: false
+
+- id: gdp_growth
+  category: economy
+  source: worldbank
+  code: NY.GDP.MKTP.KD.ZG
+  title: "Every boom and bust, as music"
+  subtitle: "Real GDP growth, % per year"
+  unit_format: "{:+.1f}%"
+  start_year: 1990
+  min_meaningful: 1.0
+  modelled_data_warning: false
+
+- id: gdp_per_capita
+  category: economy
+  source: worldbank
+  code: NY.GDP.PCAP.KD
+  title: "What getting richer sounds like"
+  subtitle: "GDP per person, constant 2015 US dollars"
+  unit_format: "${:,.0f}"
+  start_year: 1990
+  min_meaningful: 100
+  modelled_data_warning: false
+
+- id: unemployment
+  category: economy
+  source: worldbank
+  code: SL.UEM.TOTL.ZS
+  title: "If unemployment had a sound"
+  subtitle: "Unemployed, % of the labour force"
+  unit_format: "{:.1f}%"
+  start_year: 1991
+  min_meaningful: 2.0
+  modelled_data_warning: true
+
+- id: military_spending
+  category: economy
+  source: worldbank
+  code: MS.MIL.XPND.GD.ZS
+  title: "The sound of countries arming up"
+  subtitle: "Military spending, % of GDP"
+  unit_format: "{:.1f}%"
+  start_year: 1990
+  min_meaningful: 1.0
+  modelled_data_warning: false
+
+- id: remittances
+  category: economy
+  source: worldbank
+  code: BX.TRF.PWKR.DT.GD.ZS
+  title: "Money migrants send home, as music"
+  subtitle: "Remittances received, % of GDP"
+  unit_format: "{:.1f}%"
+  start_year: 1990
+  min_meaningful: 1.0
+  modelled_data_warning: false
+
+- id: manufacturing_share
+  category: economy
+  source: worldbank
+  code: NV.IND.MANF.ZS
+  title: "The sound of factories leaving"
+  subtitle: "Manufacturing, % of GDP"
+  unit_format: "{:.1f}%"
+  start_year: 1990
+  min_meaningful: 2.0
+  modelled_data_warning: false
+
+- id: tourism_arrivals
+  category: economy
+  source: worldbank
+  code: ST.INT.ARVL
+  title: "The year tourism went silent"
+  subtitle: "International tourist arrivals per year"
+  unit_format: "{:.1f}M"
+  value_scale: 1.0e-6
+  start_year: 1995
+  min_meaningful: 500000
+  modelled_data_warning: false
+
+# ------------------------------------------------------------------ people
+# DROPPED 2026-10-07: fetch failed: WDI code SP.DYN.TFR.IN not found: APIError: JSON decoding error (https://api.worldbank.org/v2/en/sources/2/series/SP.DYN.TFR.IN?page=1&format=json&per_page=1)
+# - id: fertility_rate
+#   category: people
+#   source: worldbank
+#   code: SP.DYN.TFR.IN
+#   title: "Babies per woman, as music"
+#   subtitle: "Average births per woman (fertility rate)"
+#   unit_format: "{:.2f}"
+#   start_year: 1990
+#   min_meaningful: 1.0
+#   modelled_data_warning: false
+
+- id: fertility_rate_un
+  category: people
+  source: owid
+  code: children-per-woman-un/fertility_rate__sex_all__age_all__variant_estimates
+  title: "Babies per woman, as music"
+  subtitle: "Average births per woman (fertility rate)"
+  unit_format: "{:.2f}"
+  start_year: 1990
+  min_meaningful: 1.0
+  modelled_data_warning: true
+
+- id: female_labour_participation
+  category: people
+  source: worldbank
+  code: SL.TLF.CACT.FE.ZS
+  title: "If working women had sound"
+  subtitle: "% of women 15+ in the workforce"
+  unit_format: "{:.1f}%"
+  start_year: 1990
+  min_meaningful: 2.0
+  modelled_data_warning: true
+
+- id: population_growth
+  category: people
+  source: worldbank
+  code: SP.POP.GROW
+  title: "The sound of a population shrinking"
+  subtitle: "Population growth, % per year"
+  unit_format: "{:+.2f}%"
+  start_year: 1990
+  min_meaningful: 0.5
+  modelled_data_warning: false
+
+- id: net_migration
+  category: people
+  source: worldbank
+  code: SM.POP.NETM
+  title: "Where people move to, as music"
+  subtitle: "Net migration: people arriving minus leaving"
+  unit_format: "{:+,.0f}K"
+  value_scale: 1.0e-3
+  start_year: 1990
+  min_meaningful: 20000
+  modelled_data_warning: true
+
+- id: median_age
+  category: people
+  source: owid
+  code: median-age/median_age__sex_all__age_all__variant_estimates
+  title: "How fast countries are ageing"
+  subtitle: "Median age of the population, years"
+  unit_format: "{:.1f}"
+  start_year: 1990
+  min_meaningful: 10
+  modelled_data_warning: true
+
+# DROPPED 2026-10-07: fetch failed: WDI code SM.POP.REFG.OR not found: APIError: JSON decoding error (https://api.worldbank.org/v2/en/sources/2/series/SM.POP.REFG.OR?page=1&format=json&per_page=1)
+# - id: refugees_by_origin
+#   category: people
+#   source: worldbank
+#   code: SM.POP.REFG.OR
+#   title: "The sound of people fleeing"
+#   subtitle: "Refugees who fled from this country"
+#   unit_format: "{:,.0f}K"
+#   value_scale: 1.0e-3
+#   start_year: 1990
+#   min_meaningful: 20000
+#   modelled_data_warning: false
+
+# ------------------------------------------------------------------ health
+- id: life_expectancy
+  category: health
+  source: owid
+  code: life-expectancy/life_expectancy_0
+  title: "What a lifetime sounds like"
+  subtitle: "Life expectancy at birth, years"
+  unit_format: "{:.1f} yrs"
+  start_year: 1990
+  min_meaningful: 20
+  modelled_data_warning: false
+
+- id: child_mortality
+  category: health
+  source: owid
+  code: child-mortality/child_mortality_rate
+  title: "The sound of fewer children dying"
+  subtitle: "% of newborns who die before age 5"
+  unit_format: "{:.1f}%"
+  start_year: 1990
+  min_meaningful: 0.5
+  modelled_data_warning: true
+
+- id: health_spending
+  category: health
+  source: worldbank
+  code: SH.XPD.CHEX.GD.ZS
+  title: "What countries spend on health"
+  subtitle: "Health spending, % of GDP"
+  unit_format: "{:.1f}%"
+  start_year: 2000
+  min_meaningful: 1.0
+  modelled_data_warning: false
+
+- id: alcohol_consumption
+  category: health
+  source: owid
+  code: total-alcohol-consumption-per-capita-litres-of-pure-alcohol/sh_alc_pcap_li
+  title: "If drinking had a sound"
+  subtitle: "Litres of pure alcohol per person 15+, per year"
+  unit_format: "{:.1f} L"
+  start_year: 2000
+  min_meaningful: 1.0
+  modelled_data_warning: true
+
+- id: homicide_rate
+  category: health
+  source: owid
+  code: homicide-rate-unodc/value__category_total__sex_total__age_total__unit_of_measurement_rate_per_100_000_population
+  title: "Murder rates, played as music"
+  subtitle: "Homicides per 100,000 people per year"
+  unit_format: "{:.1f}"
+  start_year: 1995
+  min_meaningful: 1.0
+  modelled_data_warning: false
+
+- id: meat_supply
+  category: health
+  source: owid
+  code: meat-supply-per-person/meat__total__00002943__food_available_for_consumption__0645pc__kilograms_per_year_per_capita
+  title: "How much meat each country eats"
+  subtitle: "Meat supplied per person, kg per year"
+  unit_format: "{:.0f} kg"
+  start_year: 1990
+  min_meaningful: 5
+  modelled_data_warning: false
+
+# ------------------------------------------------------------------ energy
+- id: nuclear_share
+  category: energy
+  source: owid
+  code: github:energy-data/nuclear_share_elec
+  title: "The rise and fall of nuclear power"
+  subtitle: "Nuclear, % of electricity generated"
+  unit_format: "{:.1f}%"
+  start_year: 1990
+  min_meaningful: 2.0
+  modelled_data_warning: false
+
+- id: coal_share
+  category: energy
+  source: owid
+  code: github:energy-data/coal_share_elec
+  title: "The sound of coal power"
+  subtitle: "Coal, % of electricity generated"
+  unit_format: "{:.1f}%"
+  start_year: 1990
+  min_meaningful: 2.0
+  modelled_data_warning: false
+
+- id: renewables_share
+  category: energy
+  source: owid
+  code: github:energy-data/renewables_share_elec
+  title: "The sound of the green switch"
+  subtitle: "Renewables, % of electricity generated"
+  unit_format: "{:.1f}%"
+  start_year: 1990
+  min_meaningful: 2.0
+  modelled_data_warning: false
+
+- id: solar_share
+  category: energy
+  source: owid
+  code: github:energy-data/solar_share_elec
+  title: "If solar power had a sound"
+  subtitle: "Solar, % of electricity generated"
+  unit_format: "{:.1f}%"
+  start_year: 2005
+  min_meaningful: 2.0
+  modelled_data_warning: false
+
+- id: hydro_share
+  category: energy
+  source: owid
+  code: github:energy-data/hydro_share_elec
+  title: "Rain, drought and dams, as music"
+  subtitle: "Hydropower, % of electricity generated"
+  unit_format: "{:.1f}%"
+  start_year: 1990
+  min_meaningful: 2.0
+  modelled_data_warning: false
+
+- id: oil_per_capita
+  category: energy
+  source: owid
+  code: github:energy-data/oil_energy_per_capita
+  title: "How much oil each person burns"
+  subtitle: "Oil energy used per person, kWh per year"
+  unit_format: "{:,.0f}"
+  start_year: 1990
+  min_meaningful: 500
+  modelled_data_warning: false
+
+# ------------------------------------------------------------------ tech
+- id: internet_users
+  category: tech
+  source: worldbank
+  code: IT.NET.USER.ZS
+  title: "The sound of the world going online"
+  subtitle: "% of people using the internet"
+  unit_format: "{:.0f}%"
+  start_year: 1995
+  min_meaningful: 2.0
+  modelled_data_warning: false
+
+- id: mobile_subscriptions
+  category: tech
+  source: worldbank
+  code: IT.CEL.SETS.P2
+  title: "If mobile phones had a sound"
+  subtitle: "Mobile subscriptions per 100 people"
+  unit_format: "{:.0f}"
+  start_year: 1995
+  min_meaningful: 5
+  modelled_data_warning: false
+
+- id: landlines
+  category: tech
+  source: worldbank
+  code: IT.MLT.MAIN.P2
+  title: "The sound of the landline dying"
+  subtitle: "Fixed phone lines per 100 people"
+  unit_format: "{:.1f}"
+  start_year: 1990
+  min_meaningful: 2.0
+  modelled_data_warning: false
+
+- id: broadband
+  category: tech
+  source: worldbank
+  code: IT.NET.BBND.P2
+  title: "Home broadband, as music"
+  subtitle: "Fixed broadband subscriptions per 100 people"
+  unit_format: "{:.1f}"
+  start_year: 2001
+  min_meaningful: 2.0
+  modelled_data_warning: false
+
+- id: rnd_spending
+  category: tech
+  source: worldbank
+  code: GB.XPD.RSDV.GD.ZS
+  title: "Who is investing in the future?"
+  subtitle: "Research & development spending, % of GDP"
+  unit_format: "{:.2f}%"
+  start_year: 1996
+  min_meaningful: 0.3
+  modelled_data_warning: false
+
+# ------------------------------------------------------------------ planet
+- id: co2_per_capita
+  category: planet
+  source: owid
+  code: github:co2-data/co2_per_capita
+  title: "What your carbon footprint sounds like"
+  subtitle: "CO2 from fossil fuels & industry, tonnes per person"
+  unit_format: "{:.1f} t"
+  start_year: 1990
+  min_meaningful: 0.5
+  modelled_data_warning: false
+
+- id: temperature_anomaly
+  category: planet
+  source: owid
+  code: annual-temperature-anomalies/temperature_anomaly
+  title: "The sound of a warming planet"
+  subtitle: "Average temperature vs 1991-2020 mean, °C"
+  unit_format: "{:+.2f}°C"
+  start_year: 1990
+  min_meaningful: 0.3
+  modelled_data_warning: false
+
+- id: air_passengers
+  category: planet
+  source: worldbank
+  code: IS.AIR.PSGR
+  title: "The year flying stopped"
+  subtitle: "Passengers flown by each country's airlines"
+  unit_format: "{:.1f}M"
+  value_scale: 1.0e-6
+  start_year: 1995
+  min_meaningful: 1000000
+  modelled_data_warning: false
+
+# DROPPED 2026-10-07: only 0 countries pass the interestingness scorer (need 5)
+# - id: forest_area
+#   category: planet
+#   source: worldbank
+#   code: AG.LND.FRST.ZS
+#   title: "The sound of disappearing forests"
+#   subtitle: "Forest, % of land area"
+#   unit_format: "{:.1f}%"
+#   start_year: 1990
+#   min_meaningful: 2.0
+#   modelled_data_warning: true
+
+- id: cereal_yield
+  category: planet
+  source: worldbank
+  code: AG.YLD.CREL.KG
+  title: "Every good and bad harvest, as music"
+  subtitle: "Cereal harvest, kg per hectare"
+  unit_format: "{:,.0f}"
+  start_year: 1990
+  min_meaningful: 300
+  modelled_data_warning: false
