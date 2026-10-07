@@ -1,0 +1,19 @@
+<div class="board">
+{% for s in stages %}
+  <div class="col {{ s }}">
+    <h3><span>{{ s.replace('_', ' ') }}</span><span>{{ cols[s]|length }}</span></h3>
+    {% for r in cols[s][:25] %}
+      <a class="card" href="{{ url_for('run_detail', run_id=r.id) }}">
+        {% if r.has_thumb and s in ('rendered','awaiting_approval','approved','publishing','published','rejected') %}
+          <img src="{{ url_for('media', run_id=r.id, name='thumb.jpg') }}" alt="">
+        {% endif %}
+        <div><b>{{ r.topic_id }}</b></div>
+        <div class="small muted">{{ r.id }}</div>
+        <div class="small">{{ r.countries|length }} countries{% if r.score %} · score {{ r.score }}{% endif %}</div>
+        {% if r.stage == 'failed' %}<div class="small" style="color:var(--bad)">{{ r.failed_stage }}: {{ (r.error or '')[:90] }}</div>{% endif %}
+        <div class="small muted">{{ r.updated_at|ago }}</div>
+      </a>
+    {% endfor %}
+  </div>
+{% endfor %}
+</div>

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Topics{% endblock %}
+{% block body %}
+<h3 class="muted">Active topics ({{ items|length }})</h3>
+<table>
+  <tr><th>Topic</th><th>Category</th><th>Source</th><th>Verification</th><th>Passing countries</th><th>Latest year</th><th>Runs</th><th>Cooldown</th><th>Weight</th></tr>
+  {% for i in items %}
+  <tr>
+    <td><b>{{ i.t.id }}</b><div class="small muted">{{ i.t.title }}</div><div class="small muted">{{ i.t.subtitle }}</div></td>
+    <td>{{ i.t.category or '' }}</td>
+    <td class="small">{{ i.t.source }}<br><span class="muted">{{ i.t.code }}</span>{% if i.t.modelled_data_warning %}<br><span class="pill warn">modelled</span>{% endif %}</td>
+    <td>{% if i.v.status == 'verified' %}<span class="pill ok">verified</span>{% elif i.v.status %}<span class="pill bad">{{ i.v.status }}</span>{% else %}<span class="pill warn">not verified</span>{% endif %}
+        <div class="small muted">{{ i.v.verified_at or '' }}</div></td>
+    <td>{{ i.v.passing if i.v.passing is defined else '—' }} <span class="small muted">/ {{ i.v.usable if i.v.usable is defined else '—' }} usable</span></td>
+    <td>{{ i.v.latest_year or '—' }}</td>
+    <td>{{ i.runs }}<div class="small muted">{{ i.last|ago if i.last else '' }}</div></td>
+    <td>{% if i.cool %}<span class="pill warn">{{ i.cool }} days left</span>{% else %}<span class="pill ok">ready</span>{% endif %}</td>
+    <td>{% if i.w %}{{ i.w.weight }}{% if i.w.retired %} <span class="pill bad">retired</span>{% endif %}{% else %}—{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h3 class="muted" style="margin-top:28px">Dropped by topics-verify ({{ dropped|length }})</h3>
+<table><tr><th>Topic</th><th>Date</th><th>Reason</th></tr>
+  {% for d in dropped %}<tr><td>{{ d.id }}</td><td class="small">{{ d.date }}</td><td class="small">{{ d.reason }}</td></tr>{% endfor %}
+</table>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Pipeline{% endblock %}
+{% block body %}
+<style>
+  .board { display:flex; gap:10px; overflow-x:auto; padding-bottom:10px; }
+  .col { min-width:190px; flex:1 0 190px; background:var(--panel); border-radius:8px; padding:8px; }
+  .col h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); display:flex; justify-content:space-between; }
+  .card { display:block; background:#1b202b; border:1px solid var(--line); border-radius:6px; padding:8px; margin-bottom:8px; color:var(--text); }
+  .card:hover { border-color:var(--accent); }
+  .card img { width:100%; border-radius:4px; margin-bottom:6px; aspect-ratio:9/16; object-fit:cover; max-height:160px; }
+  .col.awaiting_approval { outline:1px solid #1e6b4f; } .col.failed h3 { color:var(--bad); }
+</style>
+<p class="muted small">Auto-refreshes every 5 s.</p>
+<div id="board">{% include "_board_cols.html" %}</div>
+<script>
+  setInterval(async () => {
+    try {
+      const r = await fetch("{{ url_for('board_fragment') }}");
+      if (r.ok) document.getElementById("board").innerHTML = await r.text();
+    } catch (e) {}
+  }, 5000);
+</script>
+{% endblock %}
