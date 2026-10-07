@@ -3,7 +3,7 @@
     python run.py doctor
     python run.py fetch [--topic ID] [--force]
     python run.py topics-verify [--force]
-    python run.py produce --count N [--topic ID]
+    python run.py produce [--count N] [--topic ID]
     python run.py produce --run RUN_ID --from {fetch,pick,label,render,notify}
     python run.py bot
     python run.py publish [--run RUN_ID]
@@ -47,8 +47,10 @@ def cmd_produce(a):
     if a.run:
         ok = orchestrator.run_pipeline(a.run, from_step=a.from_step or "fetch")
         return 0 if ok else 1
-    done = orchestrator.produce(count=a.count, topic_id=a.topic)
-    return 0 if len(done) == a.count else 1
+    from pipeline.config import get_config
+    count = a.count or get_config()["cadence"]["videos_per_day"]
+    done = orchestrator.produce(count=count, topic_id=a.topic)
+    return 0 if len(done) == count else 1
 
 
 def cmd_bot(a):
@@ -97,7 +99,7 @@ def main(argv=None):
     s.add_argument("--force", action="store_true", help="re-download instead of using the cache")
     s.set_defaults(fn=cmd_topics_verify)
     s = sub.add_parser("produce")
-    s.add_argument("--count", type=int, default=1)
+    s.add_argument("--count", type=int, help="videos to make (default: cadence.videos_per_day)")
     s.add_argument("--topic", help="force a topic id instead of the selector")
     s.add_argument("--run", help="re-run an existing run")
     s.add_argument("--from", dest="from_step", choices=["fetch", "pick", "label", "render", "notify"])
