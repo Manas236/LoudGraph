@@ -1,0 +1,216 @@
+# All tunables for the pipeline. Secrets go in .env, never here.
+
+brand:
+  name: "LoudGraphs"            # watermark + Telegram captions
+
+paths:                          # relative to the project root
+  cache: cache
+  out: out
+  tokens: tokens
+  db: loudgraphs.db
+  fonts: assets/fonts
+  flags: assets/flags
+
+cache_days: 30                  # re-fetch a cached series only when older than this
+
+data:
+  owid_grapher_url: "https://ourworldindata.org/grapher/{slug}.csv?v=1&csvType=full&useColumnShortNames=true"
+  owid_metadata_url: "https://ourworldindata.org/grapher/{slug}.metadata.json?v=1&csvType=full&useColumnShortNames=true"
+  owid_bulk:                    # used by topics whose code starts with "github:<dataset>/"
+    energy-data: "https://raw.githubusercontent.com/owid/energy-data/master/owid-energy-data.csv"
+    co2-data: "https://raw.githubusercontent.com/owid/co2-data/master/owid-co2-data.csv"
+  http_timeout: 60
+  verify_min_countries: 25      # topics-verify: usable pool countries required to keep a topic
+  max_stale_years: 3            # a series must reach within N years of the topic's latest year
+  max_late_start_years: 3       # ...and start within N years of start_year
+
+video:
+  width: 1080
+  height: 1920
+  fps: 30
+  crf: 18
+  preset: medium
+  audio_bitrate: 192k
+  min_seconds: 30
+  max_seconds: 45
+
+timing:                         # timeline.py is the only consumer; everything else reads the timeline
+  intro: 0.4                    # title alone before the first country
+  per_country: 4.5              # includes the transition and the end hold
+  transition: 0.4               # whoosh + crossfade at the start of each country
+  hold: 0.5                     # line finished, final value on screen
+  end_card: 3.5
+
+scorer:
+  min_points: 20
+  max_gap_years: 2              # consecutive data years further apart than this -> reject
+  interp_tol: 0.002             # |2nd diff| <= tol * range counts as straight-line filled-in
+  flat_tol: 0.002               # |1st diff| <= tol * range counts as flat
+  max_interp_flat: 0.4
+  min_swing: 0.15
+  reversal_threshold: 0.15      # zigzag leg must move >= 15% of range
+  weights:
+    swing_max: 35
+    swing_full: 1.0             # swing at which the swing component maxes out
+    reversals: {0: 8, 1: 25, 2: 30, 3: 25, 4: 15, other: 5}
+    shock_max: 25
+    shock_full: 0.5             # a single-year move of half the range earns full shock points
+    smooth_max: 10              # (1 - interp) * smooth_max
+
+picker:
+  top_k: 20
+  min_countries: 5              # fewer passing countries -> run fails "not enough interesting data"
+  max_countries: 8
+  net_up: 0.5
+  net_down: -0.5
+  reversal_story: 2
+  max_attempts: 60              # random restarts when looking for a not-yet-used country set
+
+topic_cooldown_days: 21         # same topic may come back (with a different set) after this
+
+cadence:
+  videos_per_day: 2
+
+audio:
+  sample_rate: 48000
+  scale: minor_pentatonic       # minor_pentatonic | major_pentatonic | natural_minor | dorian | major
+  scale_octaves: 2
+  # one root per country, cycled. All from A minor pentatonic so the end-card chord of
+  # every root has no semitone clashes.
+  keys: [A2, C3, E3, G2, D3, A3, E2, G3]
+  pluck_register: [52, 63]      # lowest scale note is moved into this MIDI range
+  pluck_gain: 0.55
+  pluck_decay: 0.9965
+  pluck_length: 0.9
+  pad_gain: 0.16
+  pad_cutoff_hz: 900
+  pad_detune_cents: 9
+  pad_attack: 0.5
+  pad_release: 0.7
+  sub_bass: true
+  sub_gain: 0.10
+  whoosh_gain: 0.22
+  end_chord_gain: 0.20
+  target_lufs: -14.0
+  true_peak_db: -1.0
+
+render:
+  backend: auto                 # auto (skia, else pillow) | skia | pillow
+  background: "#0b0d12"
+  text: "#f5f7fa"
+  muted: "#8b93a3"
+  grid: "#1f2430"
+  # accent per country in a video, in order. Each must reach 4.5:1 contrast on the background.
+  palette: ["#22d3ee", "#f472b6", "#a3e635", "#fbbf24", "#a78bfa", "#fb7185", "#34d399", "#fb923c", "#60a5fa"]
+  end_card_question: "Which one surprised you?"
+  end_card_cta: "Tell us in the comments"
+
+labels:
+  enabled: true
+  max_words: 4
+  max_chars: 24
+  year_tolerance: 1
+  shock_threshold: 0.25         # use largest single-year move if it is >= this share of the range
+
+gemini:
+  model: auto                   # "auto" = list models on first run, pick a flash-class one, log it
+  prefer: ["flash"]
+  avoid: ["lite", "image", "tts", "audio", "live", "thinking", "embedding", "exp", "preview"]
+  api_base: "https://generativelanguage.googleapis.com/v1beta"
+  max_retries: 5
+  timeout: 40
+
+telegram:
+  poll_timeout: 50
+  api_base: "https://api.telegram.org"
+
+dry_run:                        # true = write what would be sent to out/<run>/publish_<platform>.json
+  youtube: true
+  instagram: true
+  facebook: true
+
+youtube:
+  privacy_status: public        # public | unlisted | private
+  category_id: "27"             # Education
+  max_uploads_per_day: 6
+  scopes:
+    - https://www.googleapis.com/auth/youtube.upload
+    - https://www.googleapis.com/auth/youtube.readonly
+    - https://www.googleapis.com/auth/yt-analytics.readonly
+
+instagram:
+  enabled: true
+  graph_base: "https://graph.facebook.com"
+  api_version: "v23.0"
+  upload_mode: resumable        # resumable (local file) | video_url (needs public_base_url)
+  public_base_url: ""           # e.g. https://files.example.com/reels/ -> <base><run_id>.mp4
+  share_to_feed: true
+  poll_seconds: 10
+  poll_max_minutes: 15
+
+facebook:
+  enabled: false                # optional Page Reels
+  graph_base: "https://graph.facebook.com"
+  api_version: "v23.0"
+
+analytics:
+  min_age_hours: 72
+  shrink_n: 3
+
+selector:
+  exploit_share: 0.7
+  retire_after: 3
+
+dashboard:
+  host: 127.0.0.1               # never 0.0.0.0; use an SSH tunnel on a server
+  port: 5055
+
+# ~46 globally recognisable countries on every continent. iso2 is the flag-icons file name.
+countries:
+  - {iso3: IND, iso2: in, name: India}
+  - {iso3: CHN, iso2: cn, name: China}
+  - {iso3: USA, iso2: us, name: United States}
+  - {iso3: GBR, iso2: gb, name: United Kingdom}
+  - {iso3: DEU, iso2: de, name: Germany}
+  - {iso3: FRA, iso2: fr, name: France}
+  - {iso3: ITA, iso2: it, name: Italy}
+  - {iso3: ESP, iso2: es, name: Spain}
+  - {iso3: POL, iso2: pl, name: Poland}
+  - {iso3: UKR, iso2: ua, name: Ukraine}
+  - {iso3: RUS, iso2: ru, name: Russia}
+  - {iso3: GRC, iso2: gr, name: Greece}
+  - {iso3: SWE, iso2: se, name: Sweden}
+  - {iso3: NOR, iso2: "no", name: Norway}
+  - {iso3: NLD, iso2: nl, name: Netherlands}
+  - {iso3: IRL, iso2: ie, name: Ireland}
+  - {iso3: TUR, iso2: tr, name: Turkey}
+  - {iso3: JPN, iso2: jp, name: Japan}
+  - {iso3: KOR, iso2: kr, name: South Korea}
+  - {iso3: IDN, iso2: id, name: Indonesia}
+  - {iso3: VNM, iso2: vn, name: Vietnam}
+  - {iso3: THA, iso2: th, name: Thailand}
+  - {iso3: PHL, iso2: ph, name: Philippines}
+  - {iso3: PAK, iso2: pk, name: Pakistan}
+  - {iso3: BGD, iso2: bd, name: Bangladesh}
+  - {iso3: IRN, iso2: ir, name: Iran}
+  - {iso3: IRQ, iso2: iq, name: Iraq}
+  - {iso3: SAU, iso2: sa, name: Saudi Arabia}
+  - {iso3: ISR, iso2: il, name: Israel}
+  - {iso3: EGY, iso2: eg, name: Egypt}
+  - {iso3: NGA, iso2: ng, name: Nigeria}
+  - {iso3: ETH, iso2: et, name: Ethiopia}
+  - {iso3: KEN, iso2: ke, name: Kenya}
+  - {iso3: GHA, iso2: gh, name: Ghana}
+  - {iso3: MAR, iso2: ma, name: Morocco}
+  - {iso3: ZAF, iso2: za, name: South Africa}
+  - {iso3: CAN, iso2: ca, name: Canada}
+  - {iso3: MEX, iso2: mx, name: Mexico}
+  - {iso3: CUB, iso2: cu, name: Cuba}
+  - {iso3: BRA, iso2: br, name: Brazil}
+  - {iso3: ARG, iso2: ar, name: Argentina}
+  - {iso3: VEN, iso2: ve, name: Venezuela}
+  - {iso3: COL, iso2: co, name: Colombia}
+  - {iso3: CHL, iso2: cl, name: Chile}
+  - {iso3: PER, iso2: pe, name: Peru}
+  - {iso3: AUS, iso2: au, name: Australia}
+  - {iso3: NZL, iso2: nz, name: New Zealand}

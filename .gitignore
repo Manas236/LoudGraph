@@ -1,0 +1,17 @@
+# secrets
+.env
+tokens/
+
+# generated
+cache/
+out/
+*.db
+*.db-wal
+*.db-shm
+*.lock
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
