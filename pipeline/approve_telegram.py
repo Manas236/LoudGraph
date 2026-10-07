@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-from . import actions, db
+from . import actions, db, health
 from .config import country_by_iso3, get_config, run_dir, secret
 
 log = logging.getLogger(__name__)
@@ -220,10 +220,13 @@ def run_bot() -> int:
         log.info("telegram: %s", detail)
         if not ok:
             return 1
-    last_scan = 0.0
+    last_scan = last_beat = 0.0
     timeout = get_config()["telegram"]["poll_timeout"]
     while True:
         try:
+            if time.time() - last_beat >= health.HEARTBEAT_EVERY_S:
+                health.beat("bot", telegram=tg)   # the dashboard turns red when this is > 3 min old
+                last_beat = time.time()
             if time.time() - last_scan > 30:
                 _scan()
                 last_scan = time.time()

@@ -2,7 +2,8 @@
 
 OAuth installed-app flow; the token lives in tokens/youtube_token.json. Authorise once with:
     python -m pipeline.publish_youtube --auth
-A vertical video under 3 minutes is treated as a Short by YouTube.
+The OAuth consent screen must be "In production": in "Testing" Google expires the refresh token
+after 7 days and uploads stop. A vertical video under 3 minutes is treated as a Short by YouTube.
 """
 from __future__ import annotations
 
@@ -17,6 +18,9 @@ from .config import ROOT, get_config, path, run_dir, secret
 
 log = logging.getLogger(__name__)
 DONE = {"uploaded", "live", "private_locked", "dry_run"}
+CONSENT_HINT = ("If the OAuth consent screen's publishing status is 'Testing', Google expires refresh tokens after "
+                "7 days: set it to 'In production' (Google Cloud Console > Google Auth Platform > Audience > "
+                "Publish app), then run `python -m pipeline.publish_youtube --auth` again.")
 
 
 class NotAuthorized(RuntimeError):
@@ -35,18 +39,29 @@ def token_file() -> Path:
     return path("tokens") / "youtube_token.json"
 
 
-def get_credentials(interactive: bool = False):
-    from google.auth.transport.requests import Request
+def _load_token():
     from google.oauth2.credentials import Credentials
+    tf = token_file()
+    return Credentials.from_authorized_user_file(str(tf), get_config()["youtube"]["scopes"]) if tf.exists() else None
+
+
+def get_credentials(interactive: bool = False):
+    from google.auth.exceptions import RefreshError
+    from google.auth.transport.requests import Request
 
     scopes = get_config()["youtube"]["scopes"]
-    creds = None
     tf = token_file()
-    if tf.exists():
-        creds = Credentials.from_authorized_user_file(str(tf), scopes)
+    creds = _load_token()
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        tf.write_text(creds.to_json(), encoding="utf-8")
+        try:
+            creds.refresh(Request())
+        except RefreshError as e:
+            # a dead refresh token must fail loudly (post marked failed + Telegram alert), never silently
+            if not interactive:
+                raise NotAuthorized(f"YouTube token refresh failed ({e}). {CONSENT_HINT}") from e
+            creds = None
+        else:
+            tf.write_text(creds.to_json(), encoding="utf-8")
     if creds and creds.valid:
         return creds
     if not interactive:
@@ -61,27 +76,43 @@ def get_credentials(interactive: bool = False):
     return creds
 
 
-def check() -> tuple[str, str]:
+def _result(level: str, state: str, detail: str) -> dict:
+    return {"level": level, "state": state, "detail": detail}
+
+
+def check() -> dict:
+    """Doctor / dashboard health check. Read-only: a refreshed access token is not written back."""
+    from google.auth.exceptions import RefreshError
+    from google.auth.transport.requests import Request
+
     dry = get_config()["dry_run"]["youtube"]
     sf = client_secret_file()
     if not sf:
-        return "WARN", f"YT_CLIENT_SECRET_FILE missing (dry_run={dry})"
+        return _result("WARN", "missing", f"YT_CLIENT_SECRET_FILE missing (dry_run={dry})")
     if not sf.exists():
-        return "FAIL", f"client secret file not found: {sf}"
+        return _result("FAIL", "missing", f"client secret file not found: {sf}")
+    if not token_file().exists():
+        return _result("WARN", "missing", "no token in tokens/: the owner must run "
+                       "`python -m pipeline.publish_youtube --auth` once (consent screen 'In production')")
     try:
-        creds = get_credentials(interactive=False)
-    except NotAuthorized as e:
-        return "WARN", str(e)
+        creds = _load_token()
+        if not creds.refresh_token:
+            return _result("FAIL", "expired", "stored token has no refresh token; re-run --auth")
+        # Always refresh: a dead refresh token (e.g. 7 days after --auth in 'Testing') must show up
+        # today, not when the current access token happens to lapse.
+        creds.refresh(Request())
+    except RefreshError as e:
+        return _result("WARN" if dry else "FAIL", "expired", f"stored token could not be refreshed ({e}). {CONSENT_HINT}")
     except Exception as e:  # noqa: BLE001
-        return "FAIL", f"token invalid: {e}"
+        return _result("FAIL", "error", f"token unreadable: {e}")
     try:
         from googleapiclient.discovery import build
         yt = build("youtube", "v3", credentials=creds, cache_discovery=False)
         ch = yt.channels().list(part="snippet", mine=True).execute().get("items", [])
         name = ch[0]["snippet"]["title"] if ch else "(no channel)"
-        return "OK  ", f"token valid, channel {name} (dry_run={dry})"
+        return _result("OK", "ok", f"token refreshes, channel {name} (dry_run={dry})")
     except Exception as e:  # noqa: BLE001
-        return "FAIL", f"token present but API call failed: {e}"
+        return _result("FAIL", "error", f"token refreshes but API call failed: {e}")
 
 
 def _body(meta: dict) -> dict:
@@ -120,6 +151,7 @@ def publish(run_id: str, meta: dict, video: Path) -> str:
     from googleapiclient.http import MediaFileUpload
 
     yt = build("youtube", "v3", credentials=get_credentials(), cache_discovery=False)
+    db.upsert_post(run_id, "youtube", "uploading", message="upload started")
     media = MediaFileUpload(str(video), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True)
     req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
     response, errors = None, 0

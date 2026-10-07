@@ -27,7 +27,8 @@ NEXT = {
     "rejected": set(),
     "failed": set(),
 }
-POST_STATUSES = {"pending", "uploaded", "live", "private_locked", "failed", "dry_run"}
+POST_STATUSES = {"pending", "uploading", "uploaded", "live", "private_locked", "failed", "dry_run"}
+QUOTA_TZ = "America/Los_Angeles"  # the YouTube Data API quota resets at midnight Pacific time
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -41,7 +42,9 @@ CREATE TABLE IF NOT EXISTS runs (
     score REAL,
     regen_of TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    progress REAL,
+    progress_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_stage ON runs(stage);
 CREATE INDEX IF NOT EXISTS idx_runs_topic ON runs(topic_id);
@@ -106,12 +109,32 @@ def parse_ts(s: str) -> datetime:
     return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
+# columns added after the first release; old databases get them on first connect
+MIGRATIONS = [("runs", "progress", "REAL"), ("runs", "progress_at", "TEXT")]
+_ready: set[str] = set()
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(SCHEMA)
+    for table, col, typ in MIGRATIONS:
+        if col not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            except sqlite3.OperationalError as e:  # another process added it first
+                if "duplicate column" not in str(e):
+                    raise
+
+
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(path("db"), timeout=30, isolation_level=None)
+    p = path("db")
+    conn = sqlite3.connect(p, timeout=30, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA foreign_keys=ON")
+    if str(p) not in _ready:
+        _ensure_schema(conn)
+        _ready.add(str(p))
     return conn
 
 
@@ -126,7 +149,7 @@ def db():
 
 def init() -> None:
     with db() as c:
-        c.executescript(SCHEMA)
+        _ensure_schema(c)
 
 
 # ---------------------------------------------------------------- runs
@@ -191,6 +214,19 @@ def has_log(run_id: str, needle: str) -> bool:
     return r is not None
 
 
+def runs_with_log(needle: str) -> set[str]:
+    """Ids of every run with a stage_log message containing `needle` (one query for the board)."""
+    with db() as c:
+        rows = c.execute("SELECT DISTINCT run_id FROM stage_log WHERE message LIKE ?", (f"%{needle}%",)).fetchall()
+    return {r["run_id"] for r in rows}
+
+
+def set_progress(run_id: str, frac: float) -> None:
+    """Render progress (0..1) for the board. Leaves updated_at alone: that is the time in stage."""
+    with db() as c:
+        c.execute("UPDATE runs SET progress=?, progress_at=? WHERE id=?", (round(frac, 4), now(), run_id))
+
+
 def transition(run_id: str, new_stage: str, message: str = "", *, reset: bool = False, **fields) -> None:
     """Move a run to `new_stage`, validating the edge, and log it.
 
@@ -209,7 +245,7 @@ def transition(run_id: str, new_stage: str, message: str = "", *, reset: bool = 
             ok = new_stage == "failed" or new_stage in NEXT[cur] or reset
             if not ok:
                 raise TransitionError(f"{run_id}: illegal transition {cur} -> {new_stage}")
-            sets, args = ["stage=?", "updated_at=?"], [new_stage, now()]
+            sets, args = ["stage=?", "updated_at=?", "progress=NULL", "progress_at=NULL"], [new_stage, now()]
             if new_stage != "failed":
                 sets += ["failed_stage=NULL", "error=NULL"]
             for k, v in fields.items():
@@ -294,13 +330,22 @@ def get_posts(run_id: str | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def uploads_today(platform: str) -> int:
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+def quota_day_start(now_utc: datetime | None = None) -> datetime:
+    """Start (UTC) of the current YouTube quota day, which begins at midnight Pacific time."""
+    from zoneinfo import ZoneInfo
+    local = (now_utc or datetime.now(timezone.utc)).astimezone(ZoneInfo(QUOTA_TZ))
+    return local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+
+def uploads_today(platform: str, now_utc: datetime | None = None) -> int:
+    """Uploads since the quota day began. A post's updated_at is when it reached uploaded/live/
+    private_locked (nothing updates a post after that), so it is the upload time."""
+    since = quota_day_start(now_utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with db() as c:
         r = c.execute(
             "SELECT COUNT(*) n FROM posts WHERE platform=? AND status IN ('uploaded','live','private_locked') "
-            "AND substr(created_at,1,10)=?",
-            (platform, today),
+            "AND updated_at >= ?",
+            (platform, since),
         ).fetchone()
     return r["n"]
 

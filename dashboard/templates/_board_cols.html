@@ -1,19 +1,71 @@
-<div class="board">
-{% for s in stages %}
-  <div class="col {{ s }}">
-    <h3><span>{{ s.replace('_', ' ') }}</span><span>{{ cols[s]|length }}</span></h3>
-    {% for r in cols[s][:25] %}
-      <a class="card" href="{{ url_for('run_detail', run_id=r.id) }}">
-        {% if r.has_thumb and s in ('rendered','awaiting_approval','approved','publishing','published','rejected') %}
-          <img src="{{ url_for('media', run_id=r.id, name='thumb.jpg') }}" alt="">
-        {% endif %}
-        <div><b>{{ r.topic_id }}</b></div>
-        <div class="small muted">{{ r.id }}</div>
-        <div class="small">{{ r.countries|length }} countries{% if r.score %} · score {{ r.score }}{% endif %}</div>
-        {% if r.stage == 'failed' %}<div class="small" style="color:var(--bad)">{{ r.failed_stage }}: {{ (r.error or '')[:90] }}</div>{% endif %}
-        <div class="small muted">{{ r.updated_at|ago }}</div>
-      </a>
-    {% endfor %}
+<div data-busy="{{ 1 if busy else 0 }}">
+{% set h = health %}
+<section class="health" aria-label="Health">
+  <div class="tile" data-tile="credentials">
+    <h3><span>Credentials</span>
+      <span class="small">{% if h.checking %}checking…{% elif h.checked_at %}checked {{ h.checked_at|ago }}{% endif %}
+        <form method="post" action="{{ url_for('health_recheck') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Re-check</button></form></span></h3>
+    {% if h.credentials %}
+    <ul class="creds">
+      {% for c in h.credentials %}<li title="{{ c.detail }}" data-cred="{{ c.name }}" data-state="{{ c.state }}"><b>{{ c.name }}</b> <span class="st st-{{ c.state }}">{{ 'OK' if c.state == 'ok' else c.state }}</span></li>{% endfor %}
+    </ul>
+    {% else %}<p class="small muted">{{ 'Running the doctor checks…' if h.checking else 'Not checked yet.' }}</p>{% endif %}
+    <div class="small muted">Publishing: {% for k, v in h.dry_run.items() %}{{ k }} {{ 'dry-run' if v else 'LIVE' }}{{ ' · ' if not loop.last }}{% endfor %}</div>
   </div>
+  <div class="tile" data-tile="quota">
+    <h3><span>YouTube quota today</span></h3>
+    <div class="big">{{ h.youtube_used }} / {{ h.youtube_cap }}</div>
+    <div class="meter"><span style="width:{{ [100, (100 * h.youtube_used / (h.youtube_cap or 1))|round|int]|min }}%"></span></div>
+    <div class="small muted">uploads since midnight Pacific (YouTube's quota day)</div>
+  </div>
+  <div class="tile" data-tile="bot" data-bot-state="{{ h.bot.state }}">
+    <h3><span>Bot heartbeat</span></h3>
+    <div class="big {{ 'ok' if h.bot.state == 'ok' else 'bad' }}">{% if h.bot.state == 'never' %}never{% else %}{{ h.bot.age_s|dur }} ago{% endif %}</div>
+    <div class="small muted">{% if h.bot.state == 'ok' %}run.py bot is alive{% elif h.bot.state == 'stale' %}no beat for over 3 min: is run.py bot running?{% else %}no beat yet: start python run.py bot{% endif %}</div>
+  </div>
+  <div class="tile" data-tile="schedule">
+    <h3><span>Next scheduled run</span></h3>
+    {% if h.next_run %}
+      <div class="big" title="{{ h.next_run.next or '' }}">{% if h.next_run.next %}{{ h.next_run.next|until }}{% else %}cron{% endif %}</div>
+      <div class="small muted" title="{{ h.next_run.command }}">{{ h.next_run.name }}{% if h.jobs|length > 1 %} (+{{ h.jobs|length - 1 }} more){% endif %}</div>
+    {% elif h.schedule_error %}<div class="small muted">could not read the scheduler: {{ h.schedule_error }}</div>
+    {% elif h.schedule_checked %}<div class="big muted">none</div><div class="small muted">no Task Scheduler / cron job runs run.py</div>
+    {% else %}<div class="small muted">checking…</div>{% endif %}
+  </div>
+</section>
+
+<div class="lanes">
+{% for lane in lanes %}
+  <section class="lane lane-{{ lane.key }}" data-lane="{{ lane.key }}">
+    <h3><span>{{ lane.name }}</span><span>{{ lane.total }}</span></h3>
+    {% for c in lane.cards %}
+    <article class="card" data-run="{{ c.id }}" data-stage="{{ c.stage }}">
+      <a class="cardlink{{ ' has-thumb' if c.thumb }}" href="{{ url_for('run_detail', run_id=c.id) }}">
+        {% if c.thumb %}<img src="{{ url_for('media', run_id=c.id, name='thumb.jpg') }}" alt="" loading="lazy">{% endif %}
+        <span class="ttl">{{ c.title or c.topic }}</span>
+        <span class="sub">{{ c.topic if c.title else c.id }}{% if c.n_countries %} · {{ c.n_countries }} countries{% endif %}</span>
+      </a>
+      {% if c.doing %}
+        <div class="doing{{ ' stalled' if c.stalled }}" data-progress="{{ c.progress if c.progress is not none else '' }}">{{ c.doing }}{% if c.progress is not none %} {{ c.progress }}%{% else %}…{% endif %}{% if c.stalled %} · stalled?{% endif %}</div>
+        {% if c.progress is not none %}<div class="meter"><span style="width:{{ c.progress }}%"></span></div>{% endif %}
+      {% endif %}
+      {% if c.stage == 'awaiting_approval' %}
+        <div class="sent">{% if c.telegram_sent %}<span class="ok">sent to Telegram ✓</span>{% elif telegram_on %}<span class="muted">not sent to Telegram yet</span>{% else %}<span class="muted">approve here (no Telegram)</span>{% endif %}</div>
+      {% endif %}
+      {% if c.stage == 'failed' %}
+        <div class="err"><b>failed at {{ c.failed_stage or '?' }}</b>: {{ (c.error or '')[:180] }}</div>
+        {% if c.retry_step %}
+        <form method="post" action="{{ url_for('retry', run_id=c.id) }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="step" value="{{ c.retry_step }}"><input type="hidden" name="next" value="board"><button>↻ Retry from {{ c.retry_step }}</button></form>
+        {% endif %}
+      {% endif %}
+      <div class="foot">
+        <span class="chips">{% for ch in c.chips %}{% if ch.url %}<a class="chip c-{{ ch.state }}" data-chip="{{ ch.platform }}" href="{{ ch.url }}" target="_blank" rel="noopener" title="{{ ch.title }}">{{ ch.short }}</a>{% else %}<span class="chip c-{{ ch.state }}" data-chip="{{ ch.platform }}" title="{{ ch.title }}">{{ ch.short }}</span>{% endif %}{% endfor %}</span>
+        <span class="age" title="time in this stage">{{ c.in_stage_s|dur }} in stage</span>
+      </div>
+    </article>
+    {% else %}<p class="empty">Nothing here</p>{% endfor %}
+    {% if lane.total > lane.cards|length %}<p class="more">+{{ lane.total - lane.cards|length }} older</p>{% endif %}
+  </section>
 {% endfor %}
+</div>
 </div>

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -26,6 +27,10 @@ from .config import get_config, run_dir, secret
 
 log = logging.getLogger(__name__)
 DONE = {"uploaded", "live", "private_locked", "dry_run"}
+# permissions the Page token needs (README "Credentials"); Facebook Page Reels add the second list
+SCOPES_IG = ["instagram_basic", "instagram_content_publish", "instagram_manage_insights", "pages_read_engagement"]
+SCOPES_FB = ["pages_show_list", "pages_manage_posts"]
+EXPIRY_WARN_DAYS = 7
 
 
 def _ic() -> dict:
@@ -51,19 +56,74 @@ def _check_json(r: requests.Response, what: str) -> dict:
     return d
 
 
-def check() -> tuple[str, str]:
+def needed_scopes() -> list[str]:
+    return SCOPES_IG + (SCOPES_FB if get_config()["facebook"]["enabled"] else [])
+
+
+def token_info(tok: str) -> dict:
+    """GET /debug_token for the token itself: is_valid, expires_at (0 = never), scopes."""
+    r = requests.get(f"{base()}/debug_token", params={"input_token": tok, "access_token": tok}, timeout=30)
+    return _check_json(r, "debug_token").get("data", {})
+
+
+def check() -> dict:
+    """Doctor / dashboard health check: level (OK/WARN/FAIL), state (ok/missing/expired/error), detail."""
     dry = get_config()["dry_run"]["instagram"]
     ig, tok = secret("IG_USER_ID"), secret("IG_ACCESS_TOKEN")
     if not (ig and tok):
-        return "WARN", f"IG_USER_ID / IG_ACCESS_TOKEN missing (dry_run={dry})"
+        return {"level": "WARN", "state": "missing", "detail": f"IG_USER_ID / IG_ACCESS_TOKEN missing (dry_run={dry})"}
     try:
-        r = requests.get(f"{base()}/{ig}", params={"fields": "id,username", "access_token": tok}, timeout=30)
-        d = _check_json(r, "IG user lookup")
-        lim = requests.get(f"{base()}/{ig}/content_publishing_limit", params={"access_token": tok}, timeout=30)
-        extra = f", publishing limit {lim.json().get('data')}" if lim.status_code == 200 else ""
-        return "OK  ", f"@{d.get('username')} ({d.get('id')}){extra} (dry_run={dry})"
+        info = token_info(tok)
+    except Exception as e:  # noqa: BLE001 - the lookup below still tells valid from invalid
+        info = {"_error": str(e)[:150]}
+    if info.get("is_valid") is False:
+        why = (info.get("error") or {}).get("message", "debug_token is_valid=false")
+        return {"level": "FAIL", "state": "expired", "detail": f"IG_ACCESS_TOKEN no longer valid: {why}"[:300]}
+    try:
+        d = _check_json(requests.get(f"{base()}/{ig}", params={"fields": "id,username", "access_token": tok},
+                                     timeout=30), "IG user lookup")
     except Exception as e:  # noqa: BLE001
-        return "FAIL", str(e)[:300]
+        state = "expired" if "'code': 190" in str(e) else "error"   # 190 = invalid / expired OAuth token
+        return {"level": "FAIL", "state": state, "detail": str(e)[:300]}
+    parts, level = [f"@{d.get('username')} ({d.get('id')})"], "OK"
+    exp = info.get("expires_at")
+    if exp:
+        when = datetime.fromtimestamp(exp, timezone.utc)
+        parts.append(f"token expires {when:%Y-%m-%d}")
+        if (when - datetime.now(timezone.utc)).days < EXPIRY_WARN_DAYS:
+            level = "WARN"
+    elif exp == 0:
+        parts.append("token never expires")
+    if "scopes" in info:
+        missing = [s for s in needed_scopes() if s not in info["scopes"]]
+        if missing:
+            parts.append("missing permissions: " + ", ".join(missing))
+            level = "WARN"
+    else:
+        parts.append(f"permissions not checked ({info.get('_error', 'debug_token returned no scopes')})")
+    try:
+        lim = requests.get(f"{base()}/{ig}/content_publishing_limit", params={"access_token": tok}, timeout=30)
+        if lim.status_code == 200:
+            parts.append(f"publishing limit {lim.json().get('data')}")
+    except requests.RequestException:
+        pass
+    return {"level": level, "state": "ok", "detail": ", ".join(parts) + f" (dry_run={dry})"}
+
+
+def check_facebook() -> dict:
+    if not get_config()["facebook"]["enabled"]:
+        return {"level": "OK", "state": "disabled", "detail": "facebook.enabled is false"}
+    page, tok = secret("FB_PAGE_ID"), secret("IG_ACCESS_TOKEN")
+    if not (page and tok):
+        return {"level": "WARN", "state": "missing", "detail": "FB_PAGE_ID / IG_ACCESS_TOKEN (Page token) missing"}
+    try:
+        d = _check_json(requests.get(f"{base('facebook')}/{page}", params={"fields": "id,name", "access_token": tok},
+                                     timeout=30), "FB page lookup")
+    except Exception as e:  # noqa: BLE001
+        state = "expired" if "'code': 190" in str(e) else "error"
+        return {"level": "FAIL", "state": state, "detail": str(e)[:300]}
+    return {"level": "OK", "state": "ok",
+            "detail": f"Page {d.get('name')} ({d.get('id')}) (dry_run={get_config()['dry_run']['facebook']})"}
 
 
 def _plan(run_id: str, meta: dict, video: Path) -> tuple[dict, str | None]:
@@ -109,10 +169,11 @@ def publish(run_id: str, meta: dict, video: Path) -> str:
     if not (secret("IG_USER_ID") and tok):
         db.upsert_post(run_id, "instagram", "failed", message="BLOCKED: IG_USER_ID / IG_ACCESS_TOKEN missing")
         return "failed"
+    db.upsert_post(run_id, "instagram", "uploading", message="creating the REELS container")
     d = _check_json(requests.post(f"{base()}/{ig}/media", data={**params, "access_token": tok}, timeout=60),
                     "create REELS container")
     cid = d["id"]
-    db.upsert_post(run_id, "instagram", "pending", remote_id=cid, message="container created")
+    db.upsert_post(run_id, "instagram", "uploading", remote_id=cid, message="container created, uploading")
     if params.get("upload_type") == "resumable":
         size = video.stat().st_size
         with open(video, "rb") as f:
@@ -122,6 +183,7 @@ def publish(run_id: str, meta: dict, video: Path) -> str:
         up = _check_json(r, "rupload")
         if not up.get("success", True):
             raise RuntimeError(f"rupload: {up}")
+        db.upsert_post(run_id, "instagram", "uploading", remote_id=cid, message="file uploaded, Instagram is processing")
     deadline = time.time() + ic["poll_max_minutes"] * 60
     status = None
     while time.time() < deadline:
@@ -175,6 +237,7 @@ def publish_facebook(run_id: str, meta: dict, video: Path) -> str:
     if not (secret("FB_PAGE_ID") and tok):
         db.upsert_post(run_id, "facebook", "failed", message="BLOCKED: FB_PAGE_ID / page token missing")
         return "failed"
+    db.upsert_post(run_id, "facebook", "uploading", message="starting the Reels upload")
     start = _check_json(requests.post(f"{base('facebook')}/{page}/video_reels",
                                       data={"upload_phase": "start", "access_token": tok}, timeout=60), "FB reels start")
     vid = start["video_id"]
@@ -185,5 +248,7 @@ def publish_facebook(run_id: str, meta: dict, video: Path) -> str:
     _check_json(requests.post(f"{base('facebook')}/{page}/video_reels",
                               data={"upload_phase": "finish", "video_id": vid, "video_state": "PUBLISHED",
                                     "description": desc, "access_token": tok}, timeout=60), "FB reels finish")
-    db.upsert_post(run_id, "facebook", "uploaded", remote_id=vid, message="published (processing on Facebook)")
-    return "uploaded"
+    # finish with video_state=PUBLISHED publishes it; Facebook may still be processing for a few minutes
+    db.upsert_post(run_id, "facebook", "live", remote_id=vid, url=f"https://www.facebook.com/reel/{vid}",
+                   message="published (Facebook may still be processing)")
+    return "live"

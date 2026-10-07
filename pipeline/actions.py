@@ -5,7 +5,7 @@ import logging
 import os
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 from . import db
 from .config import ROOT, path
@@ -53,13 +53,34 @@ def regenerate(run_id: str, by: str) -> str:
 
 
 STEPS = ("fetch", "pick", "label", "render", "notify")
+RETRY_STEPS = STEPS + ("publish",)
+MAKE_GUARD_S = 60
+
+
+def make_video(by: str) -> str:
+    """The 'Make a video now' button: the same as `python run.py produce --count 1`, in the background."""
+    last = db.kv_get("make_video_at")
+    if last and (datetime.now(timezone.utc) - db.parse_ts(last)).total_seconds() < MAKE_GUARD_S:
+        raise ValueError("a video was started less than a minute ago; it will appear on the board")
+    db.kv_set("make_video_at", db.now())
+    pid = spawn("produce", "--count", "1")
+    log.info("make video requested via %s (pid %s)", by, pid)
+    return "started: the new run appears under 'Data secured' in a few seconds"
 
 
 def retry(run_id: str, from_step: str, by: str) -> str:
-    """Re-run a run in place from a stage. Refused for published runs / runs with live posts."""
+    """Re-run a run in place from a stage. Refused for published runs / runs with live posts.
+    from_step="publish" re-publishes a run whose publish failed (platforms already done are skipped)."""
     from .orchestrator import rerun_blocker
-    if from_step not in STEPS:
+    if from_step not in RETRY_STEPS:
         raise ValueError(f"bad step {from_step}")
+    if from_step == "publish":
+        run = db.get_run(run_id)
+        if run["stage"] != "failed" or run["failed_stage"] != "publish":
+            raise ValueError("retry from publish is only for a run whose publish failed")
+        db.transition(run_id, "approved", f"retry publish requested via {by}", reset=True)
+        spawn("publish", "--run", run_id)
+        return "publishing again"
     why = rerun_blocker(run_id)
     if why:
         raise ValueError(f"refused: {why}. Use 're-render as new run' instead.")

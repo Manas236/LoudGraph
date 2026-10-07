@@ -87,7 +87,7 @@ Put everything in `.env` (template: `.env.example`). Then run `python run.py doc
 2. **Telegram (approval)**: create a bot with @BotFather (`/newbot`) and set `TELEGRAM_BOT_TOKEN`. Send the bot a message, read `chat.id` from `https://api.telegram.org/bot<TOKEN>/getUpdates`, and set `TELEGRAM_CHAT_ID`. Then run `python run.py bot`. Until then, approval works from the dashboard.
 3. **YouTube**:
    * In Google Cloud Console, create a project and enable *YouTube Data API v3* and *YouTube Analytics API*.
-   * Configure the OAuth consent screen (External; add your account as a test user).
+   * Configure the OAuth consent screen (External) and set its **publishing status to "In production"**, not "Testing" (corrected in pass 02: in Testing, refresh tokens expire after 7 days and uploads would silently stop; unverified "In production" is fine for a single owner, who clicks through the "unverified app" warning once).
    * Create Credentials → OAuth client ID → *Desktop app*, and save the JSON as `tokens/client_secret.json`.
    * Set `YT_CLIENT_SECRET_FILE=tokens/client_secret.json` and run `python -m pipeline.publish_youtube --auth` once.
    * Uploads stay **private** until the project passes Google's YouTube API audit. The pipeline will mark these `private_locked` and alert you.
@@ -260,3 +260,150 @@ Contact sheets: I looked at every new sheet. Confirmed on all four:
   - landlines: `out/r20261007-153030-d91b/video.mp4`
   - nuclear_share: `out/r20261007-153521-6a24/video.mp4`
   - homicide_rate (replaces life_expectancy, which correctly fails as low variety): `out/r20261007-153747-82c0/video.mp4`
+
+---
+
+# Pass 02: go-live (2026-10-07)
+
+State before this pass is tagged `v1-video-approved`. The repo is now linked to https://github.com/Manas236/LoudGraph (`main` and both tags pushed).
+
+**No credentials were found.** There is no `.env`, none of the 7 variables is set in the process environment, and `tokens/` is empty. Following the pass's branch rule, sections 1–6 were skipped and are marked BLOCKED below. Nothing was sent to Telegram, Gemini, YouTube, Instagram or Facebook, and there are **no test posts, ids or URLs**. All publishers are still in dry-run.
+
+**The test suite was not run in this pass.** The `python -m pytest` command was denied by this session's permission check, so the new and changed tests below are written but **not executed**. The last full run was 89 passed (fix pass 01). Every changed module was byte-compiled, and `doctor` and the dashboard were run live (results below). Run `python -m pytest` before relying on this pass.
+
+## Per-integration result
+
+| integration | result | exact missing item |
+|---|---|---|
+| Telegram (§1) | BLOCKED | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
+| Gemini labels (§2) | BLOCKED | `GEMINI_API_KEY` |
+| YouTube (§3) | BLOCKED | `YT_CLIENT_SECRET_FILE` (then `tokens/youtube_token.json`: the owner must run `python -m pipeline.publish_youtube --auth` once) |
+| Instagram Reels (§4) | BLOCKED | `IG_USER_ID`, `IG_ACCESS_TOKEN` |
+| Facebook Page Reels (§5) | BLOCKED | `FB_PAGE_ID`, `facebook.enabled: true` in `config.yaml` (and `IG_ACCESS_TOKEN`, the Page token) |
+| End-to-end (§6) | BLOCKED | needs Telegram plus at least one live platform |
+| Preflight (§0) | DONE | none |
+| Dashboard (§7) | DONE | none (needs no credentials) |
+
+## Bugs found against real APIs
+
+None, because no real API could be called. Changes made while wiring the health checks were found by reading the code and Google/Meta docs, not by a live failure:
+
+- **YouTube quota day.** The daily upload cap counted uploads per UTC day, but YouTube resets the quota at midnight Pacific time. Two uploads at 16:00 and 18:00 Pacific fell on different UTC days but used the same quota day. The cap now counts from midnight Pacific (`db.quota_day_start`; `tzdata` was already installed). Test: `test_youtube_cap_counts_the_pacific_quota_day`.
+- **YouTube dead refresh token.** A failed refresh used to surface as a raw `RefreshError` (`invalid_grant`). It now raises `NotAuthorized` with the fix in the message, so the failed post and the Telegram alert say what to do. See §0.
+- **Facebook Reels status.** A finished FB reel was stored as `uploaded` with no link, so it could never show as live. It is now `live` with `https://www.facebook.com/reel/<video_id>`. *That URL pattern is not verified against a real post.*
+- **No "uploading" state.** Publishers jumped from nothing to the final status. YouTube, Instagram and Facebook now write `uploading` while the upload runs, so the dashboard chip can show it. Instagram's old "pending / container created" is now "uploading".
+- **Instagram token check.** `doctor` now calls `debug_token` and reports the token's expiry and any missing permissions (needed: `instagram_basic`, `instagram_content_publish`, `instagram_manage_insights`, `pages_read_engagement`, plus `pages_show_list` and `pages_manage_posts` when Facebook is on). Graph error code 190 is reported as **expired**. *Unverified live.* If `debug_token` refuses the Page token, the check says "permissions not checked" and falls back to the plain account lookup.
+
+## 0. Preflight
+
+`python run.py doctor` before any change:
+
+```
+[OK  ] ffmpeg - ffmpeg version 9.0.2-full_build-www.gyan.dev
+[OK  ] ffprobe - ffprobe version 9.0.2-full_build-www.gyan.dev
+[OK  ] dir cache/ - writable
+[OK  ] dir out/ - writable
+[OK  ] dir tokens/ - writable
+[OK  ] fonts - Inter-Regular.ttf, Inter-Semibold.ttf, Inter-Bold.ttf, Inter-Black.ttf
+[OK  ] flags - 47 PNG flags
+[OK  ] render backend - skia (skia-python 144.0.post2)
+[WARN] GEMINI_API_KEY - missing: videos will have no turning-point labels
+[WARN] Telegram - TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing: approval via dashboard only
+[WARN] YouTube - YT_CLIENT_SECRET_FILE missing (dry_run=True)
+[WARN] Instagram - IG_USER_ID / IG_ACCESS_TOKEN missing (dry_run=True)
+[OK  ] dry_run - youtube=True, instagram=True, facebook=True
+
+0 failing, 4 warnings
+```
+
+After this pass the credential lines come from the same checks the dashboard uses (`pipeline/health.py`), so they are named per integration and Facebook gets its own line: `[WARN] Gemini`, `[WARN] Telegram`, `[WARN] YouTube`, `[WARN] Instagram`, `[OK  ] Facebook - facebook.enabled is false`. Still **0 failing, 4 warnings**.
+
+- **YouTube OAuth instructions fixed** in the README, this report's owner steps (pass 1 said "add your account as a test user"), `.env.example`, and the messages from `doctor` and the publisher. The consent screen must be set to publishing status **"In production"**, not "Testing": in Testing, Google expires the refresh token 7 days after `--auth`. Unverified "In production" is fine for one owner, who clicks through the "unverified app" warning once. The README also says to re-run `--auth` if the token was made while still in Testing.
+- **`doctor` detects a dead YouTube token.** `publish_youtube.check()` now always refreshes the stored token in memory (nothing is written; `doctor` stays read-only). A `RefreshError` is reported as state **expired**, WARN while YouTube is in dry-run and FAIL when it is live, with the fix in the message. With no token at all it says "the owner must run `python -m pipeline.publish_youtube --auth` once". Tests: `test_doctor_flags_a_youtube_token_that_no_longer_refreshes`, `test_youtube_without_a_token_asks_the_owner_to_authorise`.
+
+## 7. Dashboard upgrade
+
+127.0.0.1-only binding, the CSRF token on every POST and the shared `pipeline/actions.py` functions are unchanged.
+
+- **Lanes with human names.** Every DB stage maps to exactly one lane (`dashboard/app.py: LANES`):
+  - Data secured: `queued`, `data_ready`, `picked`, `labelled`
+  - Video made: `rendered`
+  - Waiting for approval: `awaiting_approval`
+  - Approved: `approved`, `publishing`
+  - Shipped: `published`
+  - Failed and Rejected lanes
+
+  `queued` and `publishing` weren't in the brief's list. They go in the lane of the journey they belong to, and the card says what is running ("getting data…", "publishing…").
+- **Cards** show the title (from `meta.json`), topic, thumbnail and time in the current stage. Each has one chip per platform (YT / IG / FB) coloured by post status: pending, uploading, live, private-locked (with 🔒), dry-run (dashed) or failed. A legend sits above the board, and a live or private-locked post's chip links to it. FB appears only when it is enabled or has a post. "Sent to Telegram ✓" appears on waiting cards once a `telegram: sent message` log exists.
+- **Live render progress.** `render_video` calls `on_progress` about once a second, and the orchestrator writes the fraction to `runs.progress` / `progress_at` (at least every 2 s, as required). The card shows "making the video 43%" with a bar. A stage change clears it, and writing it does not touch `updated_at`, so time-in-stage stays true. While anything is running the board refreshes every 2 s, otherwise every 5 s. A card that has sat in a running stage for 30 min with no fresh progress says "stalled?".
+- **Errors.** The failed card shows the stage, the error and a *Retry from <stage>* button that calls `actions.retry`. Publish failures can now be retried too (`RETRY_STEPS` adds `publish`): the run goes back to `approved` and `publish --run` is started, and platforms already done are skipped.
+- **Health panel:**
+  - The `doctor` result per credential (OK / missing / expired / invalid / error, detail on hover), re-checked in a background thread every 15 min or on *Re-check*, and cached in `kv`.
+  - Publishing mode per platform.
+  - YouTube uploads counted against today's cap (Pacific quota day). Google does not expose quota units through the API, so this counter is the cap the code enforces.
+  - The bot heartbeat: `run.py bot` writes a `heartbeat:bot` row at least once a minute, and the tile turns red when it is older than 3 min or missing.
+  - The next scheduled run: Task Scheduler tasks whose action runs `run.py` (next run time via `Get-ScheduledTaskInfo`), or crontab lines on Linux.
+- **"Make a video now"** calls `actions.make_video`, which spawns `run.py produce --count 1`, the same function as the CLI. A second click within 60 s is refused.
+- **Small screens.** The lanes are one row on wide screens, wrap below 1200 px and stack below 560 px. The health tiles reflow, the header wraps, the run page goes to one column, and tables scroll sideways instead of squashing.
+- **DB migration.** The first connection after this pass added `progress` and `progress_at` to `runs` in the existing `pipeline.db` (`ALTER TABLE ADD COLUMN`; no rows changed). New databases get them from the schema. Test: `test_old_database_gets_the_new_columns`.
+
+**Live check.** `python run.py dashboard` on the real `pipeline.db`:
+- `/`, `/fragment/board`, `/run/<id>`, `/analytics`, `/topics`, `/api/board` and a thumbnail all returned 200.
+- `netstat` showed only `127.0.0.1:5055 LISTENING`.
+- The board held 8 runs waiting for approval and 2 failed (life_expectancy, low variety).
+- The background health check ran and showed the 4 missing credentials and Facebook disabled. The heartbeat shows red "never", because the bot is not running. The next run shows "none", because nothing is scheduled on this machine.
+
+Playwright isn't installed, so the screenshots are from headless Edge (`out/dashboard_screens/`):
+
+| file | what |
+|---|---|
+| `board_wide.png` | real board, 1600 px |
+| `board_phone_375.png` | real board in a true 375 px viewport (an iframe: headless Edge will not lay out narrower than 476 px, so a plain `--window-size=390` shot is a cropped 476 px layout) |
+| `run_phone_375.png` | run page at 375 px |
+| `demo_board_wide.png` | **demo data, not the real DB**: copies of the real runs, put into other stages in a throwaway database in the session scratchpad, to show every state (render at 43%, sent to Telegram ✓, uploading / live / private-locked / dry-run / failed chips, retry-from-publish, green heartbeat) |
+| `board.html` | the saved HTML of the real board |
+
+I looked at every screenshot and fixed two things:
+- Cards without a title showed the topic twice; they now show the run id underneath.
+- On a phone the run page's countries table squashed its label column into tall rows; scrollable tables now keep a 560 px minimum width.
+
+**New tests (written, not run, see above):**
+- `tests/test_dashboard.py`:
+  - `test_every_stage_has_exactly_one_lane` (stage mapping)
+  - `test_chip_states_cover_every_post_status`
+  - `test_cards_land_in_their_lanes`
+  - `test_waiting_card_shows_sent_to_telegram`
+  - `test_platform_chips_follow_post_status_and_link_live_posts`
+  - `test_render_progress_shows_on_the_card`
+  - `test_failed_card_shows_error_and_retries_from_its_stage`
+  - `test_retry_publish_reapproves_and_publishes`
+  - `test_make_video_button_runs_produce_count_1`
+  - `test_health_panel_turns_red_when_the_bot_is_silent`
+- `tests/test_health.py`:
+  - `test_heartbeat_state` (heartbeat logic: 180 s is OK, 181 s is stale, missing or bad rows read as never)
+  - `test_bot_loop_writes_a_heartbeat`
+  - `test_credential_checks_without_secrets_stay_offline`
+  - the two YouTube token tests in §0
+- `tests/test_db.py`:
+  - `test_progress_is_written_and_cleared_on_transition`
+  - `test_old_database_gets_the_new_columns`
+  - `test_youtube_cap_counts_the_pacific_quota_day`
+
+## Config added
+
+`go_live_test.instagram_post` and `go_live_test.facebook_post`, both `false`. These are for the go-live rerun of §4/§5: with `false` the test stops before the public publish step. Nothing in normal operation reads them.
+
+## Remaining owner steps
+
+1. **Run the tests:** `python -m pytest`. They were not run in this pass.
+2. **Create `.env`** from `.env.example` and fill in what you have (README, *Credentials*):
+   - **Telegram:** `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+   - **Gemini:** `GEMINI_API_KEY`.
+   - **YouTube:** set the consent screen to **In production**, save the Desktop-app client JSON as `tokens/client_secret.json`, set `YT_CLIENT_SECRET_FILE=tokens/client_secret.json`, then run `python -m pipeline.publish_youtube --auth` once and click through the unverified-app warning.
+   - **Instagram:** `IG_USER_ID`, `IG_ACCESS_TOKEN` (a long-lived Page token with the permissions above).
+   - **Facebook, optional:** `FB_PAGE_ID` and `facebook.enabled: true`.
+3. **Decide whether the go-live test may post publicly:** `go_live_test.instagram_post` / `facebook_post` in `config.yaml`. The default `false` stops before the public step.
+4. Run `python run.py doctor` until every line you filled in is OK. Restart the dashboard after editing `.env`, because it reads `.env` at start.
+5. **Start the bot:** `python run.py bot`. The health panel's heartbeat should turn green within a minute.
+6. **Re-run pass 02 sections 1–6** with the credentials in place.
+7. Optional: register the scheduled tasks from the README. The health panel will then show the next run.

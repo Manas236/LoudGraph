@@ -2,7 +2,7 @@
 {% block title %}Topics{% endblock %}
 {% block body %}
 <h3 class="muted">Active topics ({{ items|length }})</h3>
-<table>
+<div class="tablewrap"><table>
   <tr><th>Topic</th><th>Category</th><th>Source</th><th>Verification</th><th>Passing countries</th><th>Latest year</th><th>Runs</th><th>Cooldown</th><th>Weight</th></tr>
   {% for i in items %}
   <tr>
@@ -18,10 +18,10 @@
     <td>{% if i.w %}{{ i.w.weight }}{% if i.w.retired %} <span class="pill bad">retired</span>{% endif %}{% else %}—{% endif %}</td>
   </tr>
   {% endfor %}
-</table>
+</table></div>
 
 <h3 class="muted" style="margin-top:28px">Dropped by topics-verify ({{ dropped|length }})</h3>
-<table><tr><th>Topic</th><th>Date</th><th>Reason</th></tr>
+<div class="tablewrap"><table><tr><th>Topic</th><th>Date</th><th>Reason</th></tr>
   {% for d in dropped %}<tr><td>{{ d.id }}</td><td class="small">{{ d.date }}</td><td class="small">{{ d.reason }}</td></tr>{% endfor %}
-</table>
+</table></div>
 {% endblock %}

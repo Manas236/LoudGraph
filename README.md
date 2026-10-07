@@ -40,7 +40,7 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py bot` | long-running: Telegram approvals + publishes approved runs |
 | `python run.py publish [--run ID]` | publish approved runs now |
 | `python run.py stats` | daily: pull views / avg % viewed, recompute topic weights, send daily summary |
-| `python run.py dashboard` | local web UI on http://127.0.0.1:5055 |
+| `python run.py dashboard` | local web UI on http://127.0.0.1:5055 (board, health panel, "Make a video now") |
 | `python run.py verify [--run ID ...]` | ffprobe, loudness, A/V sync, stem balance, pitch-vs-data, pixel centring, contact sheet |
 | `python run.py crash-test` | `out/crash_test.mp4`: a synthetic flat-crash-recover series, to hear the event treatment |
 | `python run.py compare --old ID --new ID` | old vs new frame (`compare.png`) and spectrogram (`compare_spectrogram.png`) |
@@ -62,10 +62,31 @@ queued -> data_ready -> picked -> labelled -> rendered -> awaiting_approval -> a
 | notify | `approve_telegram.py` | (Telegram message) |
 | publish | `publish_youtube.py`, `publish_instagram.py` | `publish_<platform>.json` in dry-run |
 
-All state lives in SQLite (`pipeline.db`, WAL): `runs`, `stage_log`, `posts`, `stats`,
-`topic_weights`, plus `kv` (the Telegram `getUpdates` offset, so a bot restart never re-delivers a
-button press). The dashboard and the bot only read/write that state, and their buttons call the
-same functions (`pipeline/actions.py`).
+All state lives in SQLite (`pipeline.db`, WAL): `runs` (incl. live render `progress`), `stage_log`,
+`posts`, `stats`, `topic_weights`, plus `kv` (the Telegram `getUpdates` offset, so a bot restart never
+re-delivers a button press; the bot heartbeat; cached health checks). The dashboard and the bot only
+read/write that state, and their buttons call the same functions (`pipeline/actions.py`).
+
+### Dashboard
+
+The board shows each video's journey in plain lanes:
+
+| lane | DB stages |
+|---|---|
+| Data secured | `queued`, `data_ready`, `picked`, `labelled` (the card says what is running, with frame % while rendering) |
+| Video made | `rendered` |
+| Waiting for approval | `awaiting_approval` ("sent to Telegram ✓" once the message was delivered) |
+| Approved | `approved`, `publishing` |
+| Shipped | `published` |
+| Failed / Rejected | `failed` (stage, error, *Retry from stage*), `rejected` |
+
+Each card has the title, topic, thumbnail and time in the current stage, plus a chip per platform
+(YT / IG / FB) coloured by post status: pending, uploading, live, private-locked, dry-run or failed.
+A live post's chip links to it. The health panel shows the doctor checks per credential (re-run
+every 15 min in the background, or with *Re-check*), the YouTube uploads counted against today's cap,
+the bot heartbeat (red after 3 min without one), and the next Task Scheduler / cron run of
+`run.py`. *Make a video now* runs `produce --count 1` in the background. The layout works down to
+phone width.
 
 - **Scorer** (`score.py`): rejects short, gappy, interpolated/flat, low-swing and negligible series;
   scores swing, zigzag reversals, biggest single-year shock and smoothness (weights in `config.yaml`).
@@ -104,14 +125,28 @@ On first use the pipeline lists available models and picks a flash-class one (lo
 Send your bot any message, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy
 `message.chat.id`. Only that chat can approve.
 
-**YT_CLIENT_SECRET_FILE** (YouTube) – in Google Cloud Console: create a project, enable *YouTube Data API v3*
-and *YouTube Analytics API*, configure the OAuth consent screen (External, add your Google account as
-a test user), create *OAuth client ID → Desktop app*, download the JSON to `tokens/client_secret.json`
-and set `YT_CLIENT_SECRET_FILE=tokens/client_secret.json`. Run `python -m pipeline.publish_youtube --auth`
-once on a machine with a browser (copy `tokens/youtube_token.json` to the server afterwards).
-Uploads from an unverified API project are forced to *private*; the pipeline detects this
-(`private_locked`) and alerts you. Request the YouTube API audit to lift it.
+**YT_CLIENT_SECRET_FILE** (YouTube) – in Google Cloud Console:
+1. Create a project and enable *YouTube Data API v3* and *YouTube Analytics API*.
+2. Configure the OAuth consent screen (*Google Auth Platform*): user type **External**.
+3. Set its **publishing status to "In production"** (*Audience → Publish app*), **not "Testing"**. In
+   Testing, Google expires the refresh token 7 days after you authorise, so uploads would stop after a
+   week. You do not need Google's app verification: an unverified app in production is fine for a
+   single owner. The one cost is a "Google hasn't verified this app" screen during `--auth`; click
+   *Advanced → Go to … (unsafe)* once.
+4. Create *OAuth client ID → Desktop app*, download the JSON to `tokens/client_secret.json` and set
+   `YT_CLIENT_SECRET_FILE=tokens/client_secret.json`.
+5. Run `python -m pipeline.publish_youtube --auth` once on a machine with a browser (copy
+   `tokens/youtube_token.json` to the server afterwards). If the consent screen was in Testing when you
+   authorised, switch it to In production and run `--auth` again: the old token still dies after 7 days.
+
+`doctor` (and the dashboard's health panel) refreshes the stored token on every check, so a dead
+refresh token shows up as **expired** the same day, with this fix in the message. A publish with a
+dead token is marked failed and sends a Telegram alert; it never stops silently.
+Uploads from an API project that has not passed Google's YouTube API audit are forced to *private*;
+the pipeline detects this (`private_locked`) and alerts you. Request the audit to lift it (that is a
+different review from the consent screen's verification).
 An upload costs a large share of the default 10,000-unit daily quota; `youtube.max_uploads_per_day` caps it.
+The cap counts uploads since midnight Pacific time, when YouTube resets the quota.
 
 **IG_USER_ID / IG_ACCESS_TOKEN** (Instagram Reels) – an Instagram professional account linked to a
 Facebook Page and a Meta app using *Instagram API with Facebook Login* with `instagram_basic`,
@@ -184,7 +219,9 @@ Covers the scorer on synthetic series (incl. noise vs V vs crash), picker constr
 timeline maths incl. slow-mo, **pixel-measured centring** of rendered frames (both backends), safe
 zones, audio (pitch-vs-data Spearman on the pluck stem, stem balance, crash darkens the pad, event
 runs), label validation, the state machine, re-render refusal, Telegram offset persistence,
-per-platform analytics, the `.env.example` audit, and that the old channel name appears nowhere.
+per-platform analytics, the `.env.example` audit, that the old channel name appears nowhere, the
+dashboard's stage-to-lane mapping, cards, chips, render progress and buttons, the bot heartbeat,
+YouTube token-refresh detection and the Pacific-time quota day.
 
 ## Data licences
 

@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import tempfile
 
-from .config import ROOT, get_config, path, secret, countries
+from .config import ROOT, get_config, path, countries
 
 OK, WARN, FAIL = "OK  ", "WARN", "FAIL"
 
@@ -59,35 +59,10 @@ def check_render_backend() -> list:
 
 
 def check_credentials() -> list:
-    out = []
-    # Gemini
-    if not secret("GEMINI_API_KEY"):
-        out.append(_line(WARN, "GEMINI_API_KEY", "missing: videos will have no turning-point labels"))
-    else:
-        from .labels import resolve_model
-        try:
-            m = resolve_model(refresh=True)
-            out.append(_line(OK, "GEMINI_API_KEY", f"valid, model {m}"))
-        except Exception as e:  # noqa: BLE001
-            out.append(_line(FAIL, "GEMINI_API_KEY", f"present but failed: {e}"))
-    # Telegram
-    if not (secret("TELEGRAM_BOT_TOKEN") and secret("TELEGRAM_CHAT_ID")):
-        out.append(_line(WARN, "Telegram", "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing: approval via dashboard only"))
-    else:
-        from .approve_telegram import check
-        ok, detail = check()
-        out.append(_line(OK if ok else FAIL, "Telegram", detail))
-    # YouTube
-    from .publish_youtube import check as yt_check
-    st, detail = yt_check()
-    out.append(_line(st, "YouTube", detail))
-    # Instagram
-    from .publish_instagram import check as ig_check
-    st, detail = ig_check()
-    out.append(_line(st, "Instagram", detail))
-    if get_config()["facebook"]["enabled"]:
-        st = OK if secret("FB_PAGE_ID") else WARN
-        out.append(_line(st, "Facebook Page", "FB_PAGE_ID present" if secret("FB_PAGE_ID") else "FB_PAGE_ID missing"))
+    """The same checks the dashboard's health panel shows (pipeline/health.py)."""
+    from .health import credential_checks
+    level = {"OK": OK, "WARN": WARN, "FAIL": FAIL}
+    out = [_line(level[c["level"]], c["name"], c["detail"]) for c in credential_checks()]
     dr = get_config()["dry_run"]
     out.append(_line(OK, "dry_run", ", ".join(f"{k}={v}" for k, v in dr.items())))
     return out

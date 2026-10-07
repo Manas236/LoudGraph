@@ -153,6 +153,10 @@ telegram:
   poll_timeout: 50
   api_base: "https://api.telegram.org"
 
+go_live_test:                   # pass 02 go-live test only: true = really make the public post;
+  instagram_post: false         # false = create + upload + wait for FINISHED, stop before media_publish
+  facebook_post: false          # false = start + upload, stop before the publishing finish call
+
 dry_run:                        # true = write what would be sent to out/<run>/publish_<platform>.json
   youtube: true
   instagram: true

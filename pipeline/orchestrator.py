@@ -101,7 +101,8 @@ def step_render(run_id: str, topic: dict) -> tuple[str, dict]:
             audio.write_wav(d / f"{name}.wav", x, ainfo["sample_rate"])
         _write(run_id, "audio.json", ainfo)
         views = render.build_views(topic, p, data, labels, tl)
-        info = render.render_video(topic, tl, views, d / "audio.wav", d / "video.mp4", thumb=d / "thumb.jpg")
+        info = render.render_video(topic, tl, views, d / "audio.wav", d / "video.mp4", thumb=d / "thumb.jpg",
+                                   on_progress=_progress_writer(run_id))
         meta = render.build_meta(run_id, topic, data, p, labels, views, tl, ainfo)
         meta["render"] = info
         _write(run_id, "meta.json", meta)
@@ -111,6 +112,16 @@ def step_render(run_id: str, topic: dict) -> tuple[str, dict]:
            f"{ainfo['lufs']} LUFS, true peak {ainfo['true_peak_db']} dBTP, pluck stem "
            f"{ainfo['pluck_minus_pad_lu']} LU above pad")
     return msg, {}
+
+
+def _progress_writer(run_id: str):
+    """Frame progress -> runs.progress for the dashboard card. Never breaks a render."""
+    def write(frame: int, n_frames: int) -> None:
+        try:
+            db.set_progress(run_id, frame / max(n_frames, 1))
+        except Exception as e:  # noqa: BLE001
+            log.debug("progress write failed: %s", e)
+    return write
 
 
 def step_notify(run_id: str, topic: dict) -> tuple[str, dict]:

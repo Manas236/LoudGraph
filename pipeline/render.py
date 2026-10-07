@@ -459,7 +459,8 @@ def build_views(topic: dict, pick: dict, data: dict, labels: dict, tl: Timeline,
 
 
 def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path, out_mp4: Path,
-                 thumb: Path | None = None, cfg: dict | None = None) -> dict:
+                 thumb: Path | None = None, cfg: dict | None = None, on_progress=None) -> dict:
+    """on_progress(frame, n_frames) is called about once a second while frames are written."""
     cfg = cfg or get_config()
     vc = cfg["video"]
     r = Renderer(topic, tl, views, cfg)
@@ -483,6 +484,7 @@ def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path,
     ]
     errlog = out_mp4.parent / "ffmpeg.log"
     t0 = time.time()
+    last_progress = 0.0
     with open(errlog, "wb") as ef:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=ef)
         try:
@@ -492,12 +494,17 @@ def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path,
                 if f and f % 300 == 0:
                     el = time.time() - t0
                     log.info("render %d/%d frames (%.1f fps)", f, tl.n_frames, f / el)
+                if on_progress and time.time() - last_progress >= 1.0:
+                    last_progress = time.time()
+                    on_progress(f, tl.n_frames)
             proc.stdin.close()
         except BrokenPipeError:
             pass
         rc = proc.wait()
     if rc != 0:
         raise RuntimeError(f"ffmpeg exited {rc}: {errlog.read_text(errors='replace')[-800:]}")
+    if on_progress:
+        on_progress(tl.n_frames, tl.n_frames)
     guard = _true_peak_guard(tmp, wav, cfg)
     tmp.replace(out_mp4)
     if thumb is not None:
