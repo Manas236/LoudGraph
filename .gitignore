@@ -9,6 +9,7 @@ out/
 *.db-wal
 *.db-shm
 *.lock
+*.yaml.bak-*
 
 # python
 .venv/

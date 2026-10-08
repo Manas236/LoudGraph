@@ -25,10 +25,23 @@ SECRET_NAMES = [
 ]
 
 
-@lru_cache(maxsize=1)
 def get_config() -> dict:
-    with open(ROOT / "config.yaml", encoding="utf-8") as f:
+    target = ROOT / "config.yaml"
+    return _read_config(str(target), target.stat().st_mtime_ns)
+
+
+@lru_cache(maxsize=1)
+def _read_config(filename: str, modified: int) -> dict:
+    with open(filename, encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+get_config.cache_clear = _read_config.cache_clear
+
+
+def brand_name() -> str:
+    """The product name shown to the owner (dashboard, Telegram, doctor). Not drawn on videos."""
+    return (get_config().get("brand") or {}).get("name") or "Graphony"
 
 
 def path(key: str) -> Path:

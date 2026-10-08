@@ -194,8 +194,11 @@ def run_pipeline(run_id: str, from_step: str = "fetch") -> bool:
         try:
             msg, fields = STEP_FN[step](run_id, topic)
         except NotEnoughData as e:
-            db.fail(run_id, step, str(e))
-            log.warning("[%s] %s failed: %s", run_id, step, e)
+            if step == "pick":
+                db.skip(run_id, str(e))
+            else:
+                db.fail(run_id, step, str(e))
+            log.info("[%s] %s skipped: %s", run_id, step, e)
             return False
         except Exception as e:  # noqa: BLE001 - record every failure in the state machine
             (run_dir(run_id) / "error.txt").write_text(traceback.format_exc(), encoding="utf-8")
@@ -218,41 +221,64 @@ def produce(count: int, topic_id: str | None = None) -> list[str]:
     from .selector import choose_topic
     db.init()
     done, tried = [], set()
-    attempts = 0
-    while len(done) < count and attempts < count * 4:
-        attempts += 1
-        tid = topic_id or choose_topic(exclude=tried)
-        if not tid:
-            log.warning("no eligible topic left (all in cooldown, retired or tried this batch)")
-            break
-        tried.add(tid)
-        rid = db.create_run(tid)
-        log.info("produce: run %s topic %s", rid, tid)
-        if run_pipeline(rid):
-            done.append(rid)
-        elif topic_id:
+    db.kv_set("attention:selection", "")
+    for _ in range(count):
+        for attempt in range(5):
+            tid = topic_id if topic_id and not tried else choose_topic(exclude=tried)
+            if not tid:
+                selection_attention()
+                break
+            tried.add(tid)
+            rid = db.create_run(tid)
+            log.info("produce: run %s topic %s", rid, tid)
+            if run_pipeline(rid):
+                done.append(rid)
+                db.kv_set("attention:selection", "")
+                break
+            if db.get_run(rid)["stage"] != "skipped":
+                break  # a real failure already has its own actionable message
+        else:
+            selection_attention()
+        if db.kv_get("attention:selection"):
             break
     log.info("produce: %d/%d runs reached awaiting_approval: %s", len(done), count, done)
     return done
 
 
+SELECTION_MESSAGE = "Couldn't find an interesting topic to make. Add topics or wait for cooldowns."
+
+
+def selection_attention() -> None:
+    db.kv_set("attention:selection", json.dumps({"sentence": SELECTION_MESSAGE, "ts": db.now()}))
+
+
 # ------------------------------------------------------------------ publishing
 
-def publish_run(run_id: str) -> bool:
+def publish_run(run_id: str, platform: str | None = None) -> bool:
+    from .accounts import destinations, ready_destinations
+    run = db.get_run(run_id)
+    if not run:
+        return False
+    ready = ready_destinations(run)
+    if platform:
+        ready = [p for p in ready if p == platform]
+    if not ready:
+        return False  # keep approval until the selected accounts are connected
     if not db.claim(run_id, "approved", "publishing", "publishing started"):
         log.info("publish %s: not in approved state (or already claimed)", run_id)
         return False
-    cfg = get_config()
     d = run_dir(run_id)
-    meta = _read(run_id, "meta.json")
+    try:
+        meta = _read(run_id, "meta.json")
+    except (OSError, ValueError) as error:
+        db.fail(run_id, "publish", f"Could not read the video's metadata: {error}")
+        return False
     video = d / "video.mp4"
     platforms = []
     from . import publish_instagram, publish_youtube
-    platforms.append(("youtube", publish_youtube.publish))
-    if cfg["instagram"]["enabled"]:
-        platforms.append(("instagram", publish_instagram.publish))
-    if cfg["facebook"]["enabled"]:
-        platforms.append(("facebook", publish_instagram.publish_facebook))
+    functions = {"youtube": publish_youtube.publish, "instagram": publish_instagram.publish,
+                 "facebook": publish_instagram.publish_facebook}
+    platforms = [(p, functions[p]) for p in ready]
     statuses = {}
     for name, fn in platforms:
         try:
@@ -264,7 +290,7 @@ def publish_run(run_id: str) -> bool:
             alert(f"❌ publish {name} failed for {run_id}: {e}"[:900])
     good = {"uploaded", "live", "private_locked", "dry_run"}
     summary = ", ".join(f"{k}={v}" for k, v in statuses.items())
-    if any(v == "pending" for v in statuses.values()):
+    if any(v == "pending" for v in statuses.values()) or (not platform and set(destinations(run)) - set(ready)):
         # deferred (e.g. daily upload cap): back to approved; publishers skip platforms already done
         db.transition(run_id, "approved", f"deferred, will retry: {summary}", reset=True)
         return False
@@ -275,11 +301,11 @@ def publish_run(run_id: str) -> bool:
     return False
 
 
-def publish_approved(run_id: str | None = None) -> int:
+def publish_approved(run_id: str | None = None, platform: str | None = None) -> int:
     runs = [db.get_run(run_id)] if run_id else db.list_runs(stage="approved")
     n = 0
     for r in runs:
-        if r and publish_run(r["id"]):
+        if r and publish_run(r["id"], platform):
             n += 1
     log.info("published %d run(s)", n)
     return 0

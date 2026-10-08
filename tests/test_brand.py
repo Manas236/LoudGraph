@@ -8,8 +8,9 @@ SKIP_DIRS = {".git", ".venv", "out", "cache", "__pycache__", ".pytest_cache", "t
 TEXT_EXT = {".py", ".md", ".yaml", ".yml", ".html", ".txt", ".json", ".example", ".toml", ".cfg", ".ini", ""}
 
 
-def test_brand_is_empty_by_default():
-    assert get_config()["brand"]["name"] == ""
+def test_brand_is_graphony_and_the_watermark_is_off_by_default():
+    assert get_config()["brand"]["name"] == "Graphony"
+    assert get_config()["render"]["watermark"] is False
 
 
 def test_name_not_in_repo_text():

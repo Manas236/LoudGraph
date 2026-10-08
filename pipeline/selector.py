@@ -21,7 +21,10 @@ def eligible_topics(exclude=()) -> list[dict]:
     now = datetime.now(timezone.utc)
     out = []
     for t in load_topics():
-        if t["id"] in exclude:
+        if t["id"] in exclude or not t.get("enabled", True):
+            continue
+        events = db.topic_events(t["id"])
+        if events and "already" in events[0]["reason"] and "used" in events[0]["reason"]:
             continue
         w = weights.get(t["id"])
         if w and w["retired"]:

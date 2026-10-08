@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 
 from . import db
-from .config import ROOT, path
+from .config import ROOT, path, get_config
 
 log = logging.getLogger(__name__)
 
@@ -29,9 +30,13 @@ def spawn(*args: str) -> int:
     return p.pid
 
 
-def approve(run_id: str, by: str, publish_now: bool = True) -> str:
-    db.transition(run_id, "approved", f"approved via {by}")
-    if publish_now:
+def approve(run_id: str, by: str, publish_now: bool = True, platforms: list[str] | None = None) -> str:
+    from .accounts import enabled_platforms, ready_destinations
+    chosen = enabled_platforms() if platforms is None else platforms
+    if any(p not in enabled_platforms() for p in chosen):
+        raise ValueError("Choose an enabled platform.")
+    db.transition(run_id, "approved", f"approved via {by}", platforms=json.dumps(chosen))
+    if publish_now and ready_destinations(db.get_run(run_id)):
         spawn("publish", "--run", run_id)
     return "approved"
 
@@ -45,7 +50,7 @@ def regenerate(run_id: str, by: str) -> str:
     """Same topic, new country set: reject the current run (if it is waiting) and start a new one."""
     run = db.get_run(run_id)
     if run["stage"] == "awaiting_approval":
-        db.transition(run_id, "rejected", f"rejected via {by} (regenerate requested)")
+        db.transition(run_id, "rejected", f"replaced via {by} (remake requested)", replaced=1)
     new_id = db.create_run(run["topic_id"], regen_of=run_id)
     db.log(run_id, db.get_run(run_id)["stage"], f"regenerate via {by}: new run {new_id}")
     spawn("produce", "--run", new_id, "--from", "fetch")
@@ -65,7 +70,7 @@ def make_video(by: str) -> str:
     db.kv_set("make_video_at", db.now())
     pid = spawn("produce", "--count", "1")
     log.info("make video requested via %s (pid %s)", by, pid)
-    return "started: the new run appears under 'Data secured' in a few seconds"
+    return "Making a video — it will appear in Review shortly."
 
 
 def retry(run_id: str, from_step: str, by: str) -> str:
@@ -99,6 +104,93 @@ def rerender_as_new(run_id: str, from_step: str, by: str) -> str:
 
 
 def publish(run_id: str, by: str) -> str:
+    from .accounts import ready_destinations
+    run = db.get_run(run_id)
+    if not run or run["stage"] != "approved":
+        raise ValueError("Only an approved video can be posted.")
+    if not ready_destinations(run):
+        return "Approved, not posted — connect an account in Settings."
     db.log(run_id, db.get_run(run_id)["stage"], f"publish requested via {by}")
     spawn("publish", "--run", run_id)
     return "publishing"
+
+
+def edit_title(run_id: str, title: str, by: str) -> str:
+    """Serialize editing with approval; publishers read the atomically replaced metadata file."""
+    title = " ".join(title.split())
+    if not title or len(title) > 100:
+        raise ValueError("Use a title between 1 and 100 characters.")
+    target = path("out") / run_id / "meta.json"
+    with db.db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            run = c.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+            if not run or run["stage"] != "awaiting_approval":
+                raise ValueError("Only a video waiting for review can be edited.")
+            meta = json.loads(target.read_text(encoding="utf-8"))
+            old = meta.get("title", "")
+            meta["title"] = title
+            for key in ("description_youtube", "description_instagram"):
+                if key in meta:
+                    meta[key] = title + meta[key][len(old):] if old and meta[key].startswith(old) else title + "\n\n" + meta[key]
+            temp = target.with_suffix(".json.tmp")
+            temp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+            temp.replace(target)
+            c.execute("UPDATE runs SET title=? WHERE id=?", (title, run_id))
+            c.execute("INSERT INTO stage_log(run_id,stage,message,ts) VALUES (?,'awaiting_approval',?,?)",
+                      (run_id, f"title edited via {by}", db.now()))
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return "Title saved"
+
+
+def retry_platform(run_id: str, platform: str, by: str) -> str:
+    from .accounts import ready_destinations
+    run = db.get_run(run_id)
+    if run["stage"] == "publishing":
+        raise ValueError("This video is already posting.")
+    if not any(p["platform"] == platform and p["status"] == "failed" for p in db.get_posts(run_id)):
+        raise ValueError("Only a failed upload can be retried.")
+    if platform not in ready_destinations(run):
+        raise ValueError("Connect and enable this account in Settings first.")
+    db.transition(run_id, "approved", f"retry {platform} via {by}", reset=True)
+    spawn("publish", "--run", run_id, "--platform", platform)
+    return "Trying the upload again"
+
+
+def dismiss_attention(key: str, version: str, by: str) -> str:
+    db.kv_set(f"dismissed:{key}", version)
+    return "Dismissed"
+
+
+def test_account(service: str) -> dict:
+    from . import health, publish_instagram, publish_youtube
+    functions = {"youtube": publish_youtube.check, "instagram": publish_instagram.check,
+                 "facebook": publish_instagram.check_facebook, "telegram": health.check_telegram,
+                 "gemini": health.check_gemini}
+    if service not in functions:
+        raise ValueError("Unknown service")
+    from .accounts import SERVICES
+    try:
+        result = {"name": SERVICES[service], **functions[service]()}
+    except Exception as e:
+        result = {"name": SERVICES[service], "state": "error", "level": "FAIL", "detail": str(e)}
+    cached = health._cached(health.K_CREDS) or {"items": []}
+    cached["items"] = [r for r in cached["items"] if r["name"] != SERVICES[service]] + [result]
+    cached["checked_at"] = db.now()
+    db.kv_set(health.K_CREDS, json.dumps(cached))
+    return result
+
+
+def save_posting(values: dict) -> str:
+    from .settings import save_posting as save
+    save(values)
+    return "Posting settings saved"
+
+
+def toggle_topic(topic_id: str, enabled: bool) -> str:
+    from .settings import toggle_topic as save
+    save(topic_id, enabled)
+    return "Topic settings saved"

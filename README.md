@@ -1,6 +1,6 @@
-# Data-sonification Shorts/Reels pipeline
+# Graphony
 
-Turns real public statistics (World Bank WDI, Our World in Data) into 30–45 s vertical videos:
+Graphony is a data-sonification Shorts/Reels pipeline. It turns real public statistics (World Bank WDI, Our World in Data) into 30–45 s vertical videos:
 each country's line chart is drawn while its data plays as music (one plucked note per year,
 pitch follows the value). A human approves each video on Telegram or the local dashboard, then it
 is posted to YouTube Shorts and Instagram Reels, and analytics flow back into topic selection.
@@ -9,8 +9,9 @@ Everything runs on a weak laptop (i5, 8 GB, no GPU): one render at a time, frame
 straight into FFmpeg, nothing is held in memory or written per frame.
 
 The on-screen video carries no channel name and no source line: the hook title and the data
-credit (CC BY 4.0) go into the post title/description. `brand.name` in `config.yaml` is empty by
-default; set it only if you want an on-screen watermark.
+credit (CC BY 4.0) go into the post title/description. `brand.name: "Graphony"` in `config.yaml` is
+the product name shown in the dashboard, Telegram messages and `doctor`; it is drawn on the video
+only if you also set `render.watermark: true` (default `false`).
 
 ## Setup
 
@@ -40,7 +41,7 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py bot` | long-running: Telegram approvals + publishes approved runs |
 | `python run.py publish [--run ID]` | publish approved runs now |
 | `python run.py stats` | daily: pull views / avg % viewed, recompute topic weights, send daily summary |
-| `python run.py dashboard` | local web UI on http://127.0.0.1:5055 (board, health panel, "Make a video now") |
+| `python run.py dashboard` | local web UI on http://127.0.0.1:5055 (Review, Library, Settings) |
 | `python run.py verify [--run ID ...]` | ffprobe, loudness, A/V sync, stem balance, pitch-vs-data, pixel centring, contact sheet |
 | `python run.py crash-test` | `out/crash_test.mp4`: a synthetic flat-crash-recover series, to hear the event treatment |
 | `python run.py compare --old ID --new ID` | old vs new frame (`compare.png`) and spectrogram (`compare_spectrogram.png`) |
@@ -69,31 +70,46 @@ read/write that state, and their buttons call the same functions (`pipeline/acti
 
 ### Dashboard
 
-The board shows each video's journey in plain lanes:
+Double-click **Dashboard.bat**: it starts the dashboard in its window and opens
+http://127.0.0.1:5055 in your browser as soon as it answers (if it is already running, it only opens
+the browser). `python run.py dashboard` and `python dashboard/app.py` start the same server, and
+`.vscode/launch.json` has *Dashboard* and *Bot* configurations. **Bot.bat** starts `run.py bot`; a
+second copy notices the first and exits. Everything is local; no frontend build or internet
+connection is needed for the dashboard.
 
-| lane | DB stages |
-|---|---|
-| Data secured | `queued`, `data_ready`, `picked`, `labelled` (the card says what is running, with frame % while rendering) |
-| Video made | `rendered` |
-| Waiting for approval | `awaiting_approval` ("sent to Telegram ✓" once the message was delivered) |
-| Approved | `approved`, `publishing` |
-| Shipped | `published` |
-| Failed / Rejected | `failed` (stage, error, *Retry from stage*), `rejected` |
+- **Review** (`/`): one large, playable video, with **Approve & post**, **Remake** and **Reject**.
+  Use A / M / X, or left/right arrows to move through the thumbnail queue. Click the hook title
+  and press Enter to save it to the post title and captions. Platform chips choose where this
+  video posts. Disconnected accounts are disabled; you can still approve and the video waits in
+  Library. The bot posts waiting approvals after you connect the accounts, or use **Post now**
+  in the Library drawer. Remake keeps the topic, chooses new countries and marks the old version
+  replaced. A progress card refreshes every two seconds. Only actual errors need attention.
+- **Library** (`/library`): Posted, Approved, not posted, and Rejected tabs. Thumbnails show the
+  middle of the first country's chart. Open a card for the player, platform stats, live links and
+  a targeted retry when an upload failed. Test-only posts remain in Approved, not posted.
+- **Settings** (`/settings`): account connection instructions and individual doctor checks,
+  platform on/off and test-mode switches, daily video count and times, and topic controls.
+  YAML changes are backed up as `config.yaml.bak-<timestamp>` or `topics.yaml.bak-<timestamp>`;
+  ruamel.yaml preserves comments. Secrets are edited in `.env` outside the dashboard. Restart
+  Dashboard.bat and Bot.bat after changing secrets, then use the account's **Test** button.
+  Heartbeat, upload quota, schedule and logs are under **Advanced**.
 
-Each card has the title, topic, thumbnail and time in the current stage, plus a chip per platform
-(YT / IG / FB) coloured by post status: pending, uploading, live, private-locked, dry-run or failed.
-A live post's chip links to it. The health panel shows the doctor checks per credential (re-run
-every 15 min in the background, or with *Re-check*), the YouTube uploads counted against today's cap,
-the bot heartbeat (red after 3 min without one), and the next Task Scheduler / cron run of
-`run.py`. *Make a video now* runs `produce --count 1` in the background. The layout works down to
-phone width.
+The single status line prioritizes a stopped configured Telegram bot, failed uploads, test mode,
+missing posting accounts, then All good. Selection skips are recorded as topic events, not failed
+videos. Production tries up to five topics per requested video before asking you to review topics.
+The migration retains old picker-failed runs and logs, but removes them from failure lists.
+
+**Posting times** use `cadence.timezone` (Asia/Kolkata by default). Keep **Bot.bat** running:
+it makes the configured daily number of videos across those times; videos only post after your
+approval. A schedule is optional. Use either these times or a Task Scheduler produce task, to avoid
+two batches. Settings changes are picked up by running processes without restarting them.
 
 - **Scorer** (`score.py`): rejects short, gappy, interpolated/flat, low-swing and negligible series;
   scores swing, zigzag reversals, biggest single-year shock and smoothness (weights in `config.yaml`).
   A series with 6+ reversals is noise: its shock points are scaled by 0.3.
 - **Picker**: 6–8 countries (fills 30–45 s), maximises shape diversity, wants one rising, one falling
   and one multi-reversal series, plays the highest score last, never repeats a (topic, country set).
-  A set with no falling country or a minimum pairwise shape distance below 0.25 fails as
+  A set with no falling country or a minimum pairwise shape distance below 0.25 is skipped as
   **low variety** (the topic goes on cooldown and the selector picks another). If slow-mo events push
   the video past 45 s, the least interesting country is dropped.
 - **Timeline** (`timeline.py`) is the single source of timing. A year whose move is at least 25% of the
@@ -139,7 +155,7 @@ Send your bot any message, then open `https://api.telegram.org/bot<TOKEN>/getUpd
    `tokens/youtube_token.json` to the server afterwards). If the consent screen was in Testing when you
    authorised, switch it to In production and run `--auth` again: the old token still dies after 7 days.
 
-`doctor` (and the dashboard's health panel) refreshes the stored token on every check, so a dead
+`doctor` (and Settings account tests) refreshes the stored token on every check, so a dead
 refresh token shows up as **expired** the same day, with this fix in the message. A publish with a
 dead token is marked failed and sends a Telegram alert; it never stops silently.
 Uploads from an API project that has not passed Google's YouTube API audit are forced to *private*;
@@ -166,9 +182,9 @@ Default cadence: 2 videos/day (`cadence.videos_per_day`). Paths and names below 
 
 ```bat
 set P=C:\path\to\pipeline
-schtasks /Create /TN "Shorts pipeline produce" /SC DAILY /ST 08:00 /TR "\"%P%\.venv\Scripts\python.exe\" \"%P%\run.py\" produce"
-schtasks /Create /TN "Shorts pipeline stats"   /SC DAILY /ST 21:00 /TR "\"%P%\.venv\Scripts\python.exe\" \"%P%\run.py\" stats"
-schtasks /Create /TN "Shorts pipeline bot"     /SC ONLOGON          /TR "\"%P%\.venv\Scripts\pythonw.exe\" \"%P%\run.py\" bot"
+schtasks /Create /TN "Graphony produce" /SC DAILY /ST 08:00 /TR "\"%P%\.venv\Scripts\python.exe\" \"%P%\run.py\" produce"
+schtasks /Create /TN "Graphony stats"   /SC DAILY /ST 21:00 /TR "\"%P%\.venv\Scripts\python.exe\" \"%P%\run.py\" stats"
+schtasks /Create /TN "Graphony bot"     /SC ONLOGON          /TR "\"%P%\.venv\Scripts\pythonw.exe\" \"%P%\run.py\" bot"
 ```
 
 In the task's properties tick *Run whether user is logged on or not* for the daily jobs, and on the
@@ -219,11 +235,22 @@ Covers the scorer on synthetic series (incl. noise vs V vs crash), picker constr
 timeline maths incl. slow-mo, **pixel-measured centring** of rendered frames (both backends), safe
 zones, audio (pitch-vs-data Spearman on the pluck stem, stem balance, crash darkens the pad, event
 runs), label validation, the state machine, re-render refusal, Telegram offset persistence,
-per-platform analytics, the `.env.example` audit, that the old channel name appears nowhere, the
-dashboard's stage-to-lane mapping, cards, chips, render progress and buttons, the bot heartbeat,
+per-platform analytics, the `.env.example` audit, that the old channel name appears nowhere, that
+`brand.name` alone never puts text on a frame (only `render.watermark` does), the
+dashboard review queue, title and platform choices, skip recovery and migration, YAML backups,
+CSRF, video Range requests, status priority, the connect steps naming every `.env` variable,
+`python dashboard/app.py` run directly, the single-instance bot, and the bot heartbeat,
 YouTube token-refresh detection and the Pacific-time quota day.
 
 ## Data licences
 
 World Bank WDI and Our World in Data are CC BY 4.0; every description credits the source and the
 indicator. Inter is SIL OFL 1.1 (`assets/fonts/OFL.txt`); flag-icons is MIT (`assets/flags/LICENSE`).
+
+### Dashboard screenshots
+
+`out/dashboard_screens/v3/` holds desktop (1440x900) and phone (390x844) screenshots.
+To reproduce them with headless Microsoft Edge, install the optional QA dependency with
+`.venv\Scripts\python.exe -m pip install websocket-client`, then run
+`.venv\Scripts\python.exe scripts\dashboard_screenshots.py`. The harness uses disposable SQLite
+copies and disables subprocess actions. It never approves or publishes from the real database.

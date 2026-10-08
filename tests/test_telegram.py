@@ -83,3 +83,27 @@ def test_offset_survives_a_restart(temp_db, monkeypatch):
     # "restart": a fresh poll reads the offset from the DB and gets nothing again
     assert bot.poll_once(1) == 0
     assert seen == [None, 42]
+
+
+def test_messages_carry_the_graphony_header(tg, tmp_path, monkeypatch):
+    import json
+    bot, db, calls = tg
+    rid = _waiting_run(db)
+    (tmp_path / "meta.json").write_text(json.dumps({"title": "A hook", "duration_seconds": 40.0, "audio": {"lufs": -14.0}}))
+    (tmp_path / "labels.json").write_text("{}")
+    monkeypatch.setattr(bot, "run_dir", lambda run_id: tmp_path)
+    assert bot.caption(rid).splitlines()[:2] == ["Graphony · new video to review", "🎬 A hook"]
+    assert bot.daily_summary_text().startswith("📊 Graphony · daily summary")
+    assert bot.status_text().startswith("Graphony: ")
+
+
+def test_a_second_bot_exits_at_once(temp_db, tmp_path, monkeypatch, capsys):
+    from pipeline import approve_telegram as bot, lock
+    monkeypatch.setattr(lock, "path", lambda key: tmp_path)
+    monkeypatch.setattr(bot, "_bot_loop", lambda: pytest.fail("a second bot must not start"))
+    with lock.single_instance("bot") as mine:
+        assert mine
+        assert bot.run_bot() == 0
+    assert "already running" in capsys.readouterr().out
+    monkeypatch.setattr(bot, "_bot_loop", lambda: 7)
+    assert bot.run_bot() == 7  # the lock was released, so the next bot starts

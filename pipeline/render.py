@@ -155,7 +155,8 @@ class Renderer:
         self.x0, self.x1 = tl.slots[0].x_start, tl.slots[0].x_end
         self.header_size, self.header_lines = header_fit(self.cv, topic["subtitle"])
         self.L = compute_layout(self.header_size, len(self.header_lines))
-        self.brand = (self.cfg.get("brand") or {}).get("name") or ""
+        # brand.name is the product name; it reaches the frames only when render.watermark is true
+        self.brand = ((self.cfg.get("brand") or {}).get("name") or "") if self.rc.get("watermark") else ""
         self._static: dict[int, object] = {}
         self._final: dict[int, object] = {}
         self._tags: dict[int, tuple] = {}
@@ -196,7 +197,7 @@ class Renderer:
                 self.cv.circle(cx, y, DOT_R - 1, self.rc["muted"], alpha=0.9, stroke=2)
 
     def _brand(self):
-        if self.brand:  # off by default
+        if self.brand:  # render.watermark is off by default
             self.cv.text(CX, 1650, self.brand, "semibold", 30, "#ffffff", anchor="m", alpha=0.28, tag="watermark")
 
     # ------------------------------------------------------------ layers

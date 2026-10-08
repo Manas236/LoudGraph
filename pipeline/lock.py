@@ -39,6 +39,21 @@ else:
 
 
 @contextmanager
+def single_instance(name: str):
+    """Yield True while this process holds `name`, or False at once if another process holds it."""
+    fd = os.open(path("cache") / f"{name}.lock", os.O_RDWR | os.O_CREAT)
+    try:
+        mine = _try_lock(fd)
+        try:
+            yield mine
+        finally:
+            if mine:
+                _unlock(fd)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
 def exclusive(name: str, wait_seconds: float = 3 * 3600, on_wait=None):
     f = path("cache") / f"{name}.lock"
     fd = os.open(f, os.O_RDWR | os.O_CREAT)

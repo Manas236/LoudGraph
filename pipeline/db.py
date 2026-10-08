@@ -11,7 +11,7 @@ from .config import path
 
 STAGES = [
     "queued", "data_ready", "picked", "labelled", "rendered",
-    "awaiting_approval", "approved", "rejected", "publishing", "published", "failed",
+    "awaiting_approval", "approved", "rejected", "publishing", "published", "failed", "skipped",
 ]
 # Forward edges of the state machine. Any stage may also go to "failed".
 NEXT = {
@@ -26,6 +26,7 @@ NEXT = {
     "published": set(),
     "rejected": set(),
     "failed": set(),
+    "skipped": set(),
 }
 POST_STATUSES = {"pending", "uploading", "uploaded", "live", "private_locked", "failed", "dry_run"}
 QUOTA_TZ = "America/Los_Angeles"  # the YouTube Data API quota resets at midnight Pacific time
@@ -48,6 +49,14 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_stage ON runs(stage);
 CREATE INDEX IF NOT EXISTS idx_runs_topic ON runs(topic_id);
+CREATE TABLE IF NOT EXISTS topic_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    run_id TEXT UNIQUE,
+    ts TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS stage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL,
@@ -110,7 +119,9 @@ def parse_ts(s: str) -> datetime:
 
 
 # columns added after the first release; old databases get them on first connect
-MIGRATIONS = [("runs", "progress", "REAL"), ("runs", "progress_at", "TEXT")]
+MIGRATIONS = [("runs", "progress", "REAL"), ("runs", "progress_at", "TEXT"),
+              ("runs", "title", "TEXT"), ("runs", "platforms", "TEXT"),
+              ("runs", "replaced", "INTEGER NOT NULL DEFAULT 0")]
 _ready: set[str] = set()
 
 
@@ -123,6 +134,28 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             except sqlite3.OperationalError as e:  # another process added it first
                 if "duplicate column" not in str(e):
                     raise
+    migrate_picker_failures(conn)
+
+
+def is_picker_skip(error: str) -> bool:
+    text = (error or "").lower()
+    return "low variety" in text or ("already" in text and "used" in text and "set" in text)
+
+
+def migrate_picker_failures(conn: sqlite3.Connection) -> None:
+    """Keep the old rows and logs as an audit trail; reclassify selection skips, idempotently."""
+    for row in conn.execute("SELECT * FROM runs WHERE stage='failed' AND failed_stage='pick'").fetchall():
+        if is_picker_skip(row["error"]):
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("INSERT OR IGNORE INTO topic_events(topic_id,kind,reason,run_id,ts) VALUES (?,'skip',?,?,?)",
+                             (row["topic_id"], row["error"], row["id"], row["updated_at"]))
+                conn.execute("UPDATE runs SET stage='skipped',error=NULL,failed_stage=NULL WHERE id=? AND stage='failed'",
+                             (row["id"],))
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
 
 def connect() -> sqlite3.Connection:
@@ -174,7 +207,7 @@ def create_run(topic_id: str, regen_of: str | None = None) -> str:
 
 def get_run(run_id: str) -> dict | None:
     with db() as c:
-        r = c.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        r = c.execute("SELECT rowid AS ref, * FROM runs WHERE id=?", (run_id,)).fetchone()
     return _run_dict(r) if r else None
 
 
@@ -185,14 +218,14 @@ def _run_dict(r: sqlite3.Row) -> dict:
 
 
 def list_runs(stage: str | None = None, topic_id: str | None = None, limit: int = 500) -> list[dict]:
-    q, args = "SELECT * FROM runs WHERE 1=1", []
+    q, args = "SELECT rowid AS ref, * FROM runs WHERE 1=1", []
     if stage:
         q += " AND stage=?"
         args.append(stage)
     if topic_id:
         q += " AND topic_id=?"
         args.append(topic_id)
-    q += " ORDER BY created_at DESC LIMIT ?"
+    q += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
     args.append(limit)
     with db() as c:
         return [_run_dict(r) for r in c.execute(q, args).fetchall()]
@@ -284,6 +317,34 @@ def claim(run_id: str, from_stage: str, to_stage: str, message: str = "") -> boo
 
 def fail(run_id: str, stage: str, error: str) -> None:
     transition(run_id, "failed", f"failed at {stage}: {error}", failed_stage=stage, error=error[:2000])
+
+
+def skip(run_id: str, reason: str) -> None:
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            r = c.execute("SELECT topic_id FROM runs WHERE id=?", (run_id,)).fetchone()
+            c.execute("INSERT OR IGNORE INTO topic_events(topic_id,kind,reason,run_id,ts) VALUES (?,'skip',?,?,?)",
+                      (r["topic_id"], reason, run_id, now()))
+            c.execute("UPDATE runs SET stage='skipped', error=NULL, failed_stage=NULL, updated_at=? WHERE id=?",
+                      (now(), run_id))
+            c.execute("INSERT INTO stage_log(run_id,stage,message,ts) VALUES (?,'skipped',?,?)", (run_id, reason, now()))
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+
+
+def topic_events(topic_id: str | None = None) -> list[dict]:
+    with db() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM topic_events WHERE (? IS NULL OR topic_id=?) ORDER BY id DESC", (topic_id, topic_id))]
+
+
+def run_by_ref(ref: int) -> dict | None:
+    with db() as c:
+        row = c.execute("SELECT rowid AS ref, * FROM runs WHERE rowid=?", (ref,)).fetchone()
+    return _run_dict(row) if row else None
 
 
 def used_country_sets(topic_id: str, except_run: str | None = None) -> set[str]:

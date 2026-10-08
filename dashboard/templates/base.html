@@ -1,48 +1,12 @@
 <!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ brand }} · {% block title %}Pipeline{% endblock %}</title>
-<style>
-  :root { --bg:#0b0d12; --panel:#141821; --card:#1b202b; --line:#232937; --text:#e8ebf1; --muted:#8b93a3; --accent:#22d3ee;
-          --ok:#34d399; --warn:#fbbf24; --bad:#fb7185; --info:#60a5fa; }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  a { color:var(--accent); text-decoration:none; }
-  header { display:flex; flex-wrap:wrap; gap:6px 20px; align-items:center; padding:12px 20px; border-bottom:1px solid var(--line); }
-  header b { font-size:16px; margin-right:12px; }
-  header a { color:var(--muted); } header a.on { color:var(--text); }
-  main { padding:16px 20px; }
-  .flash { background:#1d2433; border-left:3px solid var(--accent); padding:8px 12px; margin-bottom:12px; overflow-wrap:anywhere; }
-  .tablewrap { overflow-x:auto; }
-  .tablewrap > table { min-width:560px; }   /* scroll sideways on phones instead of squashing columns */
-  table { border-collapse:collapse; width:100%; }
-  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
-  .muted { color:var(--muted); } .small { font-size:12px; }
-  .pill { display:inline-block; padding:1px 8px; border-radius:99px; background:#222a38; font-size:12px; }
-  .pill.ok { background:#123b2c; color:var(--ok); } .pill.bad { background:#3e1a22; color:var(--bad); }
-  .pill.warn { background:#3b3012; color:var(--warn); }
-  button, select { background:#222a38; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; font:inherit; }
-  button.go { background:#123b2c; border-color:#1e6b4f; } button.no { background:#3e1a22; border-color:#6b2433; }
-  form.inline { display:inline; }
-  @media (max-width: 600px) {
-    header { padding:10px 12px; gap:4px 14px; }
-    main { padding:12px; }
-  }
-</style>
-</head>
-<body>
-<header>
-  <b>{{ brand }}</b>
-  <a href="{{ url_for('board') }}" class="{{ 'on' if request.endpoint=='board' }}">Pipeline</a>
-  <a href="{{ url_for('analytics') }}" class="{{ 'on' if request.endpoint=='analytics' }}">Analytics</a>
-  <a href="{{ url_for('topics') }}" class="{{ 'on' if request.endpoint=='topics' }}">Topics</a>
-</header>
-<main>
-  {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
-  {% block body %}{% endblock %}
-</main>
-</body>
-</html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="csrf-token" content="{{ csrf }}">
+<title>{% block title %}Review{% endblock %} · {{ brand }}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}"><script src="{{ url_for('static', filename='dashboard.js') }}" defer></script>
+</head><body data-page="{{ request.endpoint }}">
+<header class="topbar"><div class="header-inner"><a href="/" class="brand"><span class="brand-symbol" aria-hidden="true">▥</span> {{ brand }}</a>
+<nav aria-label="Main navigation"><a href="/" {{ 'aria-current=page' if request.endpoint == 'review' }}>Review</a><a href="/library" {{ 'aria-current=page' if request.endpoint == 'library' }}>Library</a><a href="/settings" {{ 'aria-current=page' if request.endpoint == 'settings' }}>Settings</a></nav>
+<div id="status-line">{% include '_status.html' %}</div></div></header>
+<main>{% block body %}{% endblock %}</main>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden>{% for message in get_flashed_messages() %}{{ message }}{% endfor %}</div>
+</body></html>

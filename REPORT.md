@@ -407,3 +407,213 @@ I looked at every screenshot and fixed two things:
 5. **Start the bot:** `python run.py bot`. The health panel's heartbeat should turn green within a minute.
 6. **Re-run pass 02 sections 1–6** with the credentials in place.
 7. Optional: register the scheduled tasks from the README. The health panel will then show the next run.
+
+---
+
+# Dashboard rework (v3) (2026-10-08)
+
+**Tests: 146 passed, 0 failed**, run in this pass with `.venv\Scripts\python.exe -m pytest`. That includes every test Pass 02 wrote but could not run.
+
+**State check.** Tag `v2-pre-dashboard-rework` already existed at the clean HEAD `d330adb`; it is pushed with this pass. There were no commits after `v1-video-approved` besides Pass 02. The working tree held an uncommitted partial version of this rework from an earlier run that had stopped. It included the Review, Library and Settings pages, `pipeline/accounts.py`, `errors.py`, `schedule.py` and `settings.py`, skip handling, the migration and tests. It matched the spec and its 135 tests passed, so I kept it and finished it. **No stash was created.**
+
+## What changed, per page
+
+**Top bar.** "Graphony" sits on the left and in the browser tab, with `Review · Library · Settings` beside it. The right side shows one status message, in this priority order:
+1. bot stopped (only when Telegram is configured)
+2. N videos failed to post
+3. Test mode
+4. N accounts not connected
+5. All good
+
+Clicking it goes to the place that fixes it.
+
+**Review (`/`).**
+- **One video at a time.** It plays the real MP4 in a 9:16 player about 75vh tall, served with Range support (206).
+- **Right panel**, top to bottom:
+  - the hook title (click to edit, Enter saves it to `meta.json` and the DB, which the publishers read)
+  - "What it shows" (the topic subtitle)
+  - countries in play order with flags
+  - labels
+  - "Will post to" chips: only enabled platforms, "test" in test mode, "not connected" disabled
+  - **Approve & post**, **Remake** and **Reject**, with A / M / X
+- **Queue.** "1 of 8 waiting" sits above the player and a thumbnail strip below it. ← → move through the queue. After an action a toast appears and the next video slides in without a page reload.
+- **Nothing connected:** the button reads "Approve (posts once accounts are connected)", and the video waits in Library → Approved, not posted.
+- **Empty:** "All caught up.", the next scheduled time or "No schedule set", and Make a video now.
+- **Making a video:** a progress card refreshes every 2 s.
+- **Needs attention:** one amber banner with a plain sentence, the fix, Retry, Dismiss and a Details disclosure.
+- **Changed in this pass:**
+  - Removed the page heading and tagline that pushed the queue strip below the fold. At 1440×900 the player, the whole strip and the Approve button now fit on one screen.
+  - The player is an exact 9:16 box instead of a wide grey frame.
+  - Approve is a solid green. It was a pale mint that looked disabled.
+  - A progress card with no stage change and no render progress for 30 min now says "no progress since …; it may have stopped". The old board had a "stalled?" flag, and the partial rework had dropped it.
+  - An expired or rejected account found by a check now reads "Instagram is not connected: the access token expired." It used to say "upload failed" even though no upload had run.
+
+**Library (`/library`).**
+- Tabs: **Posted · Approved, not posted · Rejected**, each with a count.
+- **Cards** show:
+  - a thumbnail from the middle of the first country's chart, cached as `out/<run>/review-thumb.jpg`
+  - the title and "made … ago"
+  - one plain line per platform
+- **The drawer** has:
+  - the player
+  - per-platform stats and live links
+  - for a failed platform: the reason, the fix and Try again
+  - the run id and logs, only under a collapsed "Technical details"
+- **Changed in this pass:**
+  - tighter card spacing; the thumbnail background now matches the video
+  - the drawer no longer says "tap to see why" or shows empty stat dashes for a platform that never went live
+
+**Settings (`/settings`).**
+- **Accounts:** five rows with the status in words. Test runs only that service's doctor check.
+- **Posting:**
+  - on/off and Test mode per platform
+  - videos per day and posting times
+  - writes `config.yaml` through ruamel.yaml, after a backup to `config.yaml.bak-<timestamp>`
+- **Topics:** the table, writing `topics.yaml` after a backup.
+- **Advanced:** collapsed by default.
+- **Changed in this pass:**
+  - The Accounts section says where `.env` is, with the real folder path.
+  - Every "How to connect" starts with the exact `.env` variable(s) it fills.
+  - The steps were completed:
+    - **YouTube:** consent screen "In production", running `--auth` in its own terminal, and the YouTube API audit form.
+    - **Instagram:** professional account, linked Page, Meta app, Graph API Explorer → long-lived token → Page token from `me/accounts` → `instagram_business_account`.
+    - **Facebook:** the same Page token plus `pages_manage_posts`, and `FB_PAGE_ID`.
+    - **Telegram:** BotFather, then the chat id from `getUpdates`.
+    - **Gemini:** the AI Studio key.
+
+## Behaviour behind the UI (from the partial run, checked and tested)
+
+- **Skips are not failures.** When the picker can't build a set, the run becomes `skipped` with a `skip` row in `topic_events`. `produce` then tries the next topic, up to 5 attempts per video. If all 5 skip, there is one Needs-attention message: "Couldn't find an interesting topic to make. Add topics or wait for cooldowns."
+- **Migration.** The two old life_expectancy picker failures in the real `pipeline.db` are now `skipped`, with two skip events (the "already been used" one and the low-variety one). The rows and logs are kept, and they are gone from every failure list. The migration is idempotent.
+- **Names.** All 34 topics have a `name`, and the pages show `name` and `subtitle`, never the slug.
+- **Errors.** `pipeline/errors.py: explain_error` maps these errors to {sentence, fix, Settings section}:
+  - token expired
+  - quota exceeded
+  - network down
+  - media processing failed
+  - missing permission
+  - ffmpeg crash
+
+  Anything else reads "Something went wrong while <stage>", with the raw text under Details.
+
+## Brand and one-click launch (this pass)
+
+- **Brand and watermark.**
+  - `brand.name: "Graphony"` is set in `config.yaml`, together with a new `render.watermark: false`. The renderer draws the name only when `render.watermark` is true, so a non-empty `brand.name` alone puts nothing on the frames.
+  - **Test:** `test_brand_name_alone_never_puts_text_on_frames` renders intro, mid, transition and end frames with `brand.name: "Graphony"` and `watermark: false`. It asserts there is no brand text box, and that the pixels are identical to a render with no brand name at all.
+- **Where the name appears:**
+  - the dashboard top bar and the browser tab
+  - the Telegram approval message, whose first line is now "Graphony · new video to review"
+  - the Telegram daily summary and `/status`
+  - the `doctor` header
+  - the README title
+- **Dashboard.bat**
+  - cds to its own folder and uses `.venv\Scripts\python.exe`. Without `.venv` it shows one line and pauses.
+  - If `http://127.0.0.1:5055/ping` already answers `graphony-dashboard`, it only opens the browser.
+  - Otherwise it starts the dashboard in its own window, polls for up to 15 s, and opens the browser.
+  - **Verified live** with a copy whose browser-open calls wrote marker files:
+    - the first launch opened after 3.8 s, listening on 127.0.0.1 only
+    - the second launch exited 0 in 0.5 s after only opening the browser
+    - without `.venv`, it showed the one-line message and exited 1
+- **Bot.bat** follows the same pattern. `run.py bot` now holds an OS lock (`cache/bot.lock`), so a second copy prints "already running" and exits: two bots would fight over Telegram `getUpdates`. Its missing-`.venv` path was verified live. I did not live-run the bot itself, because it would long-poll your real Telegram bot and write a heartbeat into the real DB. The lock is covered by `test_a_second_bot_exits_at_once`.
+- `python dashboard/app.py` runs the same server as `run.py dashboard`. A test runs it from an unrelated folder.
+- `.vscode/launch.json` has **Dashboard** and **Bot** configurations.
+- `.gitattributes` checks `*.bat` out with CRLF, because cmd.exe can misparse LF-only batch files.
+- **Safety.** `.env` now holds real keys, and `pipeline/config.py` loads it at import. An autouse fixture in `tests/conftest.py` therefore strips every secret from every test, and the screenshot script does the same. No test or screenshot run can call a real API.
+
+## Required tests (all executed)
+
+| requirement | test |
+|---|---|
+| status-line priority | `test_dashboard.py::test_status_line_priority` |
+| skip → next topic (≤5) and one attention message | `test_dashboard_behaviour.py::test_skip_tries_next_topic_up_to_five` (0/1/4/5 skips), `test_explicit_topic_skip_falls_back_and_real_failure_does_not_skip` |
+| migration of old picker-failed runs | `test_migration_preserves_two_old_runs_as_skip_events` |
+| inline title edit reaches the publisher | `test_title_edit_persists_exact_payload_consumed_by_publishers` |
+| approve with nothing connected → Approved, not posted | `test_no_accounts_approval_stays_in_library_and_never_calls_publisher` |
+| video Range request → 206 | `test_video_range_response_and_whitelist` |
+| error mapping | `test_error_mapping` (7 cases) |
+| YAML writes back up and stay valid YAML | `test_yaml_writes_backup_validate_and_preserve_comments` |
+| no run id or slug in Review/Library HTML (regex) | `test_review_shows_video_queue_and_clear_actions_without_ids`, `test_html_never_contains_ids_or_slugs_for_any_library_tab` |
+
+**Added in this pass:**
+- watermark: `test_brand_name_alone_never_puts_text_on_frames` and `test_brand_draws_only_when_the_watermark_flag_is_on`
+- brand default: `test_brand_is_graphony_and_the_watermark_is_off_by_default`
+- Telegram: `test_messages_carry_the_graphony_header`
+- bot lock: `test_a_second_bot_exits_at_once`
+- direct run: `test_app_py_runs_directly_from_any_folder`
+- connect steps: `test_how_to_connect_names_every_env_variable_in_plain_steps` and `test_settings_show_where_each_key_goes_and_brand`
+- account banner: `test_an_expired_account_is_explained_as_a_connection_not_an_upload`
+- stalled card: `test_a_making_card_with_no_progress_for_30_minutes_says_so`
+
+## Screenshots
+
+These are in `out/dashboard_screens/v3/`, each at 1440×900 and 390×844 (27 PNGs, plus `checks.json`). They were taken with headless Edge over the DevTools protocol (Playwright is not installed) by running `.venv\Scripts\python.exe scripts\dashboard_screenshots.py`.
+- **Real data:** each state starts from a read-only copy of the real `pipeline.db`, with the real 8 waiting videos.
+- **Fake states** (empty, making, attention, the library tabs) are changes to that throwaway copy only.
+- The script checks that every run in the real DB (id, stage, title, platforms, replaced) is unchanged afterwards, and it was.
+- It also clicks →, then Approve, in the browser, and checks the queue drops from 8 to 7 with a toast.
+
+| state | files |
+|---|---|
+| Review with the real queue | `review_queue_*.png`, `review_queue_panel_390x844.png` (the panel scrolled into view) |
+| Review empty | `review_empty_*.png` |
+| Review while making a video | `review_making_*.png` |
+| Review with Needs attention | `review_attention_*.png` |
+| Library tabs | `library_posted_*.png`, `library_approved_*.png`, `library_rejected_*.png` |
+| Library drawer | `library_drawer_*.png` |
+| Settings | `settings_*.png`, `settings_connect_youtube_*.png`, `settings_posting_*.png`, `settings_topics_*.png`, `settings_advanced_*.png` |
+
+**Checklist.** I looked at every screenshot. The script also asserts, on every shot: no horizontal overflow, exactly one status message, no "Nothing here", no run id and no slug in the page text.
+- The waiting video and the Approve button are the most prominent things on Review.
+- There are no "Nothing here" lanes, ids or slugs.
+- Red appears only on the attention and library states, where a fixture upload really failed.
+- Nothing overlaps or overflows at 390 px. The Review buttons are a sticky bottom bar there.
+
+**Fixed after looking at them:**
+- the "Pipeline" brand
+- the pale primary button
+- the queue strip below the fold
+- the top bar shifting 8 px on the empty page (`scrollbar-gutter: stable`)
+- the queue strip's scrollbar on phones
+- the drawer wording
+
+## doctor
+
+`python run.py doctor` before you filled `.env`: **0 failing, 4 warnings** (the four missing credentials).
+
+When I re-ran it, you had already filled six of the seven variables:
+
+```
+[OK  ] ffmpeg, ffprobe, dirs, fonts, flags, render backend (skia)
+[OK  ] Gemini - valid, model gemini-3.8-flash
+[OK  ] Telegram - bot ok, approvals from your chat
+[WARN] YouTube - YT_CLIENT_SECRET_FILE missing (dry_run=True)
+[FAIL] Instagram - IG user lookup: HTTP 400 ... Session has expired on Tuesday, 26-May-26 ... code 190, error_subcode 463
+[OK  ] Facebook - facebook.enabled is false
+1 failing, 1 warnings
+```
+
+The only failure is a credential: Meta says the `IG_ACCESS_TOKEN` you pasted expired on 26 May 2026. The code reports it correctly as **expired**, and Settings will show "Expired — reconnect" once its background check runs. Nothing in the code needs fixing.
+
+`.env` already existed (you created it during this pass), so it was **not** copied from `.env.example` and was not changed.
+
+## Left undone / for you to know
+
+- **Three of the eight waiting videos were rendered before fix pass 01.** Landlines, Life expectancy and Nuclear power were rendered between 14:29 and 14:35 on 2026-10-07. Fix pass 01 landed at 15:23. Their frames still show the **old channel name**, a "Source:" line and the title pill. Reject them, or Remake them for new versions; don't approve them. I did not change them.
+- **Instagram token.** The one in `.env` has expired and must be replaced (see below).
+- I did not live-run `Bot.bat` (see above).
+- Screenshots exist only at 1440 and 390 wide. The tablet-width layout has a CSS breakpoint but no screenshot.
+
+---
+
+# Owner: next steps
+
+- **Fill `.env`** (in this folder; steps in Settings → Accounts → How to connect):
+  - `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` already work.
+  - `IG_ACCESS_TOKEN`: replace it with a new long-lived Page token (the current one expired 26 May 2026).
+  - `IG_USER_ID` and `FB_PAGE_ID` are filled; they can only be checked once the new token works.
+  - `YT_CLIENT_SECRET_FILE`: still empty. Use `tokens/client_secret.json`.
+- **Run YouTube auth once**, in its own terminal: `.venv\Scripts\python.exe -m pipeline.publish_youtube --auth`
+- **Double-click `Bot.bat`** and keep its window open.
+- **Reject or Remake** the three pre-fix videos (Landlines, Life expectancy, Nuclear power).
+- **Re-run the Pass 02 go-live prompt, sections 1–6.**

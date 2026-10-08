@@ -114,13 +114,30 @@ def test_header_is_the_metric_and_tick_labels_are_inside_the_chart(tmp_path):
         assert r.L["chart_t"] - 40 <= y0 and y1 <= r.L["chart_b"]
 
 
-def test_brand_draws_only_when_configured(tmp_path):
+def test_brand_draws_only_when_the_watermark_flag_is_on(tmp_path):
     cfg = copy.deepcopy(get_config())
-    assert cfg["brand"]["name"] == ""
+    assert cfg["render"]["watermark"] is False
     cfg["brand"]["name"] = "Example Channel"
+    cfg["render"]["watermark"] = True
     topic, tl, views = _video()
     boxes = R.render_still(topic, tl, views, 0.1, tmp_path / "b.png", cfg=cfg)
     assert any(b[5] == "watermark" and b[0] == "Example Channel" for b in boxes)
+
+
+@pytest.mark.parametrize("which", ["intro", "mid", "transition", "end"])
+def test_brand_name_alone_never_puts_text_on_frames(which):
+    """brand.name "Graphony" with render.watermark false: no brand text, and pixels identical to no brand."""
+    named = copy.deepcopy(get_config())
+    named["brand"]["name"] = "Graphony"
+    named["render"]["watermark"] = False
+    unnamed = copy.deepcopy(named)
+    unnamed["brand"]["name"] = ""
+    topic, tl, views = _video()
+    t = {"intro": 0.1, **_frames(tl)}[which]
+    r = R.Renderer(topic, tl, views, named)
+    rgb = r.frame_array(t)
+    assert not any(b[5] == "watermark" or "graphony" in b[0].lower() for b in r.cv.text_boxes)
+    assert np.array_equal(rgb, R.Renderer(topic, tl, views, unnamed).frame_array(t))
 
 
 def _luminance(rgb):

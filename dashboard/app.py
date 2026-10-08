@@ -1,324 +1,285 @@
-"""Local dashboard (section 10). Binds to 127.0.0.1 only; on a server reach it through an SSH tunnel:
-    ssh -L 5055:127.0.0.1:5055 user@server
-Every button calls the same functions as the Telegram bot (pipeline/actions.py)."""
+"""Local, server-rendered Review / Library / Settings dashboard.
+
+Start it with Dashboard.bat, `python run.py dashboard`, or directly with `python dashboard/app.py`.
+"""
 from __future__ import annotations
 
 import ipaddress
-import json
 import re
 import secrets
-from datetime import datetime, timezone
+import sys
+from pathlib import Path
 
-from flask import Flask, abort, flash, jsonify, redirect, render_template, request, send_from_directory, url_for
+if not __package__:  # started as a script: make the repo root importable, as run.py does
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from flask import Flask, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
+from markupsafe import Markup, escape
+
+from dashboard import viewmodels as vm
+from dashboard.media import chart_thumbnail
 from pipeline import actions, db, health
-from pipeline.config import country_by_iso3, get_config, path, setup_logging
-from pipeline.orchestrator import STEPS
-from pipeline.topics import dropped_topics, load_topics, verify_report
-
-RUN_RE = re.compile(r"^r\d{8}-\d{6}-[0-9a-f]{4}$")
-MEDIA = {"video.mp4", "thumb.jpg", "contact.png"}
-
-# The board shows a video's journey in plain words. Every DB stage belongs to exactly one lane.
-LANES = [
-    ("data", "Data secured", ("queued", "data_ready", "picked", "labelled")),
-    ("made", "Video made", ("rendered",)),
-    ("waiting", "Waiting for approval", ("awaiting_approval",)),
-    ("approved", "Approved", ("approved", "publishing")),
-    ("shipped", "Shipped", ("published",)),
-    ("failed", "Failed", ("failed",)),
-    ("rejected", "Rejected", ("rejected",)),
-]
-LANE_OF = {stage: key for key, _, stages in LANES for stage in stages}
-# what is happening to a run that sits in a stage (the next step is running)
-DOING = {"queued": "getting data", "data_ready": "picking countries", "picked": "writing labels",
-         "labelled": "making the video", "publishing": "publishing"}
-STALL_S = 30 * 60
-PLATFORMS = [("youtube", "YT"), ("instagram", "IG"), ("facebook", "FB")]
-CHIP = {"pending": "pending", "uploading": "uploading", "uploaded": "uploading", "live": "live",
-        "private_locked": "private-locked", "dry_run": "dry-run", "failed": "failed"}
-LANE_CARDS = 12
+from pipeline.accounts import PLATFORMS, account_states, ready_destinations
+from pipeline.config import brand_name, get_config, path, setup_logging
+from pipeline.errors import explain_error
 
 app = Flask(__name__)
-app.secret_key = secrets.token_hex(16)
-CSRF = secrets.token_hex(16)
-
-
-@app.context_processor
-def inject():
-    return {"csrf": CSRF, "brand": get_config()["brand"]["name"] or "Pipeline", "names": country_by_iso3()}
+app.secret_key = secrets.token_hex(32)
+CSRF = secrets.token_hex(32)
+RUN_RE = re.compile(r"r\d{8}-\d{6}-[0-9a-f]{4}")
+PING = "graphony-dashboard"  # Dashboard.bat checks this to know the port is already ours
 
 
 @app.before_request
 def check_csrf():
-    if request.method == "POST" and request.form.get("csrf") != CSRF:
+    if request.method == "POST" and not secrets.compare_digest(request.form.get("csrf", ""), CSRF):
         abort(403)
-
-
-def _run_json(run_id: str, name: str):
-    f = path("out") / run_id / name
-    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
-
-
-def _ago(ts: str | None) -> str:
-    if not ts:
-        return ""
-    s = (datetime.now(timezone.utc) - db.parse_ts(ts)).total_seconds()
-    for unit, n in (("d", 86400), ("h", 3600), ("m", 60)):
-        if s >= n:
-            return f"{int(s // n)}{unit} ago"
-    return f"{int(s)}s ago"
-
-
-def _dur(s: float | int | None) -> str:
-    if s is None:
-        return "?"
-    s = max(int(s), 0)
-    if s < 60:
-        return f"{s}s"
-    if s < 3600:
-        return f"{s // 60}m"
-    if s < 86400:
-        return f"{s // 3600}h {s % 3600 // 60}m"
-    return f"{s // 86400}d {s % 86400 // 3600}h"
-
-
-def _until(ts: str | None) -> str:
-    if not ts:
-        return ""
-    try:
-        s = (db.parse_ts(ts) - datetime.now(timezone.utc)).total_seconds()
-    except ValueError:
-        return ts
-    return f"in {_dur(s)}" if s >= 0 else f"{_dur(-s)} ago"
-
-
-app.jinja_env.filters["ago"] = _ago
-app.jinja_env.filters["dur"] = _dur
-app.jinja_env.filters["until"] = _until
-
-
-def lane_for(stage: str) -> str:
-    return LANE_OF[stage]
-
-
-def chip_state(post: dict | None, stage: str) -> str:
-    """Chip colour for one platform: the post's status, or pending/none when nothing was posted."""
-    if post:
-        return CHIP.get(post["status"], post["status"])
-    return "none" if stage in ("rejected", "failed") else "pending"
-
-
-_titles: dict[str, tuple[float, str | None]] = {}
-
-
-def _title(run_id: str) -> str | None:
-    f = path("out") / run_id / "meta.json"
-    try:
-        mt = f.stat().st_mtime
-    except OSError:
+    if request.endpoint == "ping":
         return None
-    if _titles.get(run_id, (None,))[0] != mt:
-        try:
-            _titles[run_id] = (mt, json.loads(f.read_text(encoding="utf-8")).get("title"))
-        except (OSError, ValueError):
-            return None
-    return _titles[run_id][1]
-
-
-def _card(r: dict, posts: dict, telegram_sent: set, now: datetime) -> dict:
-    stage = r["stage"]
-    in_stage = (now - db.parse_ts(r["updated_at"])).total_seconds()
-    progress = r.get("progress") if stage == "labelled" else None
-    fresh = r.get("progress_at") and (now - db.parse_ts(r["progress_at"])).total_seconds() < 60
-    enabled = {"youtube": True, "instagram": get_config()["instagram"]["enabled"],
-               "facebook": get_config()["facebook"]["enabled"]}
-    chips = []
-    for plat, short in PLATFORMS:
-        p = posts.get((r["id"], plat))
-        if not (enabled[plat] or p):
-            continue
-        state = chip_state(p, stage)
-        link = p["url"] if p and p.get("url") and state in ("live", "private-locked", "uploading") else None
-        chips.append({"short": short, "platform": plat, "state": state, "url": link,
-                      "title": f"{plat}: {state}" + (f" - {p['message']}" if p and p.get("message") else "")})
-    return {
-        "id": r["id"], "topic": r["topic_id"], "stage": stage, "title": _title(r["id"]),
-        "thumb": (path("out") / r["id"] / "thumb.jpg").exists(),
-        "in_stage_s": in_stage, "doing": DOING.get(stage),
-        "progress": round(progress * 100) if progress is not None else None,
-        "stalled": stage in DOING and in_stage > STALL_S and not fresh,
-        "telegram_sent": r["id"] in telegram_sent,
-        "chips": chips, "failed_stage": r.get("failed_stage"), "error": r.get("error"),
-        "retry_step": r.get("failed_stage") if r.get("failed_stage") in actions.RETRY_STEPS else None,
-        "n_countries": len(r["countries"]),
-    }
-
-
-def _lanes(now: datetime | None = None) -> list[dict]:
     db.init()
-    now = now or datetime.now(timezone.utc)
-    posts = {(p["run_id"], p["platform"]): p for p in db.get_posts()}
-    sent = db.runs_with_log("telegram: sent")
-    lanes = [{"key": k, "name": n, "cards": [], "total": 0} for k, n, _ in LANES]
-    by_key = {lane["key"]: lane for lane in lanes}
-    for r in db.list_runs(limit=500):
-        lane = by_key[lane_for(r["stage"])]
-        lane["total"] += 1
-        if len(lane["cards"]) < LANE_CARDS:
-            lane["cards"].append(_card(r, posts, sent, now))
-    return lanes
-
-
-def _board_context() -> dict:
     if not app.config.get("TESTING"):
-        health.refresh()          # background re-check when the cached one is stale; never blocks
-    lanes = _lanes()
-    from pipeline.approve_telegram import enabled as telegram_on
-    return {"lanes": lanes, "health": health.panel(), "telegram_on": telegram_on(),
-            "busy": any(c["doing"] and not c["stalled"] for lane in lanes for c in lane["cards"])}
+        health.refresh()
 
 
-@app.route("/")
-def board():
-    return render_template("board.html", **_board_context())
+@app.after_request
+def security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+    if response.mimetype in ("text/html", "application/json"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
-@app.route("/fragment/board")
-def board_fragment():
-    return render_template("_board_cols.html", **_board_context())
+@app.context_processor
+def inject():
+    return {"csrf": CSRF, "brand": brand_name(), "status": vm.status()}
+
+
+app.jinja_env.filters["views"] = vm.short_views
+
+
+@app.template_filter("code")
+def code_spans(text):
+    """`backticks` in owner instructions become <code>; everything else stays escaped."""
+    return Markup(re.sub(r"`([^`]+)`", r"<code>\1</code>", str(escape(text))))
+
+
+def get_run(ref):
+    run = db.run_by_ref(ref)
+    if not run:
+        abort(404)
+    return run
+
+
+def review_context():
+    waiting = list(reversed(db.list_runs(stage="awaiting_approval", limit=10000)))
+    videos = [vm.video(r) for r in waiting]
+    selected = request.args.get("selected", type=int)
+    current = next((v for v in videos if v["ref"] == selected), videos[0] if videos else None)
+    return {"videos": videos, "video": current, "position": videos.index(current) + 1 if current else 0,
+            "next_video": vm.next_video()}
+
+
+@app.get("/ping")
+def ping():
+    return PING, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+
+@app.get("/")
+def review():
+    return render_template("review.html", **review_context(), making=vm.activity(), attention=vm.attention())
+
+
+@app.get("/fragment/review")
+def review_fragment():
+    return render_template("_review.html", **review_context())
+
+
+@app.get("/api/review")
+def review_state():
+    return jsonify(waiting=[r["ref"] for r in reversed(db.list_runs(stage="awaiting_approval", limit=10000))],
+                   activity=render_template("_activity.html", making=vm.activity(), attention=vm.attention()),
+                   status=render_template("_status.html"))
+
+
+@app.get("/library")
+def library():
+    groups = vm.library_groups()
+    tab = request.args.get("tab", "posted")
+    if tab not in groups:
+        abort(404)
+    stats = db.latest_stats()
+    runs = groups[tab]
+    failed_only = request.args.get("failed") == "1"
+    if failed_only:
+        failed_ids = {p["run_id"] for p in db.get_posts() if p["status"] == "failed"}
+        runs = [r for group in groups.values() for r in group if r["id"] in failed_ids]
+    return render_template("library.html", tab=tab, counts={k: len(v) for k, v in groups.items()},
+                           videos=[vm.video(r, stats=stats) for r in runs], failed_only=failed_only)
+
+
+@app.get("/video/<int:ref>/drawer")
+def drawer(ref):
+    run = get_run(ref)
+    video = vm.video(run)
+    video["platforms"].sort(key=lambda p: p["state"] != "failed")
+    return render_template("_drawer.html", video=video, run=run, logs=db.get_log(run["id"]))
+
+
+@app.get("/video/<int:ref>/media/<name>")
+def media(ref, name):
+    run = get_run(ref)
+    if name == "preview.jpg":
+        target = chart_thumbnail(run)
+        if not target:
+            return send_file(app.root_path + "/static/preview.svg", mimetype="image/svg+xml")
+    elif name == "video.mp4":
+        target = path("out") / run["id"] / name
+    else:
+        abort(404)
+    if not target.exists():
+        abort(404)
+    return send_file(target, conditional=True)
+
+
+@app.get("/flags/<iso>.svg")
+def flag(iso):
+    if not re.fullmatch("[a-z]{2}", iso):
+        abort(404)
+    return send_file(path("flags") / (iso + ".svg"), conditional=True)
+
+
+@app.get("/settings")
+def settings():
+    from dashboard import setup_steps
+    logfile = path("cache") / "logs" / "pipeline.log"
+    lines = logfile.read_text(encoding="utf-8", errors="replace").splitlines()[-50:] if logfile.exists() else []
+    return render_template("settings.html", accounts=account_states(), setup=setup_steps, config=get_config(),
+                           platforms=PLATFORMS, topics=vm.topic_rows(), health=health.panel(),
+                           next_video=vm.next_video(), logs="\n".join(lines))
+
+
+def result(fn, back="review"):
+    try:
+        message = fn()
+    except (ValueError, db.TransitionError) as error:
+        message = str(error)
+        if RUN_RE.search(message):
+            message = "This video has already changed. Refresh and try again."
+        code = 409
+    except Exception as error:
+        app.logger.exception("Dashboard action failed")
+        message = explain_error(str(error))["sentence"]
+        code = 500
+    else:
+        code = 200
+    if request.headers.get("Accept") == "application/json":
+        return jsonify(message=message), code
+    flash(message)
+    return redirect(url_for(back))
+
+
+@app.post("/video/<int:ref>/<operation>")
+def video_action(ref, operation):
+    run = get_run(ref)
+    rid = run["id"]
+    if operation not in {"approve", "reject", "remake", "title", "retry", "publish"}:
+        abort(404)
+
+    def act():
+        if operation == "approve":
+            chosen = request.form.getlist("platform") if request.form.get("platforms_present") else None
+            actions.approve(rid, "dashboard", platforms=chosen)
+            ready = ready_destinations(db.get_run(rid))
+            return "Approved — posting to " + ", ".join(PLATFORMS[p] for p in ready) if ready else "Approved — waiting in Library until accounts are connected"
+        if operation == "reject":
+            actions.reject(rid, "dashboard")
+            return "Rejected — moved to Library"
+        if operation == "remake":
+            if run["stage"] != "awaiting_approval":
+                raise ValueError("This video has already been reviewed.")
+            actions.regenerate(rid, "dashboard")
+            return "Making a new version with different countries"
+        if operation == "title":
+            return actions.edit_title(rid, request.form.get("title", ""), "dashboard")
+        if operation == "retry":
+            if request.form.get("platform"):
+                return actions.retry_platform(rid, request.form["platform"], "dashboard")
+            return actions.retry(rid, run["failed_stage"], "dashboard")
+        if operation == "publish":
+            return actions.publish(rid, "dashboard")
+    return result(act)
 
 
 @app.post("/make")
 def make_video():
-    try:
-        flash(f"Make a video now: {actions.make_video('dashboard')}")
-    except Exception as e:  # noqa: BLE001
-        flash(f"not started: {e}")
-    return redirect(url_for("board"))
+    return result(lambda: actions.make_video("dashboard"))
 
 
-@app.post("/health/recheck")
-def health_recheck():
-    flash("re-checking credentials in the background..." if health.refresh(force=True) else "a check is already running")
-    return redirect(url_for("board"))
+@app.post("/attention/dismiss")
+def dismiss():
+    item = vm.attention()
+    if not item or item["key"] != request.form.get("key") or item["version"] != request.form.get("version"):
+        return jsonify(message="This message has already changed."), 409
+    return result(lambda: actions.dismiss_attention(item["key"], item["version"], "dashboard"))
 
 
-@app.route("/run/<run_id>")
-def run_detail(run_id):
-    if not RUN_RE.match(run_id):
+@app.post("/settings/accounts/<service>/test")
+def test_account(service):
+    if service not in account_states():
         abort(404)
-    run = db.get_run(run_id)
+    check = actions.test_account(service)
+    label = "Connected ✓" if check["state"] == "ok" else "Expired — reconnect" if check["state"] in ("expired", "invalid") else "Not connected"
+    if check["state"] == "disabled":
+        label = "Off — enable this platform in Posting to test it."
+    detail = explain_error(check["detail"], service=check["name"])
+    message = label if check["state"] in ("ok", "missing", "disabled") else label + ". " + detail["sentence"] + " " + detail["fix"]
+    if request.headers.get("Accept") == "application/json":
+        return jsonify(message=message)
+    flash(message)
+    return redirect(url_for("settings"))
+
+
+@app.post("/settings/posting")
+def save_posting():
+    return result(lambda: actions.save_posting(request.form), "settings")
+
+
+@app.post("/settings/topics/<topic_id>")
+def toggle_topic(topic_id):
+    return result(lambda: actions.toggle_topic(topic_id, request.form.get("enabled") == "on"), "settings")
+
+
+@app.get("/run/<run_id>")
+def old_detail(run_id):
+    run = db.get_run(run_id) if RUN_RE.fullmatch(run_id) else None
     if not run:
         abort(404)
-    pick = _run_json(run_id, "pick.json") or {}
-    return render_template(
-        "run.html", run=run, log=db.get_log(run_id), posts=db.get_posts(run_id), pick=pick,
-        labels=_run_json(run_id, "labels.json") or {}, meta=_run_json(run_id, "meta.json") or {},
-        has_video=(path("out") / run_id / "video.mp4").exists(),
-        has_contact=(path("out") / run_id / "contact.png").exists(), steps=STEPS)
+    return redirect(url_for("review", selected=run["ref"]) if run["stage"] == "awaiting_approval" else
+                    url_for("library", tab="approved", video=run["ref"]))
 
 
-@app.route("/media/<run_id>/<name>")
-def media(run_id, name):
-    if not RUN_RE.match(run_id) or name not in MEDIA:
-        abort(404)
-    return send_from_directory(path("out") / run_id, name)
+@app.get("/topics")
+def old_topics():
+    return redirect("/settings#topics")
 
 
-def _act(run_id, fn, *args):
-    if not RUN_RE.match(run_id):
-        abort(404)
-    back = redirect(url_for("board")) if request.form.get("next") == "board" else None
-    try:
-        res = fn(run_id, *args)
-        flash(f"{run_id}: {res}")
-        if fn is actions.regenerate:
-            return back or redirect(url_for("run_detail", run_id=res))
-    except db.TransitionError as e:
-        flash(f"not allowed: {e}")
-    except Exception as e:  # noqa: BLE001
-        flash(f"error: {type(e).__name__}: {e}")
-    return back or redirect(url_for("run_detail", run_id=run_id))
-
-
-@app.post("/run/<run_id>/approve")
-def approve(run_id):
-    return _act(run_id, actions.approve, "dashboard")
-
-
-@app.post("/run/<run_id>/reject")
-def reject(run_id):
-    return _act(run_id, actions.reject, "dashboard")
-
-
-@app.post("/run/<run_id>/regenerate")
-def regenerate(run_id):
-    return _act(run_id, actions.regenerate, "dashboard")
-
-
-@app.post("/run/<run_id>/retry")
-def retry(run_id):
-    step = request.form.get("step", "")
-    if step not in actions.RETRY_STEPS:
-        abort(400)
-    return _act(run_id, lambda rid, by: actions.retry(rid, step, by), "dashboard")
-
-
-@app.post("/run/<run_id>/rerender")
-def rerender(run_id):
-    step = request.form.get("step", "")
-    if step not in STEPS:
-        abort(400)
-    return _act(run_id, lambda rid, by: actions.rerender_as_new(rid, step, by), "dashboard")
-
-
-@app.post("/run/<run_id>/publish")
-def publish(run_id):
-    return _act(run_id, actions.publish, "dashboard")
-
-
-@app.route("/analytics")
-def analytics():
-    db.init()
-    rows = db.latest_stats()
-    weights = sorted(db.topic_weights().values(), key=lambda w: -(w["weight"] or 0))
-    return render_template("analytics.html", rows=rows, weights=weights)
-
-
-@app.route("/topics")
-def topics():
-    db.init()
-    cfg = get_config()
-    rep = verify_report()
-    weights = db.topic_weights()
-    now = datetime.now(timezone.utc)
-    items = []
-    for t in load_topics():
-        runs = db.list_runs(topic_id=t["id"], limit=50)
-        last = runs[0]["created_at"] if runs else None
-        cool = None
-        if last:
-            left = cfg["topic_cooldown_days"] - (now - db.parse_ts(last)).total_seconds() / 86400
-            cool = round(left, 1) if left > 0 else None
-        items.append({"t": t, "v": rep.get(t["id"], {}), "w": weights.get(t["id"]), "runs": len(runs),
-                      "last": last, "cool": cool})
-    return render_template("topics.html", items=items, dropped=dropped_topics(), rep=rep)
-
-
-@app.route("/api/board")
-def api_board():
-    return jsonify({lane["key"]: [c["id"] for c in lane["cards"]] for lane in _lanes()})
+@app.get("/analytics")
+def old_analytics():
+    return redirect("/library")
 
 
 def main() -> int:
     setup_logging()
     dc = get_config()["dashboard"]
-    host = dc["host"]
-    if host == "localhost":
-        host = "127.0.0.1"
+    host = "127.0.0.1" if dc["host"] == "localhost" else dc["host"]
     if not ipaddress.ip_address(host).is_loopback:
         raise SystemExit(f"refusing to bind dashboard to {host}: loopback only (use an SSH tunnel)")
-    print(f"Dashboard: http://{host}:{dc['port']}/")
+    print(f"{brand_name()} dashboard: http://{host}:{dc['port']}/  (keep this window open; close it to stop)")
     app.run(host=host, port=dc["port"], debug=False, threaded=True)
     return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

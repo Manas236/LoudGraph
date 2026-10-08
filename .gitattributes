@@ -3,3 +3,4 @@
 *.jpg binary
 *.ttf binary
 *.svg text eol=lf
+*.bat text eol=crlf

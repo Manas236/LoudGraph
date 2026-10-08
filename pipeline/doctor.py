@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import tempfile
 
-from .config import ROOT, get_config, path, countries
+from .config import ROOT, brand_name, get_config, path, countries
 
 OK, WARN, FAIL = "OK  ", "WARN", "FAIL"
 
@@ -69,7 +69,7 @@ def check_credentials() -> list:
 
 
 def doctor() -> int:
-    print(f"Pipeline doctor  (root: {ROOT})")
+    print(f"{brand_name()} doctor  (root: {ROOT})")
     results = []
     for fn in (check_ffmpeg, check_dirs, check_assets, check_render_backend, check_credentials):
         try:

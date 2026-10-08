@@ -1,7 +1,7 @@
 # All tunables for the pipeline. Secrets go in .env, never here.
 
 brand:
-  name: ""                      # optional on-screen watermark; empty = nothing is drawn
+  name: "Graphony"              # product name (dashboard, Telegram, README); never on the video unless render.watermark
 
 paths:                          # relative to the project root
   cache: cache
@@ -79,6 +79,8 @@ topic_cooldown_days: 21         # same topic may come back (with a different set
 
 cadence:
   videos_per_day: 2
+  posting_times: []             # local 24-hour times; Bot.bat makes the daily videos at these times
+  timezone: Asia/Kolkata
 
 audio:
   sample_rate: 48000
@@ -133,6 +135,7 @@ render:
   palette: ["#22d3ee", "#f472b6", "#a3e635", "#fbbf24", "#a78bfa", "#fb7185", "#34d399", "#fb923c", "#60a5fa"]
   end_card_question: "Which one surprised you?"
   end_card_cta: "Tell us in the comments"
+  watermark: false              # true = draw brand.name faintly on every frame; false = the video carries no name
 
 labels:
   enabled: true
@@ -163,6 +166,7 @@ dry_run:                        # true = write what would be sent to out/<run>/p
   facebook: true
 
 youtube:
+  enabled: true
   privacy_status: public        # public | unlisted | private
   category_id: "27"             # Education
   max_uploads_per_day: 6

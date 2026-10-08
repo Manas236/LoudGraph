@@ -1,4 +1,4 @@
-"""Data-sonification pipeline CLI.
+"""Graphony: data-sonification pipeline CLI.
 
     python run.py doctor
     python run.py fetch [--topic ID] [--force]
@@ -71,7 +71,7 @@ def cmd_bot(a):
 
 def cmd_publish(a):
     from pipeline import orchestrator
-    return orchestrator.publish_approved(run_id=a.run)
+    return orchestrator.publish_approved(run_id=a.run, platform=a.platform)
 
 
 def cmd_stats(a):
@@ -114,7 +114,7 @@ def cmd_compare(a):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="run.py", description="Data-sonification Shorts/Reels pipeline")
+    p = argparse.ArgumentParser(prog="run.py", description="Graphony: data-sonification Shorts/Reels pipeline")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
     s = sub.add_parser("fetch")
@@ -135,6 +135,7 @@ def main(argv=None):
     sub.add_parser("bot").set_defaults(fn=cmd_bot)
     s = sub.add_parser("publish")
     s.add_argument("--run")
+    s.add_argument("--platform", choices=["youtube", "instagram", "facebook"])
     s.set_defaults(fn=cmd_publish)
     sub.add_parser("stats").set_defaults(fn=cmd_stats)
     sub.add_parser("dashboard").set_defaults(fn=cmd_dashboard)

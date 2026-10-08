@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from . import actions, db, health
-from .config import country_by_iso3, get_config, run_dir, secret
+from .config import brand_name, country_by_iso3, get_config, run_dir, secret
 
 log = logging.getLogger(__name__)
 MAX_VIDEO_BYTES = 50 * 1024 * 1024  # Bot API upload limit
@@ -72,6 +72,7 @@ def caption(run_id: str) -> str:
     names = country_by_iso3()
     lab = [f"{names[k]['name']} {v['year']}: {v['label']}" for k, v in labels.items() if v.get("label")]
     lines = [
+        f"{brand_name()} · new video to review",
         f"🎬 {meta['title']}",
         f"Topic: {run['topic_id']}  |  score {run['score']}",
         "Countries: " + ", ".join(names[c]["name"] for c in run["countries"]),
@@ -154,7 +155,7 @@ def status_text() -> str:
     for r in runs:
         counts[r["stage"]] = counts.get(r["stage"], 0) + 1
     waiting = [r["id"] for r in runs if r["stage"] == "awaiting_approval"]
-    return "Pipeline: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) + \
+    return f"{brand_name()}: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) + \
            (f"\nWaiting for approval: {', '.join(waiting)}" if waiting else "")
 
 
@@ -163,7 +164,7 @@ def daily_summary_text() -> str:
     runs = [r for r in db.list_runs(limit=500) if db.parse_ts(r["created_at"]) >= since]
     posts = [p for p in db.get_posts() if db.parse_ts(p["created_at"]) >= since]
     stats = sorted((s for s in db.latest_stats() if s.get("views") is not None), key=lambda s: -s["views"])[:3]
-    lines = [f"📊 Daily summary ({datetime.now():%Y-%m-%d})",
+    lines = [f"📊 {brand_name()} · daily summary ({datetime.now():%Y-%m-%d})",
              f"Runs in the last 24h: {len(runs)} (" +
              ", ".join(f"{st}={sum(1 for r in runs if r['stage'] == st)}" for st in sorted({r['stage'] for r in runs})) + ")",
              f"Posts in the last 24h: {len(posts)} (" + ", ".join(f"{p['platform']}:{p['status']}" for p in posts) + ")"]
@@ -210,6 +211,16 @@ def poll_once(timeout: int) -> int:
 
 
 def run_bot() -> int:
+    from .lock import single_instance
+    with single_instance("bot") as mine:
+        if not mine:  # e.g. Bot.bat double-clicked twice: two bots would fight over getUpdates
+            log.warning("the bot is already running in another window; this one stops")
+            print("The bot is already running in another window. You can close this one.")
+            return 0
+        return _bot_loop()
+
+
+def _bot_loop() -> int:
     db.init()
     tg = enabled()
     if not tg:
@@ -224,6 +235,8 @@ def run_bot() -> int:
     timeout = get_config()["telegram"]["poll_timeout"]
     while True:
         try:
+            from .schedule import tick
+            tick()
             if time.time() - last_beat >= health.HEARTBEAT_EVERY_S:
                 health.beat("bot", telegram=tg)   # the dashboard turns red when this is > 3 min old
                 last_beat = time.time()
