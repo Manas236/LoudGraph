@@ -10,6 +10,9 @@ Verified against the Meta docs on 2026-10-07 (examples use v25.0):
   FB:  POST /{page-id}/video_reels upload_phase=start -> video_id, upload_url
        POST https://rupload.facebook.com/video-upload/{ver}/{video-id} (same headers)
        POST /{page-id}/video_reels upload_phase=finish, video_id, video_state=PUBLISHED, description
+       GET  /{video-id}?fields=status,permalink_url  (video_status, processing/publishing phases)
+       Page Reels need a PAGE access token with pages_show_list, pages_read_engagement and
+       pages_manage_posts (Meta "Reels Publishing API" docs, checked 2026-10-09).
 With Facebook Login both use a Page access token (IG_ACCESS_TOKEN).
 """
 from __future__ import annotations
@@ -26,10 +29,9 @@ from . import db
 from .config import get_config, run_dir, secret
 
 log = logging.getLogger(__name__)
-DONE = {"uploaded", "live", "private_locked", "dry_run"}
-# permissions the Page token needs (README "Credentials"); Facebook Page Reels add the second list
+# permissions the Page token needs (README "Credentials"); Facebook Page Reels need the second list
 SCOPES_IG = ["instagram_basic", "instagram_content_publish", "instagram_manage_insights", "pages_read_engagement"]
-SCOPES_FB = ["pages_show_list", "pages_manage_posts"]
+SCOPES_FB = ["pages_show_list", "pages_read_engagement", "pages_manage_posts"]
 EXPIRY_WARN_DAYS = 7
 
 
@@ -54,10 +56,6 @@ def _check_json(r: requests.Response, what: str) -> dict:
     if r.status_code != 200 or "error" in d:
         raise RuntimeError(f"{what}: HTTP {r.status_code} {d.get('error', d)}")
     return d
-
-
-def needed_scopes() -> list[str]:
-    return SCOPES_IG + (SCOPES_FB if get_config()["facebook"]["enabled"] else [])
 
 
 def token_info(tok: str) -> dict:
@@ -94,8 +92,9 @@ def check() -> dict:
             level = "WARN"
     elif exp == 0:
         parts.append("token never expires")
+    missing = []
     if "scopes" in info:
-        missing = [s for s in needed_scopes() if s not in info["scopes"]]
+        missing = [s for s in SCOPES_IG if s not in info["scopes"]]
         if missing:
             parts.append("missing permissions: " + ", ".join(missing))
             level = "WARN"
@@ -107,23 +106,43 @@ def check() -> dict:
             parts.append(f"publishing limit {lim.json().get('data')}")
     except requests.RequestException:
         pass
-    return {"level": level, "state": "ok", "detail": ", ".join(parts) + f" (dry_run={dry})"}
+    return {"level": level, "state": "ok", "detail": ", ".join(parts) + f" (dry_run={dry})", "missing": missing}
 
 
-def check_facebook() -> dict:
-    if not get_config()["facebook"]["enabled"]:
+def check_facebook(force: bool = False) -> dict:
+    """Page Reels readiness, read-only: the token is a valid PAGE token for FB_PAGE_ID with every
+    permission in SCOPES_FB, and the Page answers. force=True checks even while facebook is off."""
+    if not force and not get_config()["facebook"]["enabled"]:
         return {"level": "OK", "state": "disabled", "detail": "facebook.enabled is false"}
     page, tok = secret("FB_PAGE_ID"), secret("IG_ACCESS_TOKEN")
     if not (page and tok):
         return {"level": "WARN", "state": "missing", "detail": "FB_PAGE_ID / IG_ACCESS_TOKEN (Page token) missing"}
     try:
+        info = token_info(tok)
+    except Exception as e:  # noqa: BLE001 - without debug_token the permissions cannot be confirmed
+        return {"level": "FAIL", "state": "error", "detail": f"permissions not checked: {e}"[:400]}
+    if info.get("is_valid") is False:
+        why = (info.get("error") or {}).get("message", "debug_token is_valid=false")
+        return {"level": "FAIL", "state": "expired", "detail": f"IG_ACCESS_TOKEN no longer valid: {why}"[:400]}
+    try:
         d = _check_json(requests.get(f"{base('facebook')}/{page}", params={"fields": "id,name", "access_token": tok},
                                      timeout=30), "FB page lookup")
     except Exception as e:  # noqa: BLE001
         state = "expired" if "'code': 190" in str(e) else "error"
-        return {"level": "FAIL", "state": state, "detail": str(e)[:300]}
-    return {"level": "OK", "state": "ok",
-            "detail": f"Page {d.get('name')} ({d.get('id')}) (dry_run={get_config()['dry_run']['facebook']})"}
+        return {"level": "FAIL", "state": state, "detail": str(e)[:400]}
+    problems = []
+    if info.get("type") and info["type"] != "PAGE":
+        problems.append(f"IG_ACCESS_TOKEN is a {info['type']} token; Page Reels need a Page access token")
+    if info.get("profile_id") and str(info["profile_id"]) != str(page):
+        problems.append(f"the token belongs to Page {info['profile_id']}, not FB_PAGE_ID {page}")
+    missing = [s for s in SCOPES_FB if s not in info.get("scopes", [])]
+    if missing:
+        problems.append("missing permissions: " + ", ".join(missing))
+    detail = f"Page {d.get('name')} ({d.get('id')})"
+    if problems:
+        return {"level": "FAIL", "state": "error", "detail": detail + ": " + "; ".join(problems), "missing": missing}
+    return {"level": "OK", "state": "ok", "missing": [],
+            "detail": detail + f", Page token with {', '.join(SCOPES_FB)} (dry_run={get_config()['dry_run']['facebook']})"}
 
 
 def _plan(run_id: str, meta: dict, video: Path) -> tuple[dict, str | None]:
@@ -142,9 +161,9 @@ def _plan(run_id: str, meta: dict, video: Path) -> tuple[dict, str | None]:
 
 def publish(run_id: str, meta: dict, video: Path) -> str:
     cfg = get_config()
-    existing = {p["platform"]: p for p in db.get_posts(run_id)}.get("instagram")
-    if existing and existing["status"] in DONE:
-        return existing["status"]
+    done = db.already_posted(run_id, "instagram", cfg["dry_run"]["instagram"])
+    if done:
+        return done
     ic = _ic()
     ig = secret("IG_USER_ID") or "<IG_USER_ID>"
     params, blocked = _plan(run_id, meta, video)
@@ -214,9 +233,9 @@ def publish(run_id: str, meta: dict, video: Path) -> str:
 
 def publish_facebook(run_id: str, meta: dict, video: Path) -> str:
     cfg = get_config()
-    existing = {p["platform"]: p for p in db.get_posts(run_id)}.get("facebook")
-    if existing and existing["status"] in DONE:
-        return existing["status"]
+    done = db.already_posted(run_id, "facebook", cfg["dry_run"]["facebook"])
+    if done:
+        return done
     fc = cfg["facebook"]
     page = secret("FB_PAGE_ID") or "<FB_PAGE_ID>"
     desc = meta["description_instagram"][:2200]
@@ -241,14 +260,38 @@ def publish_facebook(run_id: str, meta: dict, video: Path) -> str:
     start = _check_json(requests.post(f"{base('facebook')}/{page}/video_reels",
                                       data={"upload_phase": "start", "access_token": tok}, timeout=60), "FB reels start")
     vid = start["video_id"]
+    db.upsert_post(run_id, "facebook", "uploading", remote_id=vid, message="upload session started, uploading")
     with open(video, "rb") as f:
-        _check_json(requests.post(f"https://rupload.facebook.com/video-upload/{fc['api_version']}/{vid}",
-                                  headers={"Authorization": f"OAuth {tok}", "offset": "0",
-                                           "file_size": str(video.stat().st_size)}, data=f, timeout=600), "FB rupload")
-    _check_json(requests.post(f"{base('facebook')}/{page}/video_reels",
-                              data={"upload_phase": "finish", "video_id": vid, "video_state": "PUBLISHED",
-                                    "description": desc, "access_token": tok}, timeout=60), "FB reels finish")
-    # finish with video_state=PUBLISHED publishes it; Facebook may still be processing for a few minutes
-    db.upsert_post(run_id, "facebook", "live", remote_id=vid, url=f"https://www.facebook.com/reel/{vid}",
-                   message="published (Facebook may still be processing)")
+        up = _check_json(requests.post(f"https://rupload.facebook.com/video-upload/{fc['api_version']}/{vid}",
+                                       headers={"Authorization": f"OAuth {tok}", "offset": "0",
+                                                "file_size": str(video.stat().st_size)}, data=f, timeout=600), "FB rupload")
+    if not up.get("success", True):
+        raise RuntimeError(f"FB rupload: {up}")
+    fin = _check_json(requests.post(f"{base('facebook')}/{page}/video_reels",
+                                    data={"upload_phase": "finish", "video_id": vid, "video_state": "PUBLISHED",
+                                          "description": desc, "access_token": tok}, timeout=60), "FB reels finish")
+    if not fin.get("success", True):
+        raise RuntimeError(f"FB reels finish: {fin}")
+    db.upsert_post(run_id, "facebook", "uploading", remote_id=vid, message="published, Facebook is processing")
+    # finish with video_state=PUBLISHED publishes it; follow processing so an error is reported, not hidden
+    deadline = time.time() + fc.get("poll_max_minutes", 5) * 60
+    link, note = None, "published (Facebook was still processing)"
+    while time.time() < deadline:
+        s = _check_json(requests.get(f"{base('facebook')}/{vid}", params={"fields": "status,permalink_url",
+                                                                         "access_token": tok}, timeout=30), "FB reel status")
+        st = s.get("status") or {}
+        link = s.get("permalink_url") or link
+        phases = [st.get(k) or {} for k in ("uploading_phase", "processing_phase", "publishing_phase")]
+        if st.get("video_status") in ("error", "upload_failed", "expired") or any(ph.get("status") == "error" for ph in phases):
+            errors = [ph.get("errors") for ph in phases if ph.get("errors")]
+            db.upsert_post(run_id, "facebook", "failed", remote_id=vid,
+                           message=f"Facebook reel {st.get('video_status')}: {errors or st}"[:500])
+            return "failed"
+        if (st.get("publishing_phase") or {}).get("publish_status") == "published" or st.get("video_status") == "ready":
+            note = "published"
+            break
+        time.sleep(fc.get("poll_seconds", 10))
+    url = ("https://www.facebook.com" + link if link and link.startswith("/") else link) or \
+        f"https://www.facebook.com/reel/{vid}"
+    db.upsert_post(run_id, "facebook", "live", remote_id=vid, url=url, message=note)
     return "live"

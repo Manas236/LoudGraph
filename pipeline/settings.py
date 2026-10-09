@@ -15,7 +15,11 @@ from . import config, topics
 _write_lock = threading.Lock()
 
 
-def update_yaml(target: Path, edit) -> Path:
+CONFIG_INDENT = (2, 4, 2)   # config.yaml's own list style ("  - item"); topics.yaml uses ruamel's default
+
+
+def update_yaml(target: Path, edit, indent: tuple | None = None) -> Path:
+    """Edit a YAML file keeping its comments and layout (no re-wrapping, lists indented as they were)."""
     with _write_lock:
         original = target.read_text(encoding="utf-8")
         try:
@@ -27,6 +31,9 @@ def update_yaml(target: Path, edit) -> Path:
         else:
             codec = YAML()
             codec.preserve_quotes = True
+            codec.width = 4096
+            if indent:
+                codec.indent(mapping=indent[0], sequence=indent[1], offset=indent[2])
             document = codec.load(original)
             edit(document)
             buffer = io.StringIO()
@@ -36,7 +43,7 @@ def update_yaml(target: Path, edit) -> Path:
         backup = target.with_name(f"{target.name}.bak-{datetime.now():%Y%m%d-%H%M%S-%f}")
         shutil.copy2(target, backup)
         temporary = target.with_name(target.name + ".tmp")
-        temporary.write_text(rendered, encoding="utf-8")
+        temporary.write_text(rendered, encoding="utf-8", newline="\n")   # the repo's line endings, also on Windows
         temporary.replace(target)
         getattr(config.get_config, "cache_clear", lambda: None)()
         return backup
@@ -69,7 +76,19 @@ def save_posting(values: dict) -> Path:
             document["cadence"]["posting_times"] = [DoubleQuotedScalarString(t) for t in sorted(times)]
         except ImportError:
             document["cadence"]["posting_times"] = sorted(times)
-    return update_yaml(config.ROOT / "config.yaml", edit)
+    return update_yaml(config.ROOT / "config.yaml", edit, CONFIG_INDENT)
+
+
+def go_live(live: list[str]) -> Path:
+    """Instagram / Facebook: on and out of test mode when in `live`, off otherwise. YouTube: off,
+    keeping its credentials and its own test-mode switch (so turning it back on starts in test mode)."""
+    def edit(document):
+        for p in ("instagram", "facebook"):
+            document[p]["enabled"] = p in live
+            if p in live:
+                document["dry_run"][p] = False
+        document["youtube"]["enabled"] = False
+    return update_yaml(config.ROOT / "config.yaml", edit, CONFIG_INDENT)
 
 
 def toggle_topic(topic_id: str, enabled: bool) -> Path:

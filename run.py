@@ -12,6 +12,7 @@
     python run.py verify [--run RUN_ID ...]
     python run.py crash-test
     python run.py compare --old RUN_ID --new RUN_ID
+    python run.py go-live [--check-only]
 """
 from __future__ import annotations
 
@@ -113,6 +114,13 @@ def cmd_compare(a):
     return 0
 
 
+def cmd_go_live(a):
+    from pipeline import golive
+    report = golive.run(apply=not a.check_only)
+    golive.print_report(report)
+    return 0 if report["passed"] else 1
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="run.py", description="Graphony: data-sonification Shorts/Reels pipeline")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -149,6 +157,9 @@ def main(argv=None):
     s.add_argument("--old", required=True)
     s.add_argument("--new", required=True)
     s.set_defaults(fn=cmd_compare)
+    s = sub.add_parser("go-live", help="check Instagram + Facebook (read-only), then leave test mode for those that pass")
+    s.add_argument("--check-only", action="store_true", help="only run the checks; change nothing")
+    s.set_defaults(fn=cmd_go_live)
     a = p.parse_args(argv)
     setup_logging()
     return a.fn(a) or 0

@@ -17,7 +17,6 @@ from . import db
 from .config import ROOT, get_config, path, run_dir, secret
 
 log = logging.getLogger(__name__)
-DONE = {"uploaded", "live", "private_locked", "dry_run"}
 CONSENT_HINT = ("If the OAuth consent screen's publishing status is 'Testing', Google expires refresh tokens after "
                 "7 days: set it to 'In production' (Google Cloud Console > Google Auth Platform > Audience > "
                 "Publish app), then run `python -m pipeline.publish_youtube --auth` again.")
@@ -130,9 +129,9 @@ def _body(meta: dict) -> dict:
 
 def publish(run_id: str, meta: dict, video: Path) -> str:
     cfg = get_config()
-    existing = {p["platform"]: p for p in db.get_posts(run_id)}.get("youtube")
-    if existing and existing["status"] in DONE:
-        return existing["status"]
+    done = db.already_posted(run_id, "youtube", cfg["dry_run"]["youtube"])
+    if done:
+        return done
     body = _body(meta)
     if cfg["dry_run"]["youtube"]:
         (run_dir(run_id) / "publish_youtube.json").write_text(json.dumps({

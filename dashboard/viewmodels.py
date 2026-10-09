@@ -41,8 +41,13 @@ def status_line(telegram_configured, heartbeat, failed_count, enabled, dry_run, 
     if failed_count:
         return {"tone": "red", "text": f"{failed_count} video{'s' if failed_count != 1 else ''} failed to post — see Library",
                 "href": "/library?tab=approved&failed=1"}
-    if enabled and all(dry_run.get(p, True) for p in enabled):
+    testing = [p for p in enabled if dry_run.get(p, True)]
+    if enabled and len(testing) == len(enabled):
         return {"tone": "amber", "text": "Test mode — nothing is actually posted", "href": "/settings#posting"}
+    if testing:
+        names = ", ".join(PLATFORMS.get(p, p) for p in testing)
+        return {"tone": "amber", "text": f"Test mode on for {names} — not actually posted there",
+                "href": "/settings#posting"}
     count = sum(not accounts[p]["connected"] for p in enabled)
     if count:
         return {"tone": "amber", "text": f"{count} account{'s' if count != 1 else ''} not connected — Settings",

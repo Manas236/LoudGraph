@@ -38,10 +38,16 @@ else:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+def _file(name: str):
+    f = path("cache") / f"{name}.lock"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    return f
+
+
 @contextmanager
 def single_instance(name: str):
     """Yield True while this process holds `name`, or False at once if another process holds it."""
-    fd = os.open(path("cache") / f"{name}.lock", os.O_RDWR | os.O_CREAT)
+    fd = os.open(_file(name), os.O_RDWR | os.O_CREAT)
     try:
         mine = _try_lock(fd)
         try:
@@ -51,6 +57,32 @@ def single_instance(name: str):
                 _unlock(fd)
     finally:
         os.close(fd)
+
+
+def held_elsewhere(name: str) -> bool:
+    """True while another process (or another open handle) holds `name`. The OS drops the lock when
+    its process dies, so this is also a liveness check for the process that took it."""
+    f = _file(name)
+    if not f.exists():
+        return False
+    fd = os.open(f, os.O_RDWR)
+    try:
+        if _try_lock(fd):
+            _unlock(fd)
+            return False
+        return True
+    finally:
+        os.close(fd)
+
+
+def run_lock(run_id: str) -> str:
+    """Held by the process that is making this run (fetch to notify)."""
+    return f"locks/run-{run_id}"
+
+
+def publish_lock(run_id: str) -> str:
+    """Held by the process that is posting this run."""
+    return f"locks/publish-{run_id}"
 
 
 @contextmanager

@@ -5,7 +5,10 @@ and writes its outputs there, so any stage can be re-run alone:
     pick   -> picked             pick.json
     label  -> labelled           labels.json
     render -> rendered           timeline.json, audio.wav, audio.json, video.mp4, meta.json, thumb.jpg
-    notify -> awaiting_approval  (Telegram message if configured)
+    notify -> awaiting_approval  (joins the review queue; the bot sends one review card at a time)
+
+The process making a run holds its run lock (lock.run_lock), and the process posting it holds its
+publish lock, so the bot can tell a slow job from a dead one.
 """
 from __future__ import annotations
 
@@ -125,7 +128,7 @@ def _progress_writer(run_id: str):
 
 
 def step_notify(run_id: str, topic: dict) -> tuple[str, dict]:
-    return "ready for approval (dashboard" + (" + Telegram)" if _telegram_on() else " only; Telegram not configured)"), {}
+    return "ready for review (dashboard" + (" + Telegram queue)" if _telegram_on() else " only; Telegram not configured)"), {}
 
 
 def _telegram_on() -> bool:
@@ -177,6 +180,15 @@ def copy_run(run_id: str, from_step: str) -> str:
 
 
 def run_pipeline(run_id: str, from_step: str = "fetch") -> bool:
+    from .lock import run_lock, single_instance
+    with single_instance(run_lock(run_id)) as mine:
+        if not mine:
+            log.warning("[%s] another process is already making this run", run_id)
+            return False
+        return _run_pipeline(run_id, from_step)
+
+
+def _run_pipeline(run_id: str, from_step: str) -> bool:
     from .topics import get_topic
     run = db.get_run(run_id)
     if not run:
@@ -204,17 +216,22 @@ def run_pipeline(run_id: str, from_step: str = "fetch") -> bool:
             (run_dir(run_id) / "error.txt").write_text(traceback.format_exc(), encoding="utf-8")
             db.fail(run_id, step, f"{type(e).__name__}: {e}")
             log.exception("[%s] %s failed", run_id, step)
-            alert(f"❌ {run_id} ({topic['id']}) failed at {step}: {type(e).__name__}: {e}"[:900])
+            if not _on_a_card(run_id):   # a /new status card already says so
+                alert(f"❌ {run_id} ({topic['id']}) failed at {step}: {type(e).__name__}: {e}"[:900])
             return False
         db.transition(run_id, AFTER[step], msg, **fields)
         log.info("[%s] %s: %s", run_id, AFTER[step], msg)
-    if _telegram_on():
-        try:
-            from .approve_telegram import send_for_approval
-            send_for_approval(run_id)
-        except Exception as e:  # noqa: BLE001 - dashboard approval still works
-            db.log(run_id, "awaiting_approval", f"telegram send failed: {e}")
+    # no Telegram message here: the bot sends review cards one at a time from the queue
     return True
+
+
+def _on_a_card(run_id: str) -> bool:
+    """True when a Telegram card (a /new status card or a review card) reports this run."""
+    from . import review
+    try:
+        return bool(review.job_for_run(run_id) or review.latest_card_for_run(run_id))
+    except Exception:  # noqa: BLE001 - alerts must never break the pipeline
+        return False
 
 
 def produce(count: int, topic_id: str | None = None) -> list[str]:
@@ -255,6 +272,19 @@ def selection_attention() -> None:
 # ------------------------------------------------------------------ publishing
 
 def publish_run(run_id: str, platform: str | None = None) -> bool:
+    from .lock import publish_lock, single_instance
+    with single_instance(publish_lock(run_id)) as mine:
+        if not mine:  # another publisher is posting this run: never upload twice
+            log.info("publish %s: already being posted by another process", run_id)
+            return False
+        return _publish_run(run_id, platform)
+
+
+STALE_APPROVAL = ("needs a fresh approval: it was approved by an out-of-date Graphony window "
+                  "(restart Bot.bat and Dashboard.bat), and nothing posts live without a fresh approval")
+
+
+def _publish_run(run_id: str, platform: str | None) -> bool:
     from .accounts import destinations, ready_destinations
     run = db.get_run(run_id)
     if not run:
@@ -264,6 +294,12 @@ def publish_run(run_id: str, platform: str | None = None) -> bool:
         ready = [p for p in ready if p == platform]
     if not ready:
         return False  # keep approval until the selected accounts are connected
+    live = [p for p in ready if not get_config()["dry_run"].get(p, True)]
+    if live and run["stage"] == "approved" and not run.get("approved_by"):
+        from .review import back_to_review
+        back_to_review(run_id, STALE_APPROVAL)
+        log.warning("publish %s refused: %s", run_id, STALE_APPROVAL)
+        return False
     if not db.claim(run_id, "approved", "publishing", "publishing started"):
         log.info("publish %s: not in approved state (or already claimed)", run_id)
         return False
@@ -287,7 +323,8 @@ def publish_run(run_id: str, platform: str | None = None) -> bool:
             log.exception("publish %s %s failed", run_id, name)
             db.upsert_post(run_id, name, "failed", message=f"{type(e).__name__}: {e}"[:500])
             statuses[name] = "failed"
-            alert(f"❌ publish {name} failed for {run_id}: {e}"[:900])
+            if not _on_a_card(run_id):   # the review card shows the failure and a Retry button
+                alert(f"❌ publish {name} failed for {run_id}: {e}"[:900])
     good = {"uploaded", "live", "private_locked", "dry_run"}
     summary = ", ".join(f"{k}={v}" for k, v in statuses.items())
     if any(v == "pending" for v in statuses.values()) or (not platform and set(destinations(run)) - set(ready)):

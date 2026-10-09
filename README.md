@@ -3,7 +3,8 @@
 Graphony is a data-sonification Shorts/Reels pipeline. It turns real public statistics (World Bank WDI, Our World in Data) into 30–45 s vertical videos:
 each country's line chart is drawn while its data plays as music (one plucked note per year,
 pitch follows the value). A human approves each video on Telegram or the local dashboard, then it
-is posted to YouTube Shorts and Instagram Reels, and analytics flow back into topic selection.
+is posted to Instagram Reels and Facebook Page Reels (YouTube Shorts is supported and currently
+turned off), and analytics flow back into topic selection.
 
 Everything runs on a weak laptop (i5, 8 GB, no GPU): one render at a time, frames are streamed
 straight into FFmpeg, nothing is held in memory or written per frame.
@@ -38,7 +39,8 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py produce [--count N] [--topic ID]` | choose topics and take each run to `awaiting_approval` (default N = `cadence.videos_per_day`) |
 | `python run.py produce --run ID --from render` | re-run one run from a stage (`fetch`, `pick`, `label`, `render`, `notify`); refused for published runs or runs with a live post |
 | `python run.py produce --run ID --from render --as-new` | copy the run's inputs into a NEW run and produce that (the way to re-render a published run) |
-| `python run.py bot` | long-running: Telegram approvals + publishes approved runs |
+| `python run.py bot` | long-running: the Telegram review queue and commands, scheduled videos, publishes approved runs |
+| `python run.py go-live [--check-only]` | read-only Instagram + Facebook checks; for those that pass, turn posting on and test mode off (old test-mode approvals go back to review first) |
 | `python run.py publish [--run ID]` | publish approved runs now |
 | `python run.py stats` | daily: pull views / avg % viewed, recompute topic weights, send daily summary |
 | `python run.py dashboard` | local web UI on http://127.0.0.1:5055 (Review, Library, Settings) |
@@ -60,13 +62,50 @@ queued -> data_ready -> picked -> labelled -> rendered -> awaiting_approval -> a
 | pick | `pipeline/picker.py` | `pick.json` |
 | label | `pipeline/labels.py` (Gemini, optional) | `labels.json` |
 | render | `timeline.py`, `audio.py`, `render.py` | `timeline.json`, `audio.wav`, `pluck.wav`, `pad.wav`, `fx.wav`, `video.mp4`, `meta.json`, `thumb.jpg` |
-| notify | `approve_telegram.py` | (Telegram message) |
+| notify | `review.py` | (joins the review queue; the bot sends one card at a time) |
 | publish | `publish_youtube.py`, `publish_instagram.py` | `publish_<platform>.json` in dry-run |
 
-All state lives in SQLite (`pipeline.db`, WAL): `runs` (incl. live render `progress`), `stage_log`,
+All state lives in SQLite (`pipeline.db`, WAL): `runs` (incl. live render `progress` and the review
+`queue_pos`), `review_cards` (the Telegram card on screen), `make_jobs` (`/new` requests), `stage_log`,
 `posts`, `stats`, `topic_weights`, plus `kv` (the Telegram `getUpdates` offset, so a bot restart never
 re-delivers a button press; the bot heartbeat; cached health checks). The dashboard and the bot only
 read/write that state, and their buttons call the same functions (`pipeline/actions.py`).
+
+### Telegram bot
+
+Double-click **Bot.bat** and leave it open. The bot only listens to the chat in `TELEGRAM_CHAT_ID`;
+messages and buttons from anyone else are ignored.
+
+**The review queue, in plain words.** Every finished video waits in one queue, oldest first. The
+bot shows you **one video at a time**: a review card with the video and four short lines (title,
+what it measures, the countries, the length) and three buttons:
+
+- **✅ Approve**: the same message then updates itself while it posts: Approved, Instagram
+  uploading, Instagram posted (with the link), Facebook uploading, Facebook posted (with the link),
+  Done. If a platform fails, or a step takes longer than 10 minutes, the card says so in a few words
+  and shows a **🔁 Retry** button for that platform.
+- **❌ Reject**: the video is dropped (it stays in the dashboard Library under Rejected).
+- **⏭ Later**: the video goes to the back of the queue. If it is the only one waiting, it rests for
+  15 minutes instead of coming straight back.
+
+The next card arrives only after you decide on the current one and, if you approved it, after its
+posting has finished (posted or failed). Approving or rejecting in the dashboard counts too: the card
+says "in the dashboard" and the queue moves on. A video is never posted twice, even if you approve it
+in both places or tap a button twice. Buttons on older messages answer "This card is stale" and do
+nothing. If the bot restarts, it carries on with the same card instead of sending it again.
+
+**Commands** (also in the bot's menu):
+
+| command | what it does |
+|---|---|
+| `/new` | offers 3 topics that have no video yet (the most interesting by the data scorer) and a Random button. Tap one and a status message follows it: Fetching data, Rendering, Ready. A ready video joins the review queue. Only one video renders at a time: a pick made while another renders waits its turn, and the message says so. If the topic turns out too boring (every country moved the same way), the message says that plainly. |
+| `/ready` | lists up to 8 finished videos that are not posted yet, newest first. Tap one to make it the next card. |
+| `/status` | one message: what is rendering, the open card, how many videos wait, and whether test mode is on. |
+| `/pause`, `/resume` | stop or restart sending review cards. The open card keeps working, and the pause survives a restart. |
+| `/help` | the list of commands. |
+
+Message edits are limited to one every 3 seconds per message, and the bot waits whenever Telegram
+asks it to slow down (HTTP 429).
 
 ### Dashboard
 
@@ -130,7 +169,12 @@ two batches. Settings changes are picked up by running processes without restart
 ## Credentials (`.env`)
 
 Everything is optional; missing pieces fall back to dry-run / dashboard-only and `doctor` says so.
-Publishing stays in dry-run until you set `dry_run.<platform>: false` in `config.yaml`.
+Each platform has its own on/off and test-mode switch (Settings → Posting, or `<platform>.enabled`
+and `dry_run.<platform>` in `config.yaml`). In test mode nothing is posted: the request is written to
+`out/<run>/publish_<platform>.json`. `python run.py go-live` runs the read-only Instagram and
+Facebook checks and, for the ones that pass, turns posting on and test mode off, turns YouTube off,
+and first sends every video approved during test mode back to review: nothing posts live without a
+fresh approval.
 `.env.example` lists exactly the variables the code reads (checked by `tests/test_env_example.py`).
 
 **GEMINI_API_KEY** (labels) – create a key at https://aistudio.google.com/apikey.
@@ -171,8 +215,12 @@ is a long-lived **Page** access token; `IG_USER_ID` is the Page's `instagram_bus
 (`GET /{page-id}?fields=instagram_business_account`). Videos go up with the resumable upload flow
 (local file, no public host needed).
 
-**FB_PAGE_ID** (optional Facebook Page Reels) – also grant `pages_show_list` and `pages_manage_posts`,
-set `FB_PAGE_ID` and `facebook.enabled: true`; the same Page token (`IG_ACCESS_TOKEN`) is used.
+**FB_PAGE_ID** (Facebook Page Reels) – the same Page token (`IG_ACCESS_TOKEN`) must also have
+`pages_show_list`, `pages_read_engagement` and `pages_manage_posts`. Set `FB_PAGE_ID` and
+`facebook.enabled: true`. Reels go up with the Page `video_reels` flow (start, upload, finish with
+`video_state=PUBLISHED`), then the bot follows Facebook's processing until it is published. The
+Facebook Test (and `go-live`) checks that the token is a Page token for that Page with all three
+permissions, and names any that are missing.
 
 ## Scheduling
 
@@ -240,7 +288,11 @@ per-platform analytics, the `.env.example` audit, that the old channel name appe
 dashboard review queue, title and platform choices, skip recovery and migration, YAML backups,
 CSRF, video Range requests, status priority, the connect steps naming every `.env` variable,
 `python dashboard/app.py` run directly, the single-instance bot, and the bot heartbeat,
-YouTube token-refresh detection and the Pacific-time quota day.
+YouTube token-refresh detection and the Pacific-time quota day; and the Telegram review queue: one
+open card at a time, the next card waiting for the decision and the posting, stale buttons, a double
+approval posting once, Later and /ready ordering, /new topics and one render at a time, restart resume,
+the 10-minute stage limit, edit throttling and 429, chat filtering, the test-mode reset before going
+live, the Facebook permission check, and YouTube off skipping its upload.
 
 ## Data licences
 

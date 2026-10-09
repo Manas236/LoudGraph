@@ -35,7 +35,8 @@ def approve(run_id: str, by: str, publish_now: bool = True, platforms: list[str]
     chosen = enabled_platforms() if platforms is None else platforms
     if any(p not in enabled_platforms() for p in chosen):
         raise ValueError("Choose an enabled platform.")
-    db.transition(run_id, "approved", f"approved via {by}", platforms=json.dumps(chosen))
+    # approved_by marks an approval made by this code: the publisher refuses to post live without it
+    db.transition(run_id, "approved", f"approved via {by}", platforms=json.dumps(chosen), approved_by=f"{by} {db.now()}")
     if publish_now and ready_destinations(db.get_run(run_id)):
         spawn("publish", "--run", run_id)
     return "approved"
@@ -147,11 +148,20 @@ def edit_title(run_id: str, title: str, by: str) -> str:
 
 
 def retry_platform(run_id: str, platform: str, by: str) -> str:
+    """Post one platform again. Refused while a publisher for this run is still running, so a
+    slow upload is never doubled; an upload whose publisher died counts as failed."""
     from .accounts import ready_destinations
+    from .lock import held_elsewhere, publish_lock
     run = db.get_run(run_id)
-    if run["stage"] == "publishing":
-        raise ValueError("This video is already posting.")
-    if not any(p["platform"] == platform and p["status"] == "failed" for p in db.get_posts(run_id)):
+    if held_elsewhere(publish_lock(run_id)):
+        raise ValueError("This video is still posting. Wait for it to finish, then try again.")
+    post = {p["platform"]: p for p in db.get_posts(run_id)}.get(platform)
+    status = post["status"] if post else None
+    if status in ("live", "uploaded", "private_locked"):
+        raise ValueError("This video is already posted there.")
+    died = status in (None, "uploading", "pending") and bool(run.get("approved_by")) and \
+        run["stage"] in ("approved", "publishing", "published", "failed")
+    if status != "failed" and not died:
         raise ValueError("Only a failed upload can be retried.")
     if platform not in ready_destinations(run):
         raise ValueError("Connect and enable this account in Settings first.")
@@ -165,10 +175,11 @@ def dismiss_attention(key: str, version: str, by: str) -> str:
     return "Dismissed"
 
 
-def test_account(service: str) -> dict:
+def test_account(service: str, force: bool = False) -> dict:
+    """The Settings page Test button (read-only). force=True also checks a platform that is off."""
     from . import health, publish_instagram, publish_youtube
     functions = {"youtube": publish_youtube.check, "instagram": publish_instagram.check,
-                 "facebook": publish_instagram.check_facebook, "telegram": health.check_telegram,
+                 "facebook": lambda: publish_instagram.check_facebook(force=force), "telegram": health.check_telegram,
                  "gemini": health.check_gemini}
     if service not in functions:
         raise ValueError("Unknown service")

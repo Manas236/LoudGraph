@@ -1,5 +1,6 @@
 # secrets
 .env
+.env.bak-*
 tokens/
 
 # generated
@@ -16,3 +17,6 @@ out/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# local safety copies (contain secrets)
+backups/

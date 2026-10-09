@@ -153,7 +153,8 @@ gemini:
   timeout: 40
 
 telegram:
-  poll_timeout: 50
+  poll_timeout: 10              # long-poll seconds while idle (a dashboard decision shows on the card within this)
+  busy_poll_timeout: 2          # while a card is posting or a /new video is rendering
   api_base: "https://api.telegram.org"
 
 go_live_test:                   # pass 02 go-live test only: true = really make the public post;
@@ -162,11 +163,11 @@ go_live_test:                   # pass 02 go-live test only: true = really make 
 
 dry_run:                        # true = write what would be sent to out/<run>/publish_<platform>.json
   youtube: true
-  instagram: true
-  facebook: true
+  instagram: false
+  facebook: false
 
 youtube:
-  enabled: true
+  enabled: false
   privacy_status: public        # public | unlisted | private
   category_id: "27"             # Education
   max_uploads_per_day: 6
@@ -186,7 +187,7 @@ instagram:
   poll_max_minutes: 10
 
 facebook:
-  enabled: false                # optional Page Reels
+  enabled: true                 # optional Page Reels
   graph_base: "https://graph.facebook.com"
   api_version: "v25.0"           # verified in Meta docs 2026-10-07
 

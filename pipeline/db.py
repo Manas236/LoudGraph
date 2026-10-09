@@ -94,6 +94,37 @@ CREATE TABLE IF NOT EXISTS kv (
     value TEXT,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS review_cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    slot INTEGER UNIQUE,
+    state TEXT NOT NULL,
+    outcome TEXT,
+    decided_via TEXT,
+    message_id INTEGER,
+    kind TEXT,
+    caption TEXT,
+    buttons TEXT,
+    platforms TEXT,
+    overrides TEXT,
+    watch INTEGER NOT NULL DEFAULT 0,
+    later_pos REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    approved_at TEXT,
+    closed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cards_run ON review_cards(run_id);
+CREATE TABLE IF NOT EXISTS make_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id TEXT NOT NULL,
+    run_id TEXT,
+    message_id INTEGER,
+    state TEXT NOT NULL,
+    random INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS topic_weights (
     topic_id TEXT PRIMARY KEY,
     weight REAL,
@@ -121,7 +152,8 @@ def parse_ts(s: str) -> datetime:
 # columns added after the first release; old databases get them on first connect
 MIGRATIONS = [("runs", "progress", "REAL"), ("runs", "progress_at", "TEXT"),
               ("runs", "title", "TEXT"), ("runs", "platforms", "TEXT"),
-              ("runs", "replaced", "INTEGER NOT NULL DEFAULT 0")]
+              ("runs", "replaced", "INTEGER NOT NULL DEFAULT 0"),
+              ("runs", "queue_pos", "REAL"), ("runs", "approved_by", "TEXT")]
 _ready: set[str] = set()
 
 
@@ -281,6 +313,10 @@ def transition(run_id: str, new_stage: str, message: str = "", *, reset: bool = 
             sets, args = ["stage=?", "updated_at=?", "progress=NULL", "progress_at=NULL"], [new_stage, now()]
             if new_stage != "failed":
                 sets += ["failed_stage=NULL", "error=NULL"]
+            if new_stage == "awaiting_approval":
+                # joins the back of the review queue; any earlier approval no longer counts
+                sets += ["queue_pos=(SELECT COALESCE(MAX(COALESCE(queue_pos, rowid)), 0) + 1 FROM runs "
+                         "WHERE stage='awaiting_approval')", "approved_by=NULL"]
             for k, v in fields.items():
                 if k == "countries":
                     v = json.dumps(v)
@@ -380,6 +416,15 @@ def upsert_post(run_id: str, platform: str, status: str, remote_id: str | None =
             "INSERT INTO stage_log(run_id, stage, message, ts) VALUES (?,?,?,?)",
             (run_id, "publishing", f"{platform}: {status}" + (f" ({message})" if message else ""), ts),
         )
+
+
+def already_posted(run_id: str, platform: str, dry_run: bool) -> str | None:
+    """The post's status when no new upload is needed: it is live, or it is a test-mode record and
+    the platform is still in test mode. A test-mode record never stops a live upload."""
+    post = next((p for p in get_posts(run_id) if p["platform"] == platform), None)
+    if post and (post["status"] in ("uploaded", "live", "private_locked") or (post["status"] == "dry_run" and dry_run)):
+        return post["status"]
+    return None
 
 
 def get_posts(run_id: str | None = None) -> list[dict]:

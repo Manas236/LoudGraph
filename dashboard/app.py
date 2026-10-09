@@ -19,6 +19,7 @@ from markupsafe import Markup, escape
 from dashboard import viewmodels as vm
 from dashboard.media import chart_thumbnail
 from pipeline import actions, db, health
+from pipeline import review as review_queue
 from pipeline.accounts import PLATFORMS, account_states, ready_destinations
 from pipeline.config import brand_name, get_config, path, setup_logging
 from pipeline.errors import explain_error
@@ -73,7 +74,7 @@ def get_run(ref):
 
 
 def review_context():
-    waiting = list(reversed(db.list_runs(stage="awaiting_approval", limit=10000)))
+    waiting = review_queue.queue()   # the same order as the Telegram review cards
     videos = [vm.video(r) for r in waiting]
     selected = request.args.get("selected", type=int)
     current = next((v for v in videos if v["ref"] == selected), videos[0] if videos else None)
@@ -98,7 +99,7 @@ def review_fragment():
 
 @app.get("/api/review")
 def review_state():
-    return jsonify(waiting=[r["ref"] for r in reversed(db.list_runs(stage="awaiting_approval", limit=10000))],
+    return jsonify(waiting=[r["ref"] for r in review_queue.queue()],
                    activity=render_template("_activity.html", making=vm.activity(), attention=vm.attention()),
                    status=render_template("_status.html"))
 

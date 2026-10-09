@@ -13,6 +13,17 @@ def enabled_platforms() -> list[str]:
     return [p for p in PLATFORMS if cfg[p].get("enabled", p == "youtube")]
 
 
+def test_mode() -> dict:
+    """Which turned-on platforms are in test mode (dry_run) and which post for real.
+    on: every turned-on platform is in test mode; testing/live/off: platform keys."""
+    cfg = get_config()
+    enabled = enabled_platforms()
+    testing = [p for p in enabled if cfg["dry_run"].get(p, True)]
+    live = [p for p in enabled if p not in testing]
+    return {"on": bool(enabled) and not live, "testing": testing, "live": live,
+            "off": [p for p in PLATFORMS if p not in enabled]}
+
+
 def account_states() -> dict:
     configured = {
         "youtube": (path("tokens") / "youtube_token.json").exists(),
