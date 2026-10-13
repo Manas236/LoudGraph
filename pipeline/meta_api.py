@@ -10,6 +10,7 @@ moment without holding anything: callers queue up in order, and one that dies bl
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import time
 
@@ -68,11 +69,25 @@ def wait_turn() -> float:
     return max(wait, 0.0)
 
 
-def get(url: str, **kwargs) -> requests.Response:
+def redact(text: str) -> str:
+    """A network error's message holds the request URL, and a GET carries access_token in it."""
+    text = re.sub(r"(access_token=)[^&\s'\"]+", r"\1***", str(text))
+    tok = config.secret("IG_ACCESS_TOKEN")
+    return text.replace(tok, "***") if tok else text
+
+
+def _send(method, url: str, **kwargs) -> requests.Response:
     wait_turn()
-    return requests.get(url, **kwargs)
+    try:
+        return method(url, **kwargs)
+    except requests.RequestException as e:   # same exception type, token-free message (it reaches logs, the DB, Telegram)
+        e.args = tuple(redact(a) for a in e.args) or (redact(str(e)),)
+        raise
+
+
+def get(url: str, **kwargs) -> requests.Response:
+    return _send(requests.get, url, **kwargs)
 
 
 def post(url: str, **kwargs) -> requests.Response:
-    wait_turn()
-    return requests.post(url, **kwargs)
+    return _send(requests.post, url, **kwargs)

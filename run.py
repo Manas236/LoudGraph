@@ -7,7 +7,7 @@
     python run.py produce --run RUN_ID --from {fetch,pick,label,render,notify} [--as-new]
     python run.py bot
     python run.py publish [--run RUN_ID]
-    python run.py stats
+    python run.py stats [--no-summary]
     python run.py dashboard
     python run.py verify [--run RUN_ID ...]
     python run.py crash-test
@@ -79,7 +79,7 @@ def cmd_publish(a):
 
 def cmd_stats(a):
     from pipeline.analytics import run_stats
-    return run_stats()
+    return run_stats(summary=not a.no_summary)
 
 
 def cmd_dashboard(a):
@@ -177,7 +177,9 @@ def main(argv=None):
     s.add_argument("--run")
     s.add_argument("--platform", choices=["youtube", "instagram", "facebook"])
     s.set_defaults(fn=cmd_publish)
-    sub.add_parser("stats").set_defaults(fn=cmd_stats)
+    s = sub.add_parser("stats", help="pull stats now (the bot also does it every analytics.every_hours)")
+    s.add_argument("--no-summary", action="store_true", help="do not send the Telegram summary")
+    s.set_defaults(fn=cmd_stats)
     sub.add_parser("dashboard").set_defaults(fn=cmd_dashboard)
     s = sub.add_parser("verify", help="ffprobe + loudness + A/V sync + contact sheet for rendered runs")
     s.add_argument("--run", nargs="*", help="run ids (default: the most recent rendered runs)")

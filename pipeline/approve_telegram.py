@@ -10,7 +10,8 @@ Review cards come ONE at a time (pipeline/review.py holds the queue and the card
   * a video sent from the dashboard ("Send to Telegram") becomes the card now: an undecided card
     for another video is swapped out and its video stays in the queue.
 Buttons on any other message answer "This card is stale" and do nothing.
-Commands (registered with setMyCommands): /new /ready /status /pause /resume /help.
+Commands (registered with setMyCommands): /new /ready /status /account /pause /resume /help.
+/account reads the connected Instagram and Facebook accounts live from Meta, by id (survives a rename).
 Edits are throttled to one per EDIT_GAP_S per message, and a 429 waits for its retry_after.
 
 `run.py bot` is also the publish fallback (approved runs nobody published yet are handed to
@@ -36,6 +37,7 @@ STALE = review.STALE
 COMMANDS = [("new", "Make a new video: pick one of 3 topics"),
             ("ready", "Finished videos that are not posted yet"),
             ("status", "What's rendering, the open card and the queue"),
+            ("account", "The connected Instagram + Facebook accounts, live"),
             ("pause", "Stop sending review cards"),
             ("resume", "Start sending review cards again"),
             ("help", "What this bot can do")]
@@ -43,6 +45,7 @@ HELP = ("🤖 {brand} bot\n"
         "/new — make a new video: pick one of 3 topics, or Random\n"
         "/ready — finished videos not posted yet; tap one to review it next\n"
         "/status — what's rendering, the open card, the queue, test mode\n"
+        "/account — the connected Instagram and Facebook accounts, read live from Meta\n"
         "/pause — stop sending review cards (the open card stays)\n"
         "/resume — send them again\n"
         "/help — this message\n\n"
@@ -314,7 +317,8 @@ class Bot:
             return
         text = (m.get("text") or "").strip()
         cmd = text.split()[0][1:].split("@")[0].lower() if text.startswith("/") else ""
-        handler = {"new": self.cmd_new, "ready": self.cmd_ready, "status": self.cmd_status, "pause": self.cmd_pause,
+        handler = {"new": self.cmd_new, "ready": self.cmd_ready, "status": self.cmd_status,
+                   "account": self.cmd_account, "pause": self.cmd_pause,
                    "resume": self.cmd_resume, "help": self.cmd_help, "start": self.cmd_help}.get(cmd, self.cmd_help)
         handler()
 
@@ -324,6 +328,9 @@ class Bot:
 
     def cmd_status(self) -> None:
         send_message(status_text())
+
+    def cmd_account(self) -> None:
+        send_message(account_text())
 
     def cmd_pause(self) -> None:
         review.set_paused(True)
@@ -578,6 +585,47 @@ def status_text() -> str:
     return "\n".join(lines)
 
 
+def _count(n, word: str) -> str:
+    return f"? {word}s" if n is None else f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def account_text() -> str:
+    """The connected accounts, read live from the Graph API by IG_USER_ID and FB_PAGE_ID (never from
+    cached names, so a renamed account shows its new name at once). Ids and tokens are not shown."""
+    from . import meta_api
+    from .publish_instagram import _check_json, base
+    tok, ig, page = secret("IG_ACCESS_TOKEN"), secret("IG_USER_ID"), secret("FB_PAGE_ID")
+    lines = ["👤 Connected accounts (live from Meta)"]
+    if not tok:
+        return "\n".join(lines + ["IG_ACCESS_TOKEN is missing: connect the accounts in Settings."])
+
+    def read(url: str, fields: str, what: str) -> dict | str:
+        try:
+            return _check_json(meta_api.get(url, params={"fields": fields, "access_token": tok}, timeout=30), what)
+        except Exception as e:  # noqa: BLE001 - one account failing must not hide the other
+            return review.short_error(meta_api.redact(str(e)))
+
+    if ig:
+        d = read(f"{base()}/{ig}", "username,name,followers_count,media_count", "IG account")
+        if isinstance(d, dict):
+            lines += [f"📸 Instagram: @{d.get('username')}" + (f" · {d['name']}" if d.get("name") else ""),
+                      f"     {_count(d.get('followers_count'), 'follower')} · {_count(d.get('media_count'), 'post')}"]
+        else:
+            lines.append(f"📸 Instagram: could not read it ({d})")
+    else:
+        lines.append("📸 Instagram: IG_USER_ID is missing")
+    if page:
+        d = read(f"{base('facebook')}/{page}", "name,followers_count,fan_count", "FB page")
+        if isinstance(d, dict):
+            lines.append(f"📘 Facebook Page: {d.get('name')} · "
+                         f"{_count(d.get('followers_count', d.get('fan_count')), 'follower')}")
+        else:
+            lines.append(f"📘 Facebook Page: could not read it ({d})")
+    else:
+        lines.append("📘 Facebook Page: FB_PAGE_ID is missing")
+    return "\n".join(lines)
+
+
 def daily_summary_text() -> str:
     since = datetime.now(timezone.utc) - timedelta(days=1)
     runs = [r for r in db.list_runs(limit=500) if db.parse_ts(r["created_at"]) >= since]
@@ -667,6 +715,8 @@ def _bot_loop() -> int:
                 from .orchestrator import settle_stopped
                 settle_stopped()   # a publisher that died mid-post is reported, not left "posting"
                 _publish_stragglers()
+                from . import analytics
+                analytics.tick()   # stats every analytics.every_hours, on a background thread
                 last_scan = time.time()
             if not tg:
                 time.sleep(30)

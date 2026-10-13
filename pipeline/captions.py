@@ -4,8 +4,9 @@ Code computes the story facts from the video's data: the most surprising country
 the biggest fall, the crossover where two countries swap rank and stay swapped, a sharp one-year move,
 a peak followed by a fall, and the record high and low. ONLY these facts may put a number into a caption.
 
-Gemini (optional, the key and model of labels.py) picks hook templates from caption_formats.json and
-fills them with those facts; it never supplies a number or a fact. Every variant is checked in code:
+Gemini (optional; every call goes through gemini.ask_json, which falls back to the next model at once
+when one is overloaded) picks hook templates from caption_formats.json and fills them with those
+facts; it never supplies a number or a fact. Every variant is checked in code:
 the hook must follow its template word for word, every slot must hold a country, year or value from
 the facts it cites, every number must come from the facts, no em dashes, length limits, at most
 captions.max_emoji emoji. A failed variant is asked for again (captions.llm_retries), then filled from
@@ -674,41 +675,44 @@ def _items(resp) -> list:
     return resp if isinstance(resp, list) else []
 
 
-def llm_variants(ctx: Context, n: int, ask, model: str) -> tuple[list[dict], list[str]]:
+def llm_variants(ctx: Context, n: int, ask) -> tuple[list[dict], list[str]]:
     """Variants from Gemini, each validated; a failed slot is asked for again up to llm_retries times.
-    Returns (accepted variants, notes). Stops at the first transport error or exhausted quota."""
-    from .labels import QuotaExhausted
+    ask(prompt) -> (parsed reply, model that answered). Returns (accepted variants, notes). Stops when
+    no model answers (gemini.QuotaExhausted) or on any other error."""
+    from .gemini import QuotaExhausted
     retries = int(ctx.s["llm_retries"])
     accepted, notes, used, reasons = [], [], set(), []
 
-    def accept(item: dict, attempts: int, rejected: list[str]) -> None:
-        accepted.append({**item, "attempts": attempts, "rejected": rejected})
+    def accept(item: dict, attempts: int, rejected: list[str], model: str) -> None:
+        accepted.append({**item, "attempts": attempts, "rejected": rejected, "model": model})
         used.add(item["template_id"])
 
     try:
-        for item in _items(ask(model, build_prompt(ctx, n, used))):
+        reply, model = ask(build_prompt(ctx, n, used))
+        for item in _items(reply):
             if len(accepted) >= n:
                 break
             why = validate(item, ctx, used)
             if why is None:
-                accept(item, 1, [])
+                accept(item, 1, [], model)
             else:
                 reasons.append(why)
         for slot in range(n - len(accepted)):   # each missing variant: up to `retries` more asks
             last = reasons[slot] if slot < len(reasons) else "no usable variant was returned"
             rejected = [last]
             for attempt in range(retries):
-                items = _items(ask(model, build_prompt(ctx, 1, used, feedback=last)))
+                reply, model = ask(build_prompt(ctx, 1, used, feedback=last))
+                items = _items(reply)
                 why = validate(items[0], ctx, used) if items else "no variant was returned"
                 if why is None:
-                    accept(items[0], attempt + 2, rejected)
+                    accept(items[0], attempt + 2, rejected, model)
                     break
                 last = why
                 rejected.append(why)
             else:
                 notes.append(f"Gemini variant rejected {retries + 1}x, plain fill used ({'; '.join(rejected)[:300]})")
     except QuotaExhausted as e:
-        notes.append(f"Gemini quota exhausted: {str(e)[:120]}")
+        notes.append(f"Gemini unavailable, plain fills used: {str(e)[:200]}")
     except Exception as e:  # noqa: BLE001 - the plain template fill takes over
         notes.append(f"Gemini failed: {type(e).__name__}: {str(e)[:160]}")
     return accepted, notes
@@ -875,31 +879,28 @@ def generate(topic: dict, countries: list[tuple[str, str]], series: dict, x_star
     facts = compute_facts(topic, countries, series, x_start, x_end)
     ctx = Context(topic, countries, facts, x_start, x_end, s=s)
     n = int(s["variants"])
-    notes, model, accepted = [], None, []
+    notes, accepted = [], []
     use_llm = s["llm"] if llm is None else llm
     if use_llm and facts:
-        from . import labels
         if ask is None and not secret("GEMINI_API_KEY"):
             notes.append("no GEMINI_API_KEY: plain template fills")
         else:
-            try:
-                model = labels.resolve_model() if ask is None else "test"
-                accepted, more = llm_variants(ctx, n, ask or labels.ask_gemini, model)
-                notes += more
-            except Exception as e:  # noqa: BLE001
-                notes.append(f"Gemini unavailable: {type(e).__name__}: {str(e)[:160]}")
+            from . import gemini
+            accepted, more = llm_variants(ctx, n, ask or (lambda prompt: gemini.ask_json(prompt, what="caption")))
+            notes += more
     used = {v["template_id"] for v in accepted}
     fills = fallback_variants(ctx, n - len(accepted), used, seed) if len(accepted) < n else []
     variants = []
     for v, source in [(v, "gemini") for v in accepted] + [(v, "template") for v in fills]:
         variants.append({"template_id": v["template_id"], "template": ctx.hooks[v["template_id"]]["text"],
                          "hook": clean(v["hook"]), "question_id": v["question_id"], "question": clean(v["question"]),
-                         "fact_ids": v["fact_ids"], "source": source,
+                         "fact_ids": v["fact_ids"], "source": source, "model": v.get("model"),
                          "attempts": v.get("attempts", 0), "rejected": v.get("rejected", []),
                          "caption": caption_text(v["hook"], ctx.metric, v["question"])})
     if len(variants) < n:
         notes.append(f"only {len(variants)} of {n} variants could be made from the facts")
     tags, tag_notes = pick_hashtags(topic, facts, seed, s, trending=trending, get=get)
+    model = ", ".join(sorted({v["model"] for v in accepted if v.get("model")})) or None   # the model(s) that served
     return {"generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "model": model,
             "facts": facts, "metric_line": ctx.metric, "variants": variants, "hashtags": tags, "chosen": 0,
             "notes": notes + tag_notes}

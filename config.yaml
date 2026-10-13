@@ -147,13 +147,15 @@ labels:
   year_tolerance: 1
   shock_threshold: 0.25         # use largest single-year move if it is >= this share of the range
 
-gemini:
-  model: auto                   # "auto" = list models on first run, pick a flash-class one, log it
+gemini:                         # every call (labels + captions) goes through pipeline/gemini.py
+  model: auto                   # primary. "auto" = list models on first run, pick a flash-class one, log it
+                                # (cached in cache/gemini_model.json; currently gemini-3.8-flash)
+  fallback_models: ["gemini-2.5-flash"]   # tried in order, AT ONCE, when the model before is overloaded (503),
+                                # rate limited (429), down (5xx), unknown (404) or does not answer in `timeout`
   prefer: ["flash"]
   avoid: ["lite", "image", "tts", "audio", "live", "thinking", "embedding", "exp", "preview"]
   api_base: "https://generativelanguage.googleapis.com/v1beta"
-  max_retries: 5
-  timeout: 40
+  timeout: 40                   # seconds per model per call
 
 captions:                       # pipeline/captions.py; hooks in caption_formats.json, tags in hashtags.json
   enabled: true                 # make caption options when a video reaches review
@@ -218,6 +220,8 @@ meta_api:                       # every request to Meta (Instagram + Facebook), 
   min_gap_seconds: 3            # a request waits until the one before it is at least this old; 0 = no limit
 
 analytics:
+  every_hours: 6                # the bot collects stats this often, in its own process (no OS scheduler)
+  summary_every_hours: 24       # ... and sends the Telegram summary at most this often
   min_age_hours: 72
   shrink_n: 3
 

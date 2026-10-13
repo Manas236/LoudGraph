@@ -383,7 +383,7 @@ def test_commands_are_registered(env):
     tg, fake = env["tg"], env["fake"]
     tg.register_commands()
     names = [c["command"] for c in fake.of("setMyCommands")[0]["commands"]]
-    assert names == ["new", "ready", "status", "pause", "resume", "help"]
+    assert names == ["new", "ready", "status", "account", "pause", "resume", "help"]
 
 
 def test_pause_and_resume_persist(env):

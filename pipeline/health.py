@@ -34,9 +34,10 @@ def _res(level: str, state: str, detail: str) -> dict:
 def check_gemini() -> dict:
     if not secret("GEMINI_API_KEY"):
         return _res("WARN", "missing", "GEMINI_API_KEY missing: videos will have no turning-point labels")
-    from .labels import resolve_model
+    from .gemini import resolve_model
     try:
-        return _res("OK", "ok", f"valid, model {resolve_model(refresh=True)}")
+        fallbacks = ", ".join(get_config()["gemini"].get("fallback_models") or []) or "none"
+        return _res("OK", "ok", f"valid, model {resolve_model(refresh=True)}, fallback {fallbacks}")
     except Exception as e:  # noqa: BLE001
         bad_key = "API key" in str(e) or "HTTP 400" in str(e) or "HTTP 403" in str(e)
         return _res("FAIL", "invalid" if bad_key else "error", f"GEMINI_API_KEY present but failed: {e}"[:300])

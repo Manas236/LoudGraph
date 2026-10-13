@@ -132,11 +132,11 @@ def test_a_failed_variant_is_retried_twice_then_filled_plainly(ctx):
                           good(ctx, "went_from", "India went from 1.0 to 99.0", "biggest_rise")]}
     bad = {"variants": [good(ctx, "went_from", "India went from 2.0 to 30.0", "biggest_rise")]}
 
-    def ask(model, prompt):
+    def ask(prompt):
         calls.append(prompt)
-        return first if len(calls) == 1 else bad
+        return (first if len(calls) == 1 else bad), "gemini-2.5-flash"
 
-    accepted, notes = captions.llm_variants(ctx, 3, ask, "m")
+    accepted, notes = captions.llm_variants(ctx, 3, ask)
     assert len(calls) == 3 and len(accepted) == 2                      # 1 ask for 3, then 2 retries for the bad one
     assert "rejected 3x" in notes[0] and "99.0" in notes[0]
     assert "Your previous attempt was rejected" in calls[1] and "not wait_for, watch_at" in calls[1]
@@ -149,22 +149,23 @@ def test_a_retry_that_passes_is_kept(ctx):
     answers = [{"variants": [good(ctx, "wait_for", "Wait for India", "surprising")]},
                {"variants": [good(ctx, "watch_at", "Watch France at 2005", "peak")]},
                {"variants": [good(ctx, "went_from", "France went from 10.0 to 5.0", "biggest_fall")]}]
-    accepted, notes = captions.llm_variants(ctx, 3, lambda m, p: answers.pop(0), "m")
+    accepted, notes = captions.llm_variants(ctx, 3, lambda p: (answers.pop(0), "gemini-3.8-flash"))
     assert [v["template_id"] for v in accepted] == ["wait_for", "watch_at", "went_from"]
+    assert {v["model"] for v in accepted} == {"gemini-3.8-flash"}
     assert [v["attempts"] for v in accepted] == [1, 2, 2] and notes == []
 
 
 def test_generate_falls_back_when_gemini_quota_is_gone(monkeypatch):
     from pipeline import captions
-    from pipeline.labels import QuotaExhausted
+    from pipeline.gemini import QuotaExhausted
 
-    def ask(model, prompt):
+    def ask(prompt):
         raise QuotaExhausted("per day")
 
     c = captions.generate(TOPIC, COUNTRIES, SERIES, 2000, 2010, seed=1, ask=ask)
     assert [v["source"] for v in c["variants"]] == ["template"] * 3
     assert len({v["template_id"] for v in c["variants"]}) == 3
-    assert any("quota" in n for n in c["notes"])
+    assert any("Gemini unavailable" in n for n in c["notes"])
     for v in c["variants"]:
         hook, metric, question = v["caption"].split("\n")
         assert metric.startswith("Test metric: widgets per 100 people") and question.endswith("?")

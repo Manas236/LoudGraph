@@ -42,7 +42,7 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py bot` | long-running: the Telegram review queue and commands, scheduled videos, publishes approved runs |
 | `python run.py go-live [--check-only]` | read-only Instagram + Facebook checks; for those that pass, turn posting on and test mode off (old test-mode approvals go back to review first) |
 | `python run.py publish [--run ID]` | publish approved runs now |
-| `python run.py stats` | daily: pull views / avg % viewed, recompute topic weights, send daily summary |
+| `python run.py stats [--no-summary]` | pull views / avg % watched / skip rate now, recompute topic weights, send the summary (the bot also does this every 6 h by itself) |
 | `python run.py dashboard` | local web UI on http://127.0.0.1:5055 (Review, Library, Settings) |
 | `python run.py verify [--run ID ...]` | ffprobe, loudness, A/V sync, stem balance, pitch-vs-data, pixel centring, contact sheet |
 | `python run.py crash-test` | `out/crash_test.mp4`: a synthetic flat-crash-recover series, to hear the event treatment |
@@ -113,6 +113,7 @@ live after all, and records it instead of posting a second copy.
 | `/new` | offers 3 topics that have no video yet (the most interesting by the data scorer) and a Random button. Tap one and a status message follows it: Fetching data, Rendering, Ready. A ready video joins the review queue. Only one video renders at a time: a pick made while another renders waits its turn, and the message says so. If the topic turns out too boring (every country moved the same way), the message says that plainly. |
 | `/ready` | lists up to 8 finished videos that are not posted yet, newest first. Tap one to make it the next card. |
 | `/status` | one message: what is rendering, the open card, how many videos wait, and whether test mode is on. |
+| `/account` | the connected Instagram account (username, name, followers, posts) and Facebook Page (name, followers), read live from Meta by id, so a renamed account shows its new name at once. |
 | `/pause`, `/resume` | stop or restart sending review cards. The open card keeps working, and the pause survives a restart. |
 | `/help` | the list of commands. |
 
@@ -214,6 +215,13 @@ two batches. Settings changes are picked up by running processes without restart
   cover image (`cover_url`) would need a public file host, which the resumable upload does not have.
 - **Labels**: code finds the turning point; Gemini may only name the event (2–4 words) and is
   rejected unless confident, short, within ±1 year and free of numbers. No label is fine.
+- **Gemini** (`pipeline/gemini.py`, used for labels and captions): `gemini.model` first, then
+  `gemini.fallback_models` (gemini-2.5-flash). An overloaded (503), rate-limited (429), down or silent
+  model hands over to the next one at once, without minutes of retries; the log says which model served
+  each call, and `labels.json` / `captions.json` record it.
+- **Stats**: the bot collects them itself every `analytics.every_hours` (6 h) on a background thread, so
+  it needs no OS scheduler (and keeps working on a server); the Telegram summary goes out at most once a
+  day. Instagram adds skip rate, shares, saves and watch time (as a % of the video) to every row.
 
 ## Credentials (`.env`)
 
@@ -281,13 +289,13 @@ requests, not posts: three approved videos still go out one after another.
 ## Scheduling
 
 Default cadence: 2 videos/day (`cadence.videos_per_day`). Paths and names below are placeholders.
+Stats need no scheduled task: the bot collects them every `analytics.every_hours`.
 
 ### Windows (Task Scheduler)
 
 ```bat
 set P=C:\path\to\pipeline
 schtasks /Create /TN "Graphony produce" /SC DAILY /ST 08:00 /TR "\"%P%\.venv\Scripts\python.exe\" \"%P%\run.py\" produce"
-schtasks /Create /TN "Graphony stats"   /SC DAILY /ST 21:00 /TR "\"%P%\.venv\Scripts\python.exe\" \"%P%\run.py\" stats"
 schtasks /Create /TN "Graphony bot"     /SC ONLOGON          /TR "\"%P%\.venv\Scripts\pythonw.exe\" \"%P%\run.py\" bot"
 ```
 
@@ -300,7 +308,6 @@ Start the dashboard when needed with `python run.py dashboard`.
 ```cron
 # crontab -e
 0 7 * * *   cd /opt/shorts-pipeline && .venv/bin/python run.py produce >> cache/logs/cron.log 2>&1
-0 21 * * *  cd /opt/shorts-pipeline && .venv/bin/python run.py stats   >> cache/logs/cron.log 2>&1
 ```
 
 `/etc/systemd/system/shorts-pipeline-bot.service`:

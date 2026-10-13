@@ -2,27 +2,23 @@
 
 Code finds each country's turning point. Gemini (optional) is only asked for a 2-4 word event
 tag for that year; it never supplies or edits a number. Anything that fails validation means
-"no label", which is always acceptable.
+"no label", which is always acceptable. Gemini calls go through gemini.ask_json (model fallback).
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
-import time
 from datetime import datetime, timezone
 
 import numpy as np
-import requests
 
+from . import gemini
 from .config import get_config, path, secret
+from .gemini import QuotaExhausted, choose_flash_model, parse_json_text, resolve_model  # noqa: F401 (re-exported)
 from .score import zigzag
 
 log = logging.getLogger(__name__)
-
-
-class QuotaExhausted(RuntimeError):
-    pass
 
 
 # ------------------------------------------------------------------ turning point (pure code)
@@ -87,89 +83,6 @@ def validate(resp, detected_year: int, cfg: dict | None = None) -> tuple[str | N
     return label, "ok"
 
 
-def parse_json_text(text: str):
-    t = text.strip()
-    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t)
-    try:
-        return json.loads(t)
-    except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", t, re.S)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                return None
-    return None
-
-
-# ------------------------------------------------------------------ Gemini
-
-def _gcfg() -> dict:
-    return get_config()["gemini"]
-
-
-def _model_cache():
-    return path("cache") / "gemini_model.json"
-
-
-def list_models() -> list[dict]:
-    key = secret("GEMINI_API_KEY")
-    if not key:
-        raise RuntimeError("GEMINI_API_KEY missing")
-    out, token = [], None
-    while True:
-        params = {"pageSize": 1000}
-        if token:
-            params["pageToken"] = token
-        r = requests.get(f"{_gcfg()['api_base']}/models", params=params,
-                         headers={"x-goog-api-key": key}, timeout=_gcfg()["timeout"])
-        if r.status_code != 200:
-            raise RuntimeError(f"models list HTTP {r.status_code}: {r.text[:300]}")
-        d = r.json()
-        out += d.get("models", [])
-        token = d.get("nextPageToken")
-        if not token:
-            return out
-
-
-def choose_flash_model(models: list[dict], prefer=None, avoid=None) -> str | None:
-    g = _gcfg()
-    prefer = prefer or g["prefer"]
-    avoid = avoid or g["avoid"]
-    cands = []
-    for m in models:
-        name = m.get("name", "")
-        short = name.split("/")[-1].lower()
-        if "generateContent" not in m.get("supportedGenerationMethods", []):
-            continue
-        if not any(p in short for p in prefer) or any(a in short for a in avoid):
-            continue
-        nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", short)] or [0.0]
-        cands.append((nums[0], -len(short), name.split("/")[-1]))
-    if not cands:
-        return None
-    cands.sort(reverse=True)
-    return cands[0][2]
-
-
-def resolve_model(refresh: bool = False) -> str:
-    """Model from config, or on first run list models, pick a flash-class one and log it."""
-    g = _gcfg()
-    if g["model"] != "auto":
-        return g["model"]
-    f = _model_cache()
-    if f.exists() and not refresh:
-        return json.loads(f.read_text(encoding="utf-8"))["model"]
-    models = list_models()
-    m = choose_flash_model(models)
-    if not m:
-        raise RuntimeError(f"no flash-class model with generateContent among {len(models)} models")
-    f.write_text(json.dumps({"model": m, "chosen_at": datetime.now(timezone.utc).isoformat(),
-                             "available": [x.get("name") for x in models]}, indent=1), encoding="utf-8")
-    log.info("Gemini: chose model %s from %d listed models", m, len(models))
-    return m
-
-
 PROMPT = """You help caption a data video. One country's statistic shows a clear turning point.
 
 Country: {country}
@@ -185,42 +98,6 @@ Rules:
 - Do not include any numbers except a year.
 - event_year is the year the event happened.
 Reply with JSON only: {{"label": string, "event_year": integer, "confident": boolean}}"""
-
-
-def ask_gemini(model: str, prompt: str) -> dict | None:
-    key = secret("GEMINI_API_KEY")
-    g = _gcfg()
-    url = f"{g['api_base']}/models/{model}:generateContent"
-    body = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"},
-    }
-    delay = 2.0
-    for attempt in range(g["max_retries"] + 1):
-        try:
-            r = requests.post(url, json=body, headers={"x-goog-api-key": key}, timeout=g["timeout"])
-        except requests.RequestException as e:
-            log.warning("Gemini request error %s (attempt %d)", e, attempt + 1)
-            time.sleep(delay)
-            delay *= 2
-            continue
-        if r.status_code == 200:
-            try:
-                parts = r.json()["candidates"][0]["content"]["parts"]
-                return parse_json_text("".join(p.get("text", "") for p in parts))
-            except (KeyError, IndexError, ValueError):
-                log.warning("Gemini: unexpected response shape: %s", r.text[:300])
-                return None
-        if r.status_code == 429 or r.status_code >= 500:
-            txt = r.text
-            if r.status_code == 429 and ("PerDay" in txt or "per day" in txt.lower()):
-                raise QuotaExhausted(txt[:300])
-            log.info("Gemini HTTP %s, backing off %.0fs", r.status_code, delay)
-            time.sleep(delay)
-            delay = min(delay * 2, 60)
-            continue
-        raise RuntimeError(f"Gemini HTTP {r.status_code}: {r.text[:300]}")
-    raise QuotaExhausted("rate limited after retries")
 
 
 def _label_cache() -> dict:
@@ -248,13 +125,6 @@ def label_run(topic: dict, countries: list[str], series: dict, indicator_name: s
         for v in out.values():
             v["reason"] = "no GEMINI_API_KEY"
         return out
-    try:
-        model = resolve_model()
-    except Exception as e:  # noqa: BLE001
-        log.warning("labels: cannot resolve Gemini model (%s); continuing without labels", e)
-        for v in out.values():
-            v["reason"] = f"model unavailable: {e}"[:200]
-        return out
     cache = _label_cache()
     exhausted = False
     for iso in countries:
@@ -263,9 +133,9 @@ def label_run(topic: dict, countries: list[str], series: dict, indicator_name: s
             continue
         ck = f"{topic['id']}|{iso}|{v['year']}"
         if ck in cache:
-            resp = cache[ck]["response"]
+            resp, model = cache[ck]["response"], cache[ck].get("model")
         elif exhausted:
-            v["reason"] = "Gemini quota exhausted"
+            v["reason"] = "Gemini unavailable (every model busy or out of quota)"
             continue
         else:
             rows = {y: val for y, val in series[iso]}
@@ -274,11 +144,11 @@ def label_run(topic: dict, countries: list[str], series: dict, indicator_name: s
             prompt = PROMPT.format(country=names[iso], metric=f"{indicator_name} ({topic['subtitle']})",
                                    year=v["year"], kind=v["kind"], values=values)
             try:
-                resp = ask_gemini(model, prompt)
+                resp, model = gemini.ask_json(prompt, what=f"label {topic['id']} {iso}")
             except QuotaExhausted as e:
-                log.warning("labels: Gemini quota exhausted (%s); remaining countries get no label", e)
+                log.warning("labels: %s; remaining countries get no label", e)
                 exhausted = True
-                v["reason"] = "Gemini quota exhausted"
+                v["reason"] = "Gemini unavailable (every model busy or out of quota)"
                 continue
             except Exception as e:  # noqa: BLE001
                 log.warning("labels: Gemini failed for %s: %s", iso, e)
@@ -287,5 +157,5 @@ def label_run(topic: dict, countries: list[str], series: dict, indicator_name: s
             cache[ck] = {"response": resp, "model": model, "ts": datetime.now(timezone.utc).isoformat()}
             _save_label_cache(cache)
         label, reason = validate(resp, v["year"], cfg)
-        v["label"], v["reason"], v["raw"] = label, reason, resp
+        v["label"], v["reason"], v["raw"], v["model"] = label, reason, resp, model
     return out

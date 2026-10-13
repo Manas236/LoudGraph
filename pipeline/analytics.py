@@ -1,23 +1,30 @@
-"""`run.py stats` (daily, section 12).
+"""Stats (section 12): `run.py stats`, and every analytics.every_hours inside the bot's own process
+(tick(), on a background thread), so it keeps running wherever the bot runs, without an OS scheduler.
 
 YouTube Data API -> views; YouTube Analytics API -> averageViewPercentage;
-Instagram media insights -> views / reach / likes / comments (metric names verified against the
-Meta docs on 2026-10-07: `plays` is gone, `views` is current). Then topic weights are recomputed
-(views z-scored per platform) and a daily summary goes to Telegram.
+Instagram media insights -> views / reach / likes / comments, plus the Reels metrics checked on
+2026-10-13 (reels_skip_rate, shares, saved, total_interactions, ig_reels_avg_watch_time,
+ig_reels_video_view_total_time) kept in stats.raw; avg_view_pct = average watch time / video length.
+Then topic weights are recomputed (views z-scored per platform). The Telegram summary goes out at
+most once per analytics.summary_every_hours.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
+import threading
 from datetime import datetime, timezone
 
 import numpy as np
 
 from . import db, meta_api
-from .config import get_config, secret
+from .config import get_config, run_dir, secret
 
 log = logging.getLogger(__name__)
 IG_METRICS = "views,reach,likes,comments,ig_reels_avg_watch_time"
+IG_REELS_METRICS = IG_METRICS + ",reels_skip_rate,shares,saved,total_interactions,ig_reels_video_view_total_time"
+K_LAST_RUN, K_LAST_SUMMARY = "stats:last_run", "stats:last_summary"
 
 
 def _live_posts(platform: str) -> list[dict]:
@@ -71,9 +78,12 @@ def fetch_instagram() -> int:
     from .publish_instagram import base
     n = 0
     for p in posts:
-        r = meta_api.get(f"{base()}/{p['remote_id']}/insights", params={"metric": IG_METRICS, "access_token": tok},
-                         timeout=30)
-        d = r.json()
+        for metrics in (IG_REELS_METRICS, IG_METRICS):   # the Reels-only metrics fail on other media types
+            r = meta_api.get(f"{base()}/{p['remote_id']}/insights", params={"metric": metrics, "access_token": tok},
+                             timeout=30)
+            d = r.json()
+            if r.status_code == 200 and "error" not in d:
+                break
         if r.status_code != 200 or "error" in d:
             log.warning("IG insights %s failed: %s", p["remote_id"], d.get("error", d))
             continue
@@ -84,9 +94,18 @@ def fetch_instagram() -> int:
             elif m.get("total_value"):
                 vals[m["name"]] = m["total_value"].get("value")
         db.add_stats(p["id"], views=vals.get("views"), reach=vals.get("reach"), likes=vals.get("likes"),
-                     comments=vals.get("comments"), raw=vals)
+                     comments=vals.get("comments"), avg_view_pct=_watch_pct(p["run_id"], vals), raw=vals)
         n += 1
     return n
+
+
+def _watch_pct(run_id: str, vals: dict) -> float | None:
+    """Average watch time as a % of the video's length (ig_reels_avg_watch_time is in ms)."""
+    try:
+        dur = json.loads((run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))["duration_seconds"]
+        return round(100 * vals["ig_reels_avg_watch_time"] / 1000 / dur, 1)
+    except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError):
+        return None
 
 
 def compute_weights(rows: list[dict], min_age_hours: float, shrink_n: int, retire_after: int,
@@ -134,15 +153,26 @@ def update_weights() -> dict:
     return w
 
 
-def run_stats() -> int:
+def collect() -> dict:
+    """Pull every platform's stats into the stats table and recompute topic weights."""
     db.init()
+    db.kv_set(K_LAST_RUN, db.now())
+    out = {}
     for name, fn in (("youtube", fetch_youtube), ("instagram", fetch_instagram)):
         try:
-            log.info("stats %s: %d posts updated", name, fn())
+            out[name] = fn()
+            log.info("stats %s: %d posts updated", name, out[name])
         except Exception as e:  # noqa: BLE001 - one platform failing must not stop the other
+            out[name] = f"failed: {type(e).__name__}"
             log.warning("stats %s failed: %s", name, e)
     w = update_weights()
+    out["topics_weighted"] = len(w)
     log.info("topic weights updated for %d topics", len(w))
+    return out
+
+
+def send_summary() -> None:
+    db.kv_set(K_LAST_SUMMARY, db.now())
     try:
         from .approve_telegram import daily_summary_text, enabled, send_message
         if enabled():
@@ -151,4 +181,52 @@ def run_stats() -> int:
             log.info("daily summary (Telegram not configured):\n%s", daily_summary_text())
     except Exception as e:  # noqa: BLE001
         log.warning("daily summary failed: %s", e)
+
+
+def run_stats(summary: bool = True) -> int:
+    """`run.py stats`: collect now (and send the summary)."""
+    collect()
+    if summary:
+        send_summary()
     return 0
+
+
+def _hours_since(key: str, now: datetime | None = None) -> float:
+    ts = db.kv_get(key)
+    if not ts:
+        return float("inf")
+    try:
+        return ((now or datetime.now(timezone.utc)) - db.parse_ts(ts)).total_seconds() / 3600
+    except ValueError:
+        return float("inf")
+
+
+_thread: threading.Thread | None = None
+
+
+def tick(now: datetime | None = None, background: bool = True) -> bool:
+    """Called from the bot loop: collect when analytics.every_hours have passed since the last run
+    (kept in the database, so a restart neither repeats nor skips it); the Telegram summary at most
+    once per analytics.summary_every_hours. Runs on a background thread so the bot keeps answering.
+    Returns True when a run was started."""
+    global _thread
+    ac = get_config()["analytics"]
+    if (_thread and _thread.is_alive()) or _hours_since(K_LAST_RUN, now) < float(ac.get("every_hours", 6)):
+        return False
+    db.kv_set(K_LAST_RUN, db.now())   # claimed before the thread starts: the next tick does not start another
+
+    def job():
+        try:
+            res = collect()
+            log.info("stats (in the bot): %s", res)
+            if _hours_since(K_LAST_SUMMARY, now) >= float(ac.get("summary_every_hours", 24)):
+                send_summary()
+        except Exception:  # noqa: BLE001 - the bot must keep running
+            log.exception("stats in the bot failed")
+
+    if not background:
+        job()
+        return True
+    _thread = threading.Thread(target=job, name="stats", daemon=True)
+    _thread.start()
+    return True
