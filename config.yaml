@@ -34,15 +34,17 @@ video:
   crf: 18
   preset: medium
   audio_bitrate: 192k
-  min_seconds: 30
-  max_seconds: 45
+  min_seconds: 20               # target length, end card included: the picker drops countries to stay
+  max_seconds: 25               # inside it, and a timeline outside it is re-picked
 
 timing:                         # timeline.py is the only consumer; everything else reads the timeline
-  intro: 0.4                    # title alone before the first country
-  per_country: 4.5              # includes the transition and the end hold
-  transition: 0.4               # whoosh + crossfade at the start of each country
-  hold: 0.5                     # line finished, final value on screen
-  end_card: 3.5
+  intro: 0.0                    # 0 = the first country's line moves from frame 0 (the hook is drawn over it)
+  per_country: 4.2              # includes the transition and the end hold (~0.1 s per year, as before)
+  transition: 0.35              # whoosh + crossfade at the start of each country after the first
+  hold: 0.4                     # line finished, final value on screen
+  end_card: 2.5                 # reveals the answer to the opening question
+  hook_hold: 2.5                # the opening question stays big this long ...
+  hook_shrink: 0.45             # ... then shrinks into the header that stays for the whole video
   event_threshold: 0.25         # a year-to-year move >= 25% of the country's range is an EVENT
   event_slowmo: 3.0             # ...and the step into it lasts 3x longer (video + audio)
 
@@ -66,8 +68,8 @@ scorer:
 
 picker:
   top_k: 20
-  min_countries: 5              # fewer passing countries -> run fails "not enough interesting data"
-  max_countries: 8
+  min_countries: 4              # fewer passing countries -> run fails "not enough interesting data"
+  max_countries: 5              # cap per video; the most interesting by the scorer, dropped to fit max_seconds
   net_up: 0.5
   net_down: -0.5
   reversal_story: 2
@@ -129,12 +131,13 @@ render:
   backend: auto                 # auto (skia, else pillow) | skia | pillow
   background: "#0b0d12"
   text: "#f5f7fa"
+  metric: "#c3cad6"             # the metric + unit line under the opening question
   muted: "#8b93a3"
   grid: "#1f2430"
   # accent per country in a video, in order. Each must reach 4.5:1 contrast on the background.
   palette: ["#22d3ee", "#f472b6", "#a3e635", "#fbbf24", "#a78bfa", "#fb7185", "#34d399", "#fb923c", "#60a5fa"]
-  end_card_question: "Which one surprised you?"
-  end_card_cta: "Tell us in the comments"
+  end_card_cta: "Did you guess right?"   # under the end card's answer (the opening questions are in caption_formats.json)
+  cover_before_shrink: 0.15     # cover frame (thumb_offset) = this long before the hook starts to shrink
   watermark: false              # true = draw brand.name faintly on every frame; false = the video carries no name
 
 labels:

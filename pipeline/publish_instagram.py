@@ -2,7 +2,8 @@
 
 Verified against the Meta docs on 2026-10-07 (examples use v25.0):
   IG:  POST /{ig-user-id}/media  media_type=REELS, upload_type=resumable, caption, share_to_feed,
-            thumb_offset (ms of the cover frame; default 0 = first frame)
+            thumb_offset (ms of the cover frame; default 0 = first frame). cover_url (an image Meta
+            fetches from a public server) is not used: the resumable flow has no public host.
        POST https://rupload.facebook.com/ig-api-upload/{ver}/{container-id}
             headers: Authorization: OAuth <token>, offset: 0, file_size: <bytes>; body = file bytes
        GET  /{container-id}?fields=status_code   -> FINISHED | IN_PROGRESS | ERROR | EXPIRED | PUBLISHED
@@ -148,10 +149,19 @@ def check_facebook(force: bool = False) -> dict:
 
 
 def _cover_ms(run_id: str) -> int | None:
-    """Cover frame: the first country's finished chart (the hold after its line is drawn). Instagram's
-    default is frame 0, the intro: title only on the dark background, and the grid crop cuts the title."""
+    """Cover frame (thumb_offset, ms): render.cover_seconds, recorded in meta.json, is the opening
+    question still big over a well-drawn first line. A custom cover image (cover_url) would need a
+    public file host, which the resumable upload does not have. Older runs without it fall back to
+    the first country's finished chart."""
+    d = run_dir(run_id)
     try:
-        slot = json.loads((run_dir(run_id) / "timeline.json").read_text(encoding="utf-8"))["slots"][0]
+        cover = json.loads((d / "meta.json").read_text(encoding="utf-8")).get("cover_seconds")
+        if cover is not None:
+            return round(float(cover) * 1000)
+    except (OSError, ValueError, TypeError):
+        pass
+    try:
+        slot = json.loads((d / "timeline.json").read_text(encoding="utf-8"))["slots"][0]
         return round((slot["draw_end"] + slot["end"]) / 2 * 1000)
     except (OSError, ValueError, KeyError, IndexError):
         return None

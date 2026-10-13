@@ -9,8 +9,8 @@ YEARS = list(range(1990, 2024))
 
 
 def test_count_bounds_default():
-    # 0.4 intro + 4.5 s/country + 3.5 end card within 30-45 s -> 6..9 countries
-    assert country_count_bounds() == (6, 9)
+    # no intro + 4.2 s/country + 2.5 s end card within 20-25 s -> 5 countries (4 after a drop for slow-mo)
+    assert country_count_bounds() == (5, 5)
 
 
 def test_total_seconds_in_range_for_bounds():
@@ -21,17 +21,20 @@ def test_total_seconds_in_range_for_bounds():
 
 
 def test_stretch_when_few_countries():
-    # 5 countries at 4.5 s would be 26.4 s, so each is stretched to fill 30 s
-    assert per_country_seconds(5) > 4.5
-    assert math.isclose(total_seconds(5), get_config()["video"]["min_seconds"])
+    # 4 countries at 4.2 s would be 19.3 s, so each is stretched to fill 20 s
+    assert per_country_seconds(4) > 4.2
+    assert math.isclose(total_seconds(4), get_config()["video"]["min_seconds"])
 
 
 def test_layout_and_onsets_without_events():
     tl = build([("IND", YEARS), ("BRA", YEARS), ("USA", YEARS[3:])], 1990, 2023)
     cfg = get_config()["timing"]
     s0 = tl.slots[0]
-    assert s0.start == pytest.approx(cfg["intro"])
-    assert s0.trans_end - s0.start == pytest.approx(cfg["transition"])
+    assert s0.start == pytest.approx(cfg["intro"]) == 0
+    assert s0.trans_end == s0.start == s0.onsets[0]          # the first line moves from frame 0, no transition
+    s1 = tl.slots[1]
+    assert s1.trans_end - s1.start == pytest.approx(cfg["transition"])
+    assert s0.end - s0.start == pytest.approx(s1.end - s1.start)   # same length: the first draws over the transition time
     assert s0.end - s0.draw_end == pytest.approx(cfg["hold"])
     assert tl.slots[1].start == pytest.approx(s0.end)
     assert s0.onsets[0] == pytest.approx(s0.draw_start)
@@ -80,12 +83,13 @@ def test_find_events_threshold():
 
 def test_fits_and_roundtrip(tmp_path):
     tl = build([("IND", YEARS), ("BRA", YEARS)], 1990, 2023)
-    assert fits(tl)              # 2 countries are stretched to exactly 30 s
+    assert fits(tl)              # 2 countries are stretched to exactly 20 s
     tl10 = build([(c, YEARS) for c in "ABCDEFGHIJ"], 1990, 2023)
-    assert not fits(tl10)        # 0.4 + 10 x 4.5 + 3.5 = 48.9 s
+    assert not fits(tl10)        # 10 x 4.2 + 2.5 = 44.5 s
     p = tmp_path / "tl.json"
     tl.save(p)
     tl2 = Timeline.load(p)
     assert tl2.all_onsets() == tl.all_onsets()
+    assert (tl2.hook_hold, tl2.hook_shrink) == (get_config()["timing"]["hook_hold"], get_config()["timing"]["hook_shrink"])
     assert tl2.slot_at(tl.slots[1].start + 0.01).iso3 == "BRA"
     assert tl2.slot_at(tl.end_start + 0.1) is None

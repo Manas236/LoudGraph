@@ -13,6 +13,7 @@
     python run.py crash-test
     python run.py compare --old RUN_ID --new RUN_ID
     python run.py captions --run RUN_ID [RUN_ID ...] [--no-llm] [--trending]
+    python run.py preview (--topic ID | --from-run RUN_ID) [--no-send]
     python run.py go-live [--check-only]
 """
 from __future__ import annotations
@@ -123,6 +124,28 @@ def cmd_captions(a):
     return 0
 
 
+def cmd_preview(a):
+    import json
+    from pipeline import orchestrator, verify
+    from pipeline.config import run_dir
+    if not (a.topic or a.from_run):
+        log.error("give --topic ID or --from-run RUN_ID")
+        return 2
+    rid = orchestrator.make_test_video(a.topic, a.from_run)
+    frames = run_dir(rid) / "opening_frames"
+    frames.mkdir(exist_ok=True)
+    report = verify.opening_check(rid, out_dir=frames)
+    print(json.dumps({"test_run": rid, **report}, indent=1))
+    if not a.no_send:
+        from pipeline.approve_telegram import enabled, send_test_preview
+        if enabled():
+            send_test_preview(rid, report)
+            log.info("TEST preview %s sent to Telegram (not posted, not in the review queue)", rid)
+        else:
+            log.warning("Telegram is not configured; the TEST video is at %s", run_dir(rid) / "video.mp4")
+    return 0 if report["ok"] else 1
+
+
 def cmd_go_live(a):
     from pipeline import golive
     report = golive.run(apply=not a.check_only)
@@ -171,6 +194,12 @@ def main(argv=None):
     s.add_argument("--no-llm", action="store_true", help="plain template fills only, no Gemini")
     s.add_argument("--trending", action="store_true", help="re-rank topic hashtags with the Instagram hashtag search")
     s.set_defaults(fn=cmd_captions)
+    s = sub.add_parser("preview", help="render a TEST video outside the review queue, check its opening, "
+                                        "send it to Telegram marked TEST (never posted)")
+    s.add_argument("--topic", help="topic id (fetches its data)")
+    s.add_argument("--from-run", help="reuse a past run's data.json + scores.json")
+    s.add_argument("--no-send", action="store_true", help="do not send it to Telegram")
+    s.set_defaults(fn=cmd_preview)
     s = sub.add_parser("go-live", help="check Instagram + Facebook (read-only), then leave test mode for those that pass")
     s.add_argument("--check-only", action="store_true", help="only run the checks; change nothing")
     s.set_defaults(fn=cmd_go_live)

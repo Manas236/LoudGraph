@@ -6,7 +6,8 @@ Three stems, mixed at the end and also written out for verification:
          note to the new one (falls are heard falling, jumps rising)
   pad    one sustained note per country whose low-pass cutoff and gain follow the current value
          (smoothed ~150 ms), so a drop darkens and thins the sound; ducks to near silence after a fall
-  fx     whoosh between countries, a short low sub hit on falls, a short bright accent on jumps
+  fx     whoosh between countries (none before the first: it starts at t = 0), a short low sub hit
+         on falls, a short bright accent on jumps
 The pad and fx stems are balanced by measured loudness relative to the pluck stem, so the plucks
 always lead. All onsets come from the Timeline.
 """
@@ -369,7 +370,8 @@ def synthesize(tl: Timeline, values: dict[str, list[float]], seed: int = 0, cfg:
         ts = t0 + np.arange(n) / sr
         gain = np.interp(ts, tb, gain_b) * adsr(n, sr, ac["pad_attack"], ac["pad_release"])
         add("pad", pad_voice(root, n, sr, cutoff, gain, ac, rng, block), t0)
-        add("fx", whoosh(tl.transition, sr, rng), slot.start, ac["whoosh_gain"])
+        if slot.trans_end > slot.start:   # the first country has no transition: its first note is at t = 0
+            add("fx", whoosh(slot.trans_end - slot.start, sr, rng), slot.start, ac["whoosh_gain"])
 
     # --- end card: every pad root as one chord with a slow fade, plus a low resolving pluck
     chord_notes = sorted(set(roots))

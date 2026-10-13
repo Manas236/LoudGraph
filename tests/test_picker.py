@@ -35,7 +35,8 @@ def make_pool(seed=0, n=16):
 def test_pick_constraints_and_order():
     series, scored = make_pool()
     r = pick(scored, series, TOPIC)
-    assert 6 <= r["n"] <= 8 and len(r["countries"]) == r["n"]
+    pc = __import__("pipeline.config", fromlist=["get_config"]).get_config()["picker"]
+    assert pc["min_countries"] <= r["n"] <= pc["max_countries"] and len(r["countries"]) == r["n"]
     assert len(set(r["countries"])) == r["n"]
     assert all(r["constraints"].values()), r["constraints"]
     sc = [r["scores"][c]["score"] for c in r["countries"]]
@@ -65,7 +66,7 @@ def test_never_repeats_a_set():
 
 
 def test_not_enough_data():
-    series, scored = make_pool(n=4)
+    series, scored = make_pool(n=3)
     with pytest.raises(NotEnoughData, match="not enough interesting data"):
         pick(scored, series, TOPIC)
 
@@ -123,7 +124,20 @@ def test_drops_countries_when_slowmo_makes_it_too_long():
         elif i % 3 == 1:
             v = v + 2.5 * T          # rising ones
         series[f"E{i:02d}"] = [[y, float(x)] for y, x in zip(YEARS, v)]
+    from pipeline.config import get_config
     r = pick(_scored(series), series, TOPIC)
-    assert r["duration_seconds"] <= 45 + 1e-6
-    assert r["dropped_for_length"] and r["n"] < 8
+    assert r["duration_seconds"] <= get_config()["video"]["max_seconds"] + 1e-6
+    assert r["dropped_for_length"] and r["n"] < get_config()["picker"]["max_countries"]
     assert r["constraints"]["net_down"]
+
+
+def test_the_first_country_has_data_from_the_first_year():
+    """The video opens on the first country's line at t = 0, so it must not start late (the best stays last)."""
+    series, scored = make_pool()
+    r0 = pick(scored, series, TOPIC)
+    first = r0["countries"][0]
+    late = {**series, first: [row for row in series[first] if row[0] >= 1994]}
+    r = pick(_scored(late), late, TOPIC)
+    assert min(y for y, _ in late[r["countries"][0]]) == 1990
+    best = max((s for s in _scored(late) if s["ok"]), key=lambda s: s["score"])
+    assert r["countries"][-1] == best["iso3"]

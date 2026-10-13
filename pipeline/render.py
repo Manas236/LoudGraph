@@ -1,13 +1,18 @@
-"""Frames -> FFmpeg (section 8, layout revised in fix pass 01).
+"""Frames -> FFmpeg (section 8, layout revised in fix pass 01 and for the opening on 2026-10-13).
 
 Frames are drawn one at a time and piped as raw RGB into FFmpeg's stdin together with the WAV;
 no frame is ever kept in memory beyond the current one (plus one cached static layer per country)
 and nothing is written to disk per frame.
 
 Layout: one centre axis (x = 540) with symmetric 130 px side margins, which also keeps everything
-out of the right-most 12% (Shorts/Reels buttons). Top to bottom, vertically centred inside the
-safe area (y 0-1536): metric header, progress dots, flag + country, chart, year, value.
-No title pill, no source line, no channel name (the hook and the data credit live in the post).
+out of the right-most 12% (Shorts/Reels buttons). Top to bottom, from SAFE_TOP (below the Reels top
+bar, inside the profile grid's 3:4 crop) to STACK_BOTTOM: the opening question, the metric with its
+unit, progress dots, flag + country, chart, year, value.
+
+The opening question (captions.opening: a question about a computed fact) is on screen from frame 0,
+big for timing.hook_hold seconds, then shrinks into the header that stays for the whole video. The
+first country's chart and line are there from frame 0 as well. The end card reveals the answer.
+No title pill, no source line, no channel name (the data credit lives in the post).
 """
 from __future__ import annotations
 
@@ -37,22 +42,28 @@ MARGIN = 130                   # symmetric side margins
 SAFE_LEFT, SAFE_RIGHT = MARGIN, W - MARGIN       # 130 .. 950
 SAFE_RIGHT_FRAC = 0.12         # Reels/Shorts action buttons: SAFE_RIGHT must stay <= 88% of W
 SAFE_BOTTOM_FRAC = 0.20        # captions / channel name / description
-SAFE_BOTTOM = int(H * (1 - SAFE_BOTTOM_FRAC))    # 1536
-SAFE_TOP = 96
+SAFE_BOTTOM = int(H * (1 - SAFE_BOTTOM_FRAC))    # 1536: no text below this
+SAFE_TOP = 250                 # below the Reels top bar; the profile grid's 3:4 crop keeps y 240..1680
+STACK_BOTTOM = 1440            # the stack ends here, clear of the caption the Reels app lays over the bottom
 CONTENT_W = SAFE_RIGHT - SAFE_LEFT               # 820
 
 PLOT_L, PLOT_R = SAFE_LEFT, SAFE_RIGHT           # gridlines span the full content width
 DATA_INSET = 34                # data x-range is inset so the line's glow stays inside the gridlines
 FLAG_W, FLAG_H = 88, 66
 DOT_R, DOT_GAP = 9, 32
-CHART_H = 620
-YEAR_SIZE, VALUE_SIZE = 104, 128
+CHART_H_MIN, CHART_H_MAX = 420, 560              # the chart takes the height the text above it leaves
+YEAR_SIZE, VALUE_SIZE = 84, 108
 CAP = 0.727                    # Inter cap height / em
+ASCENT = 0.77                  # Inter Black ascender (h, k, l) / em
+HOOK_BIG_1LINE = (88, 72)      # opening question on one line, if it fits this large ...
+HOOK_BIG_2LINES = (88, 60)     # ... else on two balanced lines
+HOOK_SMALL = (54, 38)          # the header it becomes: one line if it fits, else two
+HOOK_LINE, METRIC_LINE = 1.08, 1.18
 
 # vertical rhythm (gaps between visual blocks)
-GAP_HEADER_DOTS, GAP_DOTS_COUNTRY, GAP_COUNTRY_CHART = 44, 44, 60
-XLAB_BELOW = 44                # x-axis label baseline below the chart bottom
-GAP_CHART_YEAR, GAP_YEAR_VALUE = 64, 40
+GAP_HOOK_METRIC, GAP_METRIC_DOTS, GAP_DOTS_COUNTRY, GAP_COUNTRY_CHART = 26, 30, 30, 40
+XLAB_BELOW = 40                # x-axis label baseline below the chart bottom
+GAP_CHART_YEAR, GAP_YEAR_VALUE = 44, 24
 
 
 def ease(p: float) -> float:
@@ -75,36 +86,88 @@ def nice_ticks(lo: float, hi: float, n: int = 4) -> list[float]:
     return ticks
 
 
+def balanced_lines(cv, text: str, font: str, size: float, max_w: float) -> list[str] | None:
+    """`text` on one line, or split into the two lines whose longer one is shortest; None if neither fits."""
+    if cv.text_width(text, font, size) <= max_w:
+        return [text]
+    words = text.split()
+    best = None
+    for k in range(1, len(words)):
+        a, b = " ".join(words[:k]), " ".join(words[k:])
+        w = max(cv.text_width(a, font, size), cv.text_width(b, font, size))
+        if w <= max_w and (best is None or w < best[0]):
+            best = (w, [a, b])
+    return best[1] if best else None
+
+
 def header_fit(cv, text: str) -> tuple[int, list[str]]:
-    """Largest header size that fits on one line (>= 40 px); otherwise the largest that fits on two."""
-    for size in range(54, 39, -2):
+    """The metric line: the largest size that fits on one line (>= 44 px); otherwise the largest on two."""
+    for size in range(52, 43, -2):
         if cv.text_width(text, "bold", size) <= CONTENT_W:
             return size, [text]
-    for size in range(54, 33, -2):
+    for size in range(48, 33, -2):
         lines = cv.wrap(text, "bold", size, CONTENT_W)
         if len(lines) <= 2 and all(cv.text_width(ln, "bold", size) <= CONTENT_W for ln in lines):
             return size, lines
     return 34, cv.wrap(text, "bold", 34, CONTENT_W)[:2]
 
 
-def compute_layout(header_size: int, header_lines: int) -> dict:
-    """Vertical positions of every block, with the whole stack centred in y 0..SAFE_BOTTOM."""
-    line = round(header_size * 1.22)
-    header_h = CAP * header_size + (header_lines - 1) * line
-    stack_h = (header_h + GAP_HEADER_DOTS + 2 * DOT_R + GAP_DOTS_COUNTRY + FLAG_H + GAP_COUNTRY_CHART
-               + CHART_H + XLAB_BELOW + GAP_CHART_YEAR + CAP * YEAR_SIZE + GAP_YEAR_VALUE + CAP * VALUE_SIZE)
-    y = (SAFE_BOTTOM - stack_h) / 2
-    L = {"stack_top": y, "header_line": line}
-    L["header_baselines"] = [y + CAP * header_size + k * line for k in range(header_lines)]
-    L["header_band"] = (y - 4, L["header_baselines"][-1] + 0.3 * header_size)
-    y = L["header_baselines"][-1] + GAP_HEADER_DOTS
+def hook_fit(cv, text: str) -> tuple[tuple[int, list[str]], tuple[int, list[str]]]:
+    """((big size, lines), (small size, lines)) for the opening question and the header it becomes."""
+    big = None
+    for size in range(HOOK_BIG_1LINE[0], HOOK_BIG_1LINE[1] - 1, -2):
+        if cv.text_width(text, "black", size) <= CONTENT_W:
+            big = (size, [text])
+            break
+    if big is None:
+        for size in range(HOOK_BIG_2LINES[0], HOOK_BIG_2LINES[1] - 1, -2):
+            lines = balanced_lines(cv, text, "black", size, CONTENT_W)
+            if lines:
+                big = (size, lines)
+                break
+    big = big or (HOOK_BIG_2LINES[1], cv.wrap(text, "black", HOOK_BIG_2LINES[1], CONTENT_W)[:2])
+    small = None
+    for size in range(HOOK_SMALL[0], HOOK_SMALL[1] - 1, -2):
+        if cv.text_width(text, "black", size) <= CONTENT_W:
+            small = (size, [text])
+            break
+    if small is None:
+        for size in range(46, HOOK_SMALL[1] - 1, -2):
+            lines = balanced_lines(cv, text, "black", size, CONTENT_W)
+            if lines:
+                small = (size, lines)
+                break
+    small = small or (HOOK_SMALL[1], cv.wrap(text, "black", HOOK_SMALL[1], CONTENT_W)[:2])
+    return big, small
+
+
+def compute_layout(hook_big: int, n_big: int, hook_small: int, n_small: int, metric_size: int,
+                   n_metric: int) -> dict:
+    """Vertical positions of every block, from SAFE_TOP down; the chart takes what is left above STACK_BOTTOM."""
+    L = {"stack_top": SAFE_TOP}
+    y = SAFE_TOP
+    lb = round(hook_big * HOOK_LINE)
+    L["hook_big_baselines"] = [y + ASCENT * hook_big + k * lb for k in range(n_big)]   # ascenders stay below SAFE_TOP
+    L["hook_base"] = L["hook_big_baselines"][-1]          # the big question and the header share this baseline
+    L["hook_band_big"] = (y - 4, L["hook_base"] + 0.3 * hook_big)
+    ls = round(hook_small * HOOK_LINE)
+    L["hook_small_baselines"] = [L["hook_base"] - (n_small - 1 - k) * ls for k in range(n_small)]
+    L["hook_band"] = (L["hook_small_baselines"][0] - CAP * hook_small - 4, L["hook_base"] + 0.3 * hook_small)
+    y = L["hook_band_big"][1] + GAP_HOOK_METRIC
+    line = round(metric_size * METRIC_LINE)
+    L["header_line"] = line
+    L["header_baselines"] = [y + CAP * metric_size + k * line for k in range(n_metric)]
+    L["header_band"] = (y - 4, L["header_baselines"][-1] + 0.3 * metric_size)
+    y = L["header_band"][1] + GAP_METRIC_DOTS
     L["dots_y"] = y + DOT_R
     L["dots_band"] = (y - 3, y + 2 * DOT_R + 3)
     y += 2 * DOT_R + GAP_DOTS_COUNTRY
     L["country_top"] = y
     L["country_band"] = (y - 4, y + FLAG_H + 4)
     y += FLAG_H + GAP_COUNTRY_CHART
-    L["chart_t"], L["chart_b"] = y, y + CHART_H
+    below = XLAB_BELOW + GAP_CHART_YEAR + CAP * YEAR_SIZE + GAP_YEAR_VALUE + CAP * VALUE_SIZE
+    ch = max(CHART_H_MIN, min(CHART_H_MAX, STACK_BOTTOM - below - y))
+    L["chart_t"], L["chart_b"], L["chart_h"] = y, y + ch, ch
     L["xlab_base"] = L["chart_b"] + XLAB_BELOW
     L["chart_band"] = (y - 6, L["xlab_base"] + 8)
     y = L["xlab_base"] + GAP_CHART_YEAR
@@ -137,10 +200,28 @@ class CountryView:
         self.ticks = [t for t in nice_ticks(vmin, vmax, 4) if self.ylo <= t <= self.yhi]
 
 
+def opening_for(topic: dict, views: list[CountryView], x0: int, x1: int, seed: int = 0) -> dict:
+    """The video's opening question and the answer its end card reveals, from facts computed on the
+    countries and years the video shows (captions.compute_facts / captions.opening)."""
+    from .captions import compute_facts, opening
+    facts = compute_facts(topic, [(v.iso3, v.name) for v in views],
+                          {v.iso3: list(zip(v.years, v.values)) for v in views}, x0, x1)
+    return opening(facts, seed) or {"id": None, "question": topic.get("name") or topic.get("title", ""),
+                                    "answer": "", "highlight": []}
+
+
+def cover_seconds(tl: Timeline, cfg: dict | None = None) -> float:
+    """The cover frame: the opening question still big over a well-drawn first line (just before it shrinks)."""
+    cfg = cfg or get_config()
+    t = tl.hook_hold - float(cfg["render"].get("cover_before_shrink", 0.15))
+    return round(max(0.0, min(t, tl.slots[0].end - 0.05)), 3)
+
+
 class Renderer:
     TAG_SIZE, TAG_H = 28, 48
 
-    def __init__(self, topic: dict, tl: Timeline, views: list[CountryView], cfg: dict | None = None):
+    def __init__(self, topic: dict, tl: Timeline, views: list[CountryView], cfg: dict | None = None,
+                 opening: dict | None = None):
         self.cfg = cfg or get_config()
         self.rc = self.cfg["render"]
         self.topic = topic
@@ -153,8 +234,12 @@ class Renderer:
             if v.iso2:
                 self.cv.load_image(v.iso2, flag_png(v.iso2))
         self.x0, self.x1 = tl.slots[0].x_start, tl.slots[0].x_end
+        self.opening = opening or opening_for(topic, views, self.x0, self.x1)
+        (self.hook_big, self.hook_big_lines), (self.hook_small, self.hook_small_lines) = \
+            hook_fit(self.cv, self.opening["question"])
         self.header_size, self.header_lines = header_fit(self.cv, topic["subtitle"])
-        self.L = compute_layout(self.header_size, len(self.header_lines))
+        self.L = compute_layout(self.hook_big, len(self.hook_big_lines), self.hook_small, len(self.hook_small_lines),
+                                self.header_size, len(self.header_lines))
         # brand.name is the product name; it reaches the frames only when render.watermark is true
         self.brand = ((self.cfg.get("brand") or {}).get("name") or "") if self.rc.get("watermark") else ""
         self._static: dict[int, object] = {}
@@ -180,8 +265,34 @@ class Renderer:
         self.cv.clear(self.rc["background"])
 
     def _header(self):
+        """The metric and its unit, always on screen."""
         for ln, base in zip(self.header_lines, self.L["header_baselines"]):
-            self.cv.text(CX, base, ln, "bold", self.header_size, self.rc["text"], anchor="m", tag="header")
+            self.cv.text(CX, base, ln, "bold", self.header_size, self.rc.get("metric", self.rc["text"]), anchor="m",
+                         tag="header")
+
+    def hook_progress(self, t: float) -> float:
+        """0 while the opening question is big, 1 once it is the header."""
+        hold, shrink = self.tl.hook_hold, self.tl.hook_shrink
+        if t <= hold:
+            return 0.0 if hold > 0 or shrink > 0 else 1.0
+        return ease((t - hold) / shrink) if shrink > 0 else 1.0
+
+    def _hook_lines(self, lines: list[str], size: float, alpha: float):
+        if alpha <= 0.01:
+            return
+        step = size * HOOK_LINE
+        for k, ln in enumerate(lines):
+            y = self.L["hook_base"] - (len(lines) - 1 - k) * step
+            self.cv.text(CX, y, ln, "black", size, self.rc["text"], anchor="m", alpha=min(1.0, alpha), tag="hook")
+
+    def _hook(self, t: float):
+        """The opening question: big, then shrinking into the header as the header fades in (same baseline)."""
+        p = self.hook_progress(t)
+        if p < 1:
+            self._hook_lines(self.hook_big_lines, self.hook_big + (self.hook_small - self.hook_big) * p,
+                             1.0 if p == 0 else 1 - p * 1.8)
+        if p > 0:
+            self._hook_lines(self.hook_small_lines, self.hook_small * (0.9 + 0.1 * p), (p - 0.35) / 0.65)
 
     def _dots(self, active: int):
         n = len(self.views)
@@ -202,6 +313,7 @@ class Renderer:
 
     # ------------------------------------------------------------ layers
     def intro_layer(self):
+        """Only used when timing.intro > 0: the metric and empty dots before the first country."""
         if self._intro is None:
             self._bg()
             self._header()
@@ -211,7 +323,7 @@ class Renderer:
         return self._intro
 
     def chrome_layer(self):
-        """The parts every country frame shares (background + header): transitions dip through it."""
+        """The parts every country frame shares (background + metric): transitions dip through it."""
         if self._chrome is None:
             self._bg()
             self._header()
@@ -250,50 +362,66 @@ class Renderer:
         return self._static[i]
 
     def end_layer(self):
+        """The answer to the opening question, then every country ranked by where it ends (the
+        countries in the answer highlighted), then a short call to comment."""
         if self._end is not None:
             return self._end
-        cv, rc = self.cv, self.rc
+        cv, rc, L = self.cv, self.rc, self.L
         self._bg()
-        q = rc["end_card_question"]
-        qs = cv.fit_size(q, "black", CONTENT_W, 64, 44)
-        qlines = cv.wrap(q, "black", qs, CONTENT_W)[:2]
-        cta = rc["end_card_cta"]
-        cs = cv.fit_size(cta, "bold", CONTENT_W, 46, 30)
+        self._header()
+        y = L["dots_band"][0]
+        answer = self.opening.get("answer") or ""
+        if answer:
+            size, lines = 44, cv.wrap(answer, "black", 44, CONTENT_W)[:2]
+            for s in range(64, 43, -2):
+                fit = balanced_lines(cv, answer, "black", s, CONTENT_W)
+                if fit:
+                    size, lines = s, fit
+                    break
+            step = round(size * 1.12)
+            for k, ln in enumerate(lines):
+                cv.text(CX, y + CAP * size + k * step, ln, "black", size, rc["text"], anchor="m", tag="end_answer")
+            L["end_title_band"] = (y - 4, y + CAP * size + (len(lines) - 1) * step + 0.3 * size)
+            y = L["end_title_band"][1] + 40
+        cta = rc.get("end_card_cta") or ""
+        cs = cv.fit_size(cta, "bold", CONTENT_W, 42, 30) if cta else 0
+        cta_h = CAP * cs + 44 if cta else 0
         n = len(self.views)
-        row_h = min(128.0, 880.0 / n)
-        qline = qs * 1.15
-        stack = CAP * qs + (len(qlines) - 1) * qline + 64 + n * row_h + 56 + CAP * cs
-        y = (SAFE_BOTTOM - stack) / 2
-        self.L["end_title_band"] = (y - 4, y + CAP * qs + (len(qlines) - 1) * qline + 0.3 * qs)
-        for k, ln in enumerate(qlines):
-            cv.text(CX, y + CAP * qs + k * qline, ln, "black", qs, rc["text"], anchor="m", tag="end_question")
-        y += CAP * qs + (len(qlines) - 1) * qline + 64
+        row_h = min(150.0, (STACK_BOTTOM - cta_h - y) / n)
         rows_top = y
-        spark_l, spark_r = SAFE_LEFT + 430, SAFE_RIGHT - 6   # end dot (r=6) touches the right margin
-        for i, v in enumerate(self.views):
-            ym = rows_top + row_h * (i + 0.5)
-            fh = min(44.0, row_h * 0.4)
-            x = SAFE_LEFT
+        hl = set(self.opening.get("highlight") or [])
+        order = sorted(range(n), key=lambda i: -self.views[i].values[-1])   # where each country ends, highest first
+        pad = 22
+        spark_l, spark_r = SAFE_LEFT + 450, SAFE_RIGHT - pad - 6
+        for r, i in enumerate(order):
+            v = self.views[i]
+            ym = rows_top + row_h * (r + 0.5)
+            if v.name in hl:
+                cv.rrect(SAFE_LEFT, ym - row_h / 2 + 5, CONTENT_W, row_h - 10, 18, fill=v.color, alpha=0.14)
+                cv.rrect(SAFE_LEFT, ym - row_h / 2 + 5, CONTENT_W, row_h - 10, 18, stroke=v.color, stroke_w=3)
+            fh = min(48.0, row_h * 0.36)
+            x = SAFE_LEFT + pad
             if v.iso2:
-                cv.image(v.iso2, x, ym - fh / 2 - 12, fh * 4 / 3, fh, radius=5)
+                cv.image(v.iso2, x, ym - fh / 2 - 14, fh * 4 / 3, fh, radius=5)
                 x += fh * 4 / 3 + 18
-            ns = cv.fit_size(v.name, "bold", spark_l - x - 24, 34, 22)
-            cv.text(x, ym - 6, v.name, "bold", ns, v.color, tag="end_name")
-            cv.text(x, ym + 26, f"{self.fmt(v.values[-1])} in {v.years[-1]}", "regular", 24, rc["muted"],
+            ns = cv.fit_size(v.name, "bold", spark_l - x - 20, 40, 24)
+            cv.text(x, ym - 4, v.name, "bold", ns, v.color, tag="end_name")
+            cv.text(x, ym + 32, f"{self.fmt(v.values[-1])} in {v.years[-1]}", "semibold", 28, rc["muted"],
                     tag="end_value")
-            band = row_h * 0.30
+            band = row_h * 0.28
             vmin, vmax = min(v.values), max(v.values)
             span = (vmax - vmin) or 1.0
             pts = [(spark_l + (yy - self.x0) / (self.x1 - self.x0) * (spark_r - spark_l),
                     ym + band - (val - vmin) / span * 2 * band) for yy, val in zip(v.years, v.values)]
-            cv.polyline(pts, v.color, 4)
-            cv.circle(pts[-1][0], pts[-1][1], 6, v.color)
-            if i < n - 1:
+            cv.polyline(pts, v.color, 5)
+            cv.circle(pts[-1][0], pts[-1][1], 7, v.color)
+            if r < n - 1:
                 cv.line(SAFE_LEFT, ym + row_h / 2, SAFE_RIGHT, ym + row_h / 2, rc["grid"], width=1.5)
-        self.L["end_rows_band"] = (rows_top - 2, rows_top + n * row_h + 2)
-        y = rows_top + n * row_h + 56
-        cv.text(CX, y + CAP * cs, cta, "bold", cs, rc["text"], anchor="m", tag="end_cta")
-        self.L["end_cta_band"] = (y - 4, y + CAP * cs + 0.3 * cs)
+        L["end_rows_band"] = (rows_top - 2, rows_top + n * row_h + 2)
+        if cta:
+            y = rows_top + n * row_h + 44
+            cv.text(CX, y + CAP * cs, cta, "bold", cs, rc["text"], anchor="m", tag="end_cta")
+            L["end_cta_band"] = (y - 4, y + CAP * cs + 0.3 * cs)
         self._brand()
         self._end = cv.snapshot()
         return self._end
@@ -404,6 +532,10 @@ class Renderer:
         return self._final[i]
 
     def draw_frame(self, t: float):
+        self._draw_body(t)
+        self._hook(t)
+
+    def _draw_body(self, t: float):
         tl = self.tl
         if t < tl.intro:
             self.cv.draw_snapshot(self.intro_layer())
@@ -411,7 +543,8 @@ class Renderer:
         # transitions dip through the shared chrome: old content fades out, then new content fades in
         if t < tl.end_start:
             slot = tl.slot_at(t) or tl.slots[-1]
-            p = (t - slot.start) / tl.transition
+            trans = slot.trans_end - slot.start
+            p = (t - slot.start) / trans if trans > 0 else 1.0   # the first country has no transition
             if p < 0.5:
                 prev = self.intro_layer() if slot.index == 0 else self.final_layer(slot.index - 1)
                 chrome = self.chrome_layer()
@@ -460,11 +593,13 @@ def build_views(topic: dict, pick: dict, data: dict, labels: dict, tl: Timeline,
 
 
 def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path, out_mp4: Path,
-                 thumb: Path | None = None, cfg: dict | None = None, on_progress=None) -> dict:
-    """on_progress(frame, n_frames) is called about once a second while frames are written."""
+                 thumb: Path | None = None, cfg: dict | None = None, on_progress=None,
+                 opening: dict | None = None) -> dict:
+    """on_progress(frame, n_frames) is called about once a second while frames are written.
+    thumb gets the cover frame (the opening question over the first line, see cover_seconds)."""
     cfg = cfg or get_config()
     vc = cfg["video"]
-    r = Renderer(topic, tl, views, cfg)
+    r = Renderer(topic, tl, views, cfg, opening)
     log.info("render backend: %s (%s)", r.backend, r.cv.backend_note)
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -508,12 +643,14 @@ def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path,
         on_progress(tl.n_frames, tl.n_frames)
     guard = _true_peak_guard(tmp, wav, cfg)
     tmp.replace(out_mp4)
+    cover = cover_seconds(tl, cfg)
     if thumb is not None:
-        r.cv.draw_snapshot(r.end_layer())
+        r.draw_frame(cover)
         jpg_from_canvas(r.cv, thumb)
     el = time.time() - t0
     return {"backend": r.backend, "backend_note": r.cv.backend_note, "frames": tl.n_frames,
-            "render_seconds": round(el, 1), "fps": round(tl.n_frames / el, 1), "true_peak_guard": guard}
+            "render_seconds": round(el, 1), "fps": round(tl.n_frames / el, 1), "true_peak_guard": guard,
+            "cover_seconds": cover, "opening": {k: r.opening.get(k) for k in ("id", "question", "answer", "highlight")}}
 
 
 def _true_peak_guard(mp4: Path, wav: Path, cfg: dict) -> dict:
@@ -543,9 +680,10 @@ def jpg_from_canvas(cv, p: Path):
     Image.frombytes("RGB", (W, H), cv.rgb_bytes()).save(p, "JPEG", quality=92)
 
 
-def render_still(topic: dict, tl: Timeline, views: list[CountryView], t: float, out_png: Path, cfg=None) -> list:
+def render_still(topic: dict, tl: Timeline, views: list[CountryView], t: float, out_png: Path, cfg=None,
+                 opening: dict | None = None) -> list:
     """Draw one frame to PNG; returns the recorded text boxes (used by tests and contact sheets)."""
-    r = Renderer(topic, tl, views, cfg)
+    r = Renderer(topic, tl, views, cfg, opening)
     r.draw_frame(t)
     from PIL import Image
     Image.frombytes("RGB", (W, H), r.cv.rgb_bytes()).save(out_png)

@@ -40,7 +40,9 @@ def variant(ctx, template_id, hook, kind, question_id="comes_last", question="Gu
 def test_facts_are_computed_from_the_data(ctx):
     by = {f["kind"]: f for f in ctx.facts}
     assert list(by) == ["surprising", "biggest_rise", "biggest_fall", "crossover", "sharpest", "peak",
-                        "record_high", "record_low"]
+                        "record_high", "record_low", "final_high", "final_low"]
+    assert (by["final_high"]["country"], by["final_high"]["value"]) == ("India", "30.0")
+    assert (by["final_low"]["country"], by["final_low"]["value"], by["final_low"]["year"]) == ("France", "5.0", 2010)
     s = by["surprising"]
     assert (s["country"], s["dirs"], s["only"], s["n_other_way"], s["n_others"]) == ("India", ["up"], True, 3, 3)
     assert (by["biggest_rise"]["country"], by["biggest_rise"]["from"], by["biggest_rise"]["to"]) == ("India", "1.0", "30.0")
@@ -435,3 +437,18 @@ def test_a_card_without_data_still_goes_out(bot):
     sent = bot["fake"].of("sendVideo")[0]
     assert len(sent["reply_markup"]["inline_keyboard"]) == 1 and "Post caption" not in sent["caption"]
     assert review.current_card()["run_id"] == rid
+
+
+def test_the_video_opening_question_and_its_answer_come_from_the_facts(ctx):
+    """The question the video opens with names no number; the end card's answer is filled from a fact in code."""
+    from pipeline import captions
+    seen = set()
+    for seed in range(4):
+        o = captions.opening(ctx.facts, seed)
+        seen.add(o["id"])
+        assert o["question"].endswith("?") and not captions.numbers_in(o["question"])
+        assert o["fact"]["country"] in o["answer"] and o["highlight"][0] == o["fact"]["country"]
+        assert all(n in ctx.allowed for n in captions.numbers_in(o["answer"]))
+    assert seen == {"overtakes", "ends_last"}                         # the two strongest openers, varied by seed
+    assert captions.opening(ctx.facts, 0)["answer"] == "India overtakes France in 2007"
+    assert captions.opening(ctx.facts, 1)["answer"] == "France ends up last: 5.0 in 2010"

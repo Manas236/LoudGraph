@@ -1,6 +1,6 @@
 # Graphony
 
-Graphony is a data-sonification Shorts/Reels pipeline. It turns real public statistics (World Bank WDI, Our World in Data) into 30–45 s vertical videos:
+Graphony is a data-sonification Shorts/Reels pipeline. It turns real public statistics (World Bank WDI, Our World in Data) into 20–25 s vertical videos:
 each country's line chart is drawn while its data plays as music (one plucked note per year,
 pitch follows the value). A human approves each video on Telegram or the local dashboard, then it
 is posted to Instagram Reels and Facebook Page Reels (YouTube Shorts is supported and currently
@@ -48,6 +48,7 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py crash-test` | `out/crash_test.mp4`: a synthetic flat-crash-recover series, to hear the event treatment |
 | `python run.py compare --old ID --new ID` | old vs new frame (`compare.png`) and spectrogram (`compare_spectrogram.png`) |
 | `python run.py captions --run ID [ID ...] [--no-llm] [--trending]` | (re)make a run's post caption options and hashtags (`captions.json`) and print them |
+| `python run.py preview (--topic ID \| --from-run ID) [--no-send]` | render a TEST video in `out/test-<time>/` (no database row: never in the review queue, never posted), check its first seconds, and send it to Telegram marked TEST |
 | `python -m pipeline.publish_youtube --auth` | one-time YouTube OAuth (opens a browser) |
 
 ## How a video is made
@@ -178,13 +179,19 @@ two batches. Settings changes are picked up by running processes without restart
 - **Scorer** (`score.py`): rejects short, gappy, interpolated/flat, low-swing and negligible series;
   scores swing, zigzag reversals, biggest single-year shock and smoothness (weights in `config.yaml`).
   A series with 6+ reversals is noise: its shock points are scaled by 0.3.
-- **Picker**: 6–8 countries (fills 30–45 s), maximises shape diversity, wants one rising, one falling
-  and one multi-reversal series, plays the highest score last, never repeats a (topic, country set).
+- **Length** (`video.min_seconds` / `max_seconds`, 20–25 s, end card included): fewer countries,
+  not faster ones. Each country still plays at about 0.1 s per year (4.2 s with its hold), so every
+  line stays readable; a video holds at most `picker.max_countries` (5) and at least
+  `picker.min_countries` (4).
+- **Picker**: up to 5 countries, maximises shape diversity, wants one rising, one falling
+  and one multi-reversal series, plays the highest score last, never repeats a (topic, country set),
+  and opens on a country with data from the first year (its line moves from frame 0).
   A set with no falling country or a minimum pairwise shape distance below 0.25 is skipped as
   **low variety** (the topic goes on cooldown and the selector picks another). If slow-mo events push
-  the video past 45 s, the least interesting country is dropped.
-- **Timeline** (`timeline.py`) is the single source of timing. A year whose move is at least 25% of the
-  country's range is an **event**: the step into it lasts 3x longer, for both the video and the audio.
+  the video past 25 s, the least interesting country is dropped.
+- **Timeline** (`timeline.py`) is the single source of timing. There is no intro: the first country's
+  line and its first note start at t = 0. A year whose move is at least 25% of the country's range is
+  an **event**: the step into it lasts 3x longer, for both the video and the audio.
 - **Audio** (three stems, mixed and kept for verification):
   `pluck` is the lead (Karplus-Strong, ~250 ms decay, 3 octaves of a minor-pentatonic scale per
   country key; a move of 15%+ of the range always changes the note by at least 2 steps; events play
@@ -192,9 +199,19 @@ two batches. Settings changes are picked up by running processes without restart
   country whose low-pass cutoff and gain follow the value, ducking to near silence after a fall;
   `fx` holds the whooshes, a short sub hit on falls and a bright accent on jumps (no sub-bass
   elsewhere). The pad sits 9 LU under the plucks. Master: −14 LUFS, ≤ −1 dBTP after AAC.
-- **Layout** (`render.py`): one centre axis (x = 540) with symmetric 130 px margins; top to bottom:
-  metric header, progress dots, flag + country, chart (tick labels inside the plot), year, value;
-  the stack is vertically centred in the area above the bottom 20% (Shorts/Reels UI).
+- **Opening** (`render.py`, `captions.opening`): from frame 0 the video asks a question built from a
+  computed fact (`openers` in `caption_formats.json`, e.g. "Who overtakes who?", "Which country ends
+  up last?"), big for `timing.hook_hold` (2.5 s), then shrinking into the header that stays to the end.
+  The metric with its unit sits under it in readable type, and the first chart is already drawing.
+- **End card** (`timing.end_card`, 2.5 s): the answer to the opening question (filled in code from the
+  same fact), every country ranked by where it ends, the countries in the answer highlighted.
+- **Layout** (`render.py`): one centre axis (x = 540) with symmetric 130 px margins; top to bottom from
+  y = 250 (below the Reels top bar, inside the profile grid's 3:4 crop) to y = 1440 (clear of the
+  caption overlay): question, metric + unit, progress dots, flag + country, chart (tick labels inside
+  the plot, height adapts to the text above), year, value.
+- **Cover**: Instagram gets `thumb_offset` = the frame just before the question shrinks (question big
+  over a well-drawn first line, `render.cover_before_shrink`); `thumb.jpg` is that same frame. A custom
+  cover image (`cover_url`) would need a public file host, which the resumable upload does not have.
 - **Labels**: code finds the turning point; Gemini may only name the event (2–4 words) and is
   rejected unless confident, short, within ±1 year and free of numbers. No label is fine.
 

@@ -50,7 +50,8 @@ DEFAULTS = {"enabled": True, "variants": 3, "hook_max_chars": 90, "question_max_
             "hashtags": {"count": 5, "broad": 1, "niche": 2},
             "trending": {"enabled": False, "weekly_search_budget": 20, "cache_days": 7, "recent_days": 30}}
 THE = {"United States", "United Kingdom", "Netherlands", "Philippines"}
-FACT_ORDER = ["surprising", "biggest_rise", "biggest_fall", "crossover", "sharpest", "peak", "record_high", "record_low"]
+FACT_ORDER = ["surprising", "biggest_rise", "biggest_fall", "crossover", "sharpest", "peak", "record_high", "record_low",
+              "final_high", "final_low"]
 
 
 def settings() -> dict:
@@ -177,6 +178,11 @@ def compute_facts(topic: dict, countries: list[tuple[str, str]], series: dict, x
     lo = min(((iso, y, v) for iso, r in rows.items() for y, v in r), key=lambda t: t[2])
     add("record_high", hi[0], year=hi[1], value=hi[2])
     add("record_low", lo[0], year=lo[1], value=lo[2])
+    if len(rows) >= 2:   # where each country ends: its own last data year
+        top = max(rows, key=lambda iso: rows[iso][-1][1])
+        bottom = min(rows, key=lambda iso: rows[iso][-1][1])
+        add("final_high", top, year=rows[top][-1][0], value=rows[top][-1][1])
+        add("final_low", bottom, year=rows[bottom][-1][0], value=rows[bottom][-1][1])
 
     facts = [found[k] for k in FACT_ORDER if k in found]
     for i, f in enumerate(facts, 1):
@@ -207,7 +213,38 @@ def fact_text(f: dict) -> str:
         return f"{c} peaked at {f['value']} in {f['year']}, then fell to {f['to']} by {f['to_year']}"
     if k == "record_high":
         return f"The highest value in the video: {c}, {f['value']} in {f['year']}"
-    return f"The lowest value in the video: {c}, {f['value']} in {f['year']}"
+    if k == "record_low":
+        return f"The lowest value in the video: {c}, {f['value']} in {f['year']}"
+    if k == "final_high":
+        return f"{c} ends highest: {f['value']} in {f['year']}"
+    return f"{c} ends lowest (last): {f['value']} in {f['year']}"
+
+
+def _fact_fields(f: dict) -> dict:
+    return {"country": f["country"], "country2": f.get("country2"), "year": f.get("year") or f.get("to_year"),
+            "from_year": f.get("from_year"), "to_year": f.get("to_year"), "from": f.get("from"), "to": f.get("to"),
+            "value": f.get("value"), "verb": "rose" if "up" in f.get("dirs", []) else "fell"}
+
+
+def opening(facts: list[dict], seed: int = 0, formats: dict | None = None) -> dict | None:
+    """The question the video opens with and the answer its end card reveals. Both come from
+    caption_formats.json "openers" filled with a computed fact (no LLM); the first openers whose
+    fact exists are preferred, and `seed` varies the choice between the top two."""
+    formats = formats or load_formats()
+    avail = []
+    for o in formats.get("openers", []):
+        for f in facts:
+            if o["fact"] == f["kind"] or (o["fact"] == "surprising_only" and f["kind"] == "surprising" and f.get("only")):
+                fields = _fact_fields(f)
+                names = [n for _, n, _, _ in string.Formatter().parse(o["answer"]) if n]
+                if all(fields.get(n) not in (None, "") for n in names):
+                    avail.append((o, f, o["answer"].format(**fields)))
+                break
+    if not avail:
+        return None
+    o, f, answer = avail[seed % min(2, len(avail))]
+    return {"id": o["id"], "question": o["question"], "answer": answer, "fact": f,
+            "highlight": [n for n in (f["country"], f.get("country2")) if n]}
 
 
 def fact_years(f: dict) -> set[str]:
@@ -282,7 +319,8 @@ UNVERIFIABLE = {"never", "always", "ever", "every", "all", "first", "last", "lea
 def load_formats() -> dict:
     d = json.loads(FORMATS_FILE.read_text(encoding="utf-8"))
     return {"hooks": [h for h in d.get("hooks", []) if h.get("id") and h.get("text")],
-            "questions": [q for q in d.get("questions", []) if q.get("id") and q.get("text")]}
+            "questions": [q for q in d.get("questions", []) if q.get("id") and q.get("text")],
+            "openers": [o for o in d.get("openers", []) if o.get("id") and o.get("question") and o.get("answer")]}
 
 
 def clean(text) -> str:

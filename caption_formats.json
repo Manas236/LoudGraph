@@ -10,11 +10,14 @@
   "crossover, sharpest, peak, record_high, record_low, or any. Leave it out and the hook suits any fact.",
   "'fill' is the plain fill used when Gemini is off or fails, with {country} {country2} {year} {from_year}",
   "{to_year} {from} {to} {value} {metric}; it can be one string or one per fact kind (plus 'default').",
-  "A hook with no 'fill' is only used by Gemini."
+  "A hook with no 'fill' is only used by Gemini.",
+  "'openers' are the question the VIDEO opens with (big on screen, then the header) and the answer its",
+  "end card reveals. 'fact' picks the computed fact; the answer is filled from it in code (no Gemini).",
+  "The first openers whose fact exists in a video are preferred. Keep questions free of numbers."
  ],
  "hooks": [
   {"id": "wait_for", "text": "Wait for [Country]",
-   "facts": ["surprising", "sharpest", "biggest_fall", "biggest_rise", "crossover"],
+   "facts": ["surprising", "sharpest", "biggest_fall", "biggest_rise", "crossover", "final_low"],
    "fill": "Wait for {country}"},
   {"id": "nobody_talks", "text": "Nobody talks about what happened to [Country] in [year]",
    "facts": ["sharpest", "peak", "crossover", "record_high", "record_low"],
@@ -62,7 +65,7 @@
    "facts": ["surprising_only"],
    "fill": "Only {country} went the other way"},
   {"id": "guess_where", "text": "Guess where [Country] ends up",
-   "facts": ["surprising", "biggest_rise", "biggest_fall", "crossover", "sharpest"],
+   "facts": ["surprising", "biggest_rise", "biggest_fall", "crossover", "sharpest", "final_low", "final_high"],
    "fill": "Guess where {country} ends up"},
   {"id": "didnt_see", "text": "[Country] didn't see [year] coming",
    "facts": ["sharpest", "peak"],
@@ -73,6 +76,20 @@
   {"id": "from_to_watch", "text": "From [x] to [y]. Watch [Country]",
    "facts": ["biggest_rise", "biggest_fall", "surprising", "sharpest"],
    "fill": "From {from} to {to}. Watch {country}"}
+ ],
+ "openers": [
+  {"id": "overtakes", "fact": "crossover", "question": "Who overtakes who?",
+   "answer": "{country} overtakes {country2} in {year}"},
+  {"id": "ends_last", "fact": "final_low", "question": "Which country ends up last?",
+   "answer": "{country} ends up last: {value} in {year}"},
+  {"id": "other_way", "fact": "surprising_only", "question": "Which country goes the other way?",
+   "answer": "Only {country} {verb}: {from} to {to}"},
+  {"id": "falls_most", "fact": "biggest_fall", "question": "Which country falls the most?",
+   "answer": "{country} falls the most: {from} to {to}"},
+  {"id": "rises_most", "fact": "biggest_rise", "question": "Which country rises the most?",
+   "answer": "{country} rises the most: {from} to {to}"},
+  {"id": "ends_top", "fact": "final_high", "question": "Which country ends up on top?",
+   "answer": "{country} ends up on top: {value} in {year}"}
  ],
  "questions": [
   {"id": "comes_last", "text": "Guess which country comes last?"},

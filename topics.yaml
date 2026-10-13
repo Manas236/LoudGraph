@@ -98,7 +98,7 @@
   source: worldbank
   code: ST.INT.ARVL
   title: "The year tourism went silent"
-  subtitle: "International tourist arrivals per year"
+  subtitle: "International tourist arrivals per year, millions"
   unit_format: "{:.1f}M"
   value_scale: 1.0e-6
   start_year: 1995
@@ -161,7 +161,7 @@
   source: worldbank
   code: SM.POP.NETM
   title: "Where people move to, as music"
-  subtitle: "Net migration: people arriving minus leaving"
+  subtitle: "Net migration (arriving minus leaving), thousands"
   unit_format: "{:+,.0f}K"
   value_scale: 1.0e-3
   start_year: 1990
@@ -432,7 +432,7 @@
   source: worldbank
   code: IS.AIR.PSGR
   title: "The year flying stopped"
-  subtitle: "Passengers flown by each country's airlines"
+  subtitle: "Passengers flown by each country's airlines, millions"
   unit_format: "{:.1f}M"
   value_scale: 1.0e-6
   start_year: 1995

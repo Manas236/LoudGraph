@@ -2,8 +2,12 @@
 
 Layout of a video with N countries:
 
-    | intro | country 1                      | country 2 ... | end card |
-            | transition | draw .......| hold |
+    | intro | country 1          | country 2                      | ... | end card |
+            | draw ........| hold | transition | draw .......| hold |
+
+The intro is 0 by default: the first country has no transition, its line moves from frame 0 and
+the opening question (hook_hold, hook_shrink) is drawn over it. Its draw window is longer by the
+transition, so every country still lasts per_country.
 
 Inside the draw window every axis year gets a time ("knot"). A normal year step lasts
 d = base_draw / n_steps. An EVENT is a data year whose move from the previous data year is at
@@ -90,6 +94,8 @@ class Timeline:
     n_frames: int
     event_threshold: float = 0.25
     event_slowmo: float = 3.0
+    hook_hold: float = 0.0          # the opening question is big until here ...
+    hook_shrink: float = 0.0        # ... and shrinks into the header over this long
 
     def slot_at(self, t: float) -> Slot | None:
         for s in self.slots:
@@ -185,10 +191,12 @@ def build(countries: list[tuple], x_start: int, x_end: int, cfg: dict | None = N
         events = find_events(ys, vs, thr)
         slow_years = {y for e in events for y in range(e["prev_year"] + 1, e["year"] + 1)}
         start = cursor
-        trans_end = start + t["transition"]
+        trans = t["transition"] if i else 0.0      # nothing to cross-fade from before the first country
+        step = d if i else (per - t["hold"]) / n_steps
+        trans_end = start + trans
         knots = [trans_end]
         for y in range(x_start + 1, x_end + 1):
-            knots.append(knots[-1] + d * (slow if y in slow_years else 1.0))
+            knots.append(knots[-1] + step * (slow if y in slow_years else 1.0))
         draw_end = knots[-1]
         end = draw_end + t["hold"]
         s = Slot(index=i, iso3=iso3, start=round(start, 6), end=round(end, 6), trans_end=round(trans_end, 6),
@@ -207,7 +215,8 @@ def build(countries: list[tuple], x_start: int, x_end: int, cfg: dict | None = N
     return Timeline(fps=fps, intro=t["intro"], per_country=per, transition=t["transition"], hold=t["hold"],
                     end_card=t["end_card"], slots=slots, end_start=round(end_start, 6),
                     duration=round(duration, 6), n_frames=int(math.ceil(duration * fps - 1e-9)),
-                    event_threshold=thr, event_slowmo=slow)
+                    event_threshold=thr, event_slowmo=slow, hook_hold=t.get("hook_hold", 0.0),
+                    hook_shrink=t.get("hook_shrink", 0.45))
 
 
 def fits(tl: Timeline, cfg: dict | None = None) -> bool:

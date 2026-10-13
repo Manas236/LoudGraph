@@ -98,6 +98,35 @@ def send_message(text: str, **extra) -> dict:
                 link_preview_options={"is_disabled": True}, **extra)
 
 
+def send_test_preview(run_id: str, report: dict | None = None) -> dict:
+    """A TEST render (orchestrator.make_test_video) to the owner's chat as a plain video message:
+    marked TEST, no buttons, no review card, so it is outside the review queue and never posted."""
+    meta = json.loads((run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))
+    opening = meta.get("opening") or {}
+    lines = ["🧪 TEST PREVIEW · NOT POSTED · not in the review queue",
+             f"🎬 {meta.get('title', '')}",
+             f"❓ Opens with: {opening.get('question', '')}",
+             f"✅ End card: {opening.get('answer', '')}",
+             "🌍 " + ", ".join(c["name"] for c in meta.get("countries", [])),
+             f"⏱ {meta.get('duration_seconds', 0):.1f} s"]
+    if report:
+        f = report.get("frames", [])
+        lines.append("🔎 Frames " + ", ".join(f"{x['t']:.1f}s" for x in f) + ": " +
+                     ("no dark frame, question + line visible" if report["checks"].get("no_near_black_frame")
+                      and report["checks"].get("hook_in_every_frame") else "CHECK FAILED, see the log") +
+                     f"; audio from {report['audio']['first_audible_s']} s")
+    from .captions import load
+    c = load(run_id)
+    if c:
+        v = c["variants"][c.get("chosen", 0)]
+        lines += ["", "✍️ Post caption 1:", v["hook"], v["question"], " ".join(c.get("hashtags", []))]
+    text = review.fit("\n".join(lines), [])
+    with open(run_dir(run_id) / "video.mp4", "rb") as fh:
+        return call("sendVideo", http_timeout=300, files={"video": ("video.mp4", fh, "video/mp4")},
+                    chat_id=secret("TELEGRAM_CHAT_ID"), caption=text, supports_streaming="true", width=1080,
+                    height=1920)
+
+
 def register_commands() -> None:
     call("setMyCommands", commands=[{"command": c, "description": d} for c, d in COMMANDS])
 

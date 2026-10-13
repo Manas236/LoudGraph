@@ -150,27 +150,42 @@ def measure_band(rgb: np.ndarray, y0: float, y1: float, bg=(11, 13, 18), thr: in
             "left": int(xs[0]), "right": int(w - 1 - xs[-1])}
 
 
-def centring_check(run_id: str, tol_centre: float = 2.0, tol_margin: float = 4.0) -> dict:
-    """Measure element bands on frames decoded from the MP4 (mid-country frames + end card)."""
+def renderer_for(run_id: str):
+    """A Renderer with the run's own layout (topic, countries, opening), for measuring its MP4. Works
+    for runs outside the database too (test previews): the topic comes from meta.json."""
     from . import db, render
     from .topics import get_topic
     d = run_dir(run_id)
     tl = Timeline.load(d / "timeline.json")
-    topic = get_topic(db.get_run(run_id)["topic_id"])
+    meta = json.loads((d / "meta.json").read_text(encoding="utf-8")) if (d / "meta.json").exists() else {}
+    run = db.get_run(run_id) or {}
+    topic = get_topic(run.get("topic_id") or meta["topic_id"])
     data = json.loads((d / "data.json").read_text(encoding="utf-8"))
     pick = json.loads((d / "pick.json").read_text(encoding="utf-8"))
     views = render.build_views(topic, pick, data, {}, tl)
-    r = render.Renderer(topic, tl, views)
+    return render.Renderer(topic, tl, views, opening=meta.get("opening")), tl
+
+
+def centring_check(run_id: str, tol_centre: float = 2.0, tol_margin: float = 4.0) -> dict:
+    """Measure element bands on frames decoded from the MP4 (mid-country frames + end card)."""
+    d = run_dir(run_id)
+    r, tl = renderer_for(run_id)
     r.end_layer()  # fills the end-card bands
     L = r.L
     bands = ["header_band", "dots_band", "country_band", "chart_band", "year_band", "value_band"]
-    frames = [((s.draw_start + s.draw_end) / 2, s.iso3, bands) for s in tl.slots]
-    frames.append((tl.end_start + min(2.0, tl.end_card - 0.5), "end",
-                   ["end_title_band", "end_rows_band", "end_cta_band"]))
+    frames = []
+    for s in tl.slots:
+        t = (s.draw_start + s.draw_end) / 2
+        hook = "hook_band" if r.hook_progress(t) >= 1 else "hook_band_big" if r.hook_progress(t) == 0 else None
+        frames.append((t, s.iso3, bands + ([hook] if hook else [])))
+    frames.append((tl.end_start + min(2.0, tl.end_card - 0.3), "end",
+                   ["hook_band", "end_title_band", "end_rows_band", "end_cta_band"]))
     worst_c, worst_m, rows = 0.0, 0.0, []
     for t, label, names in frames:
         rgb = np.asarray(_frame(d / "video.mp4", t))
         for b in names:
+            if b not in L:
+                continue
             m = measure_band(rgb, *L[b])
             if m is None:
                 continue
@@ -179,6 +194,66 @@ def centring_check(run_id: str, tol_centre: float = 2.0, tol_margin: float = 4.0
             rows.append({"frame": label, "t": round(t, 2), "band": b.replace("_band", ""), **m})
     return {"max_centre_error_px": round(worst_c, 1), "max_margin_diff_px": round(worst_m, 1),
             "ok": worst_c <= tol_centre and worst_m <= tol_margin, "measurements": rows}
+
+
+BG = (11, 13, 18)
+
+
+def frame_stats(rgb: np.ndarray, r, t: float) -> dict:
+    """Mean luma, share of non-background pixels, the opening question's pixels inside its band at
+    time t, and coloured (line) pixels inside the chart."""
+    a = rgb.astype(int)
+    luma = 0.2126 * a[..., 0] + 0.7152 * a[..., 1] + 0.0722 * a[..., 2]
+    diff = np.abs(a - np.array(BG)).max(axis=2) > 40
+    p = r.hook_progress(t)
+    y0, y1 = r.L["hook_band_big"] if p < 0.5 else r.L["hook_band"]
+    from .render import SAFE_LEFT, SAFE_RIGHT
+    hook = diff[max(0, int(y0)):int(np.ceil(y1)), SAFE_LEFT:SAFE_RIGHT]
+    c0, c1 = int(r.L["chart_t"]), int(r.L["chart_b"])
+    sat = (a.max(axis=2) - a.min(axis=2)) > 90
+    return {"t": t, "mean_luma": round(float(luma.mean()), 2), "non_bg_pct": round(100 * float(diff.mean()), 2),
+            "hook_text_pct": round(100 * float(hook.mean()), 2), "hook_text_px": int(hook.sum()),
+            "chart_line_px": int(sat[c0:c1, SAFE_LEFT:SAFE_RIGHT].sum())}
+
+
+def audio_start(video, window: float = 0.05, floor_dbfs: float = -40.0) -> dict:
+    """RMS of the first windows of the MP4's decoded audio: the first window must already be audible."""
+    pcm = subprocess.run([shutil.which("ffmpeg"), "-v", "error", "-t", "0.5", "-i", str(video), "-map", "0:a:0",
+                          "-ac", "1", "-ar", "48000", "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    x = np.frombuffer(pcm, dtype=np.float32)
+    n = int(window * 48000)
+    rms = [20 * np.log10(float(np.sqrt(np.mean(x[i:i + n] ** 2))) + 1e-12) for i in range(0, len(x) - n + 1, n)]
+    first = next((i * window for i, v in enumerate(rms) if v > floor_dbfs), None)
+    return {"first_audible_s": first, "first_window_dbfs": round(rms[0], 1) if rms else None,
+            "ok": first is not None and first < window / 2}
+
+
+def opening_check(run_id: str, times=(0.0, 0.5, 1.0, 2.0), out_dir=None) -> dict:
+    """The first seconds, measured on the MP4: no near-black or empty frame, the opening question on
+    screen, a line in the chart, audio from t = 0, and a length inside video.min/max_seconds."""
+    from PIL import Image
+    d = run_dir(run_id)
+    r, tl = renderer_for(run_id)
+    v = get_config()["video"]
+    frames = []
+    for t in times:
+        img = _frame(d / "video.mp4", t)
+        if out_dir:
+            img.save(out_dir / f"{run_id}_t{t:.1f}.png")
+        s = frame_stats(np.asarray(img), r, t)
+        s["near_black"] = s["non_bg_pct"] < 2.0 or s["mean_luma"] < 14.0
+        s["hook_present"] = s["hook_text_pct"] >= 2.0
+        s["line_present"] = s["chart_line_px"] >= 50
+        frames.append(s)
+    dur = ffprobe(d / "video.mp4")["duration"]
+    audio = audio_start(d / "video.mp4")
+    checks = {"no_near_black_frame": not any(f["near_black"] for f in frames),
+              "hook_in_every_frame": all(f["hook_present"] for f in frames),
+              "line_in_every_frame": all(f["line_present"] for f in frames),
+              "duration_in_target": v["min_seconds"] - 0.05 <= dur <= v["max_seconds"] + 0.05,
+              "audio_starts_at_0": audio["ok"]}
+    return {"ok": all(checks.values()), "checks": checks, "frames": frames, "duration": round(dur, 3),
+            "audio": audio, "question": r.opening.get("question"), "answer": r.opening.get("answer")}
 
 
 def run_detection(x: np.ndarray, sr: int, t_from: float, t_to: float) -> dict:
@@ -280,12 +355,14 @@ def verify_run(run_id: str) -> dict:
     stems = stem_balance(run_id)
     pitch = pluck_pitch_check(run_id)
     centring = centring_check(run_id)
+    opening = opening_check(run_id)
     sheet = contact_sheet(run_id)
     v = cfg["video"]
     checks = {
         "resolution_1080x1920": probe["width"] == 1080 and probe["height"] == 1920,
         "fps_30": abs(probe["fps"] - 30) < 1e-6,
-        "duration_30_45": v["min_seconds"] - 0.05 <= probe["duration"] <= v["max_seconds"] + 0.05,
+        "duration_in_target": v["min_seconds"] - 0.05 <= probe["duration"] <= v["max_seconds"] + 0.05,
+        **{f"opening_{k}": ok for k, ok in opening["checks"].items() if k != "duration_in_target"},
         "audio_present": probe["audio_streams"] >= 1,
         "loudness_-14_pm1": loud["integrated_lufs"] is not None and abs(loud["integrated_lufs"] + 14) <= 1,
         "true_peak_le_-1": loud["true_peak_dbfs"] is not None and loud["true_peak_dbfs"] <= -1.0 + 0.05,
@@ -295,6 +372,7 @@ def verify_run(run_id: str) -> dict:
         "centred_540": centring["ok"],
     }
     res = {"run_id": run_id, "passed": all(checks.values()), "checks": checks, "ffprobe": probe,
-           "loudness": loud, "sync": sync, "stems": stems, "pitch": pitch, "centring": centring, **sheet}
+           "loudness": loud, "sync": sync, "stems": stems, "pitch": pitch, "centring": centring,
+           "opening": opening, **sheet}
     (d / "verify.json").write_text(json.dumps(res, indent=1), encoding="utf-8")
     return res

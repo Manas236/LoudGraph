@@ -147,6 +147,17 @@ def pick(scored: list[dict], series: dict, topic: dict, exclude_sets: set[str] |
         drop = min(removable, key=lambda c: by[c]["score"])
         ordered.remove(drop)
         dropped.append(drop)
+    # the video opens on the first country's line at t = 0: it must have data from x0 (the best stays last)
+    starts = {c: min(y for y, _ in _rows_in(series[c], x0, x1)) for c in ordered}
+    if starts[ordered[0]] > x0:
+        for k in range(1, len(ordered) - 1):
+            if starts[ordered[k]] <= x0:
+                trial = [ordered[k]] + ordered[:k] + ordered[k + 1:]
+                rows = {c: _rows_in(series[c], x0, x1) for c in trial}
+                tl2 = build([(c, [y for y, _ in rows[c]], [v for _, v in rows[c]]) for c in trial], x0, x1, cfg)
+                if tl2.duration <= vmax + 1e-6:   # the first slot's slow-mo steps differ slightly
+                    ordered, tl = trial, tl2
+                break
     chosen = [by[i] for i in ordered]
     key = ",".join(sorted(ordered))
     return {

@@ -105,10 +105,13 @@ def step_render(run_id: str, topic: dict) -> tuple[str, dict]:
             audio.write_wav(d / f"{name}.wav", x, ainfo["sample_rate"])
         _write(run_id, "audio.json", ainfo)
         views = render.build_views(topic, p, data, labels, tl)
+        opening = render.opening_for(topic, views, p["x_start"], p["x_end"], seed=zlib.crc32(run_id.encode()))
         info = render.render_video(topic, tl, views, d / "audio.wav", d / "video.mp4", thumb=d / "thumb.jpg",
-                                   on_progress=_progress_writer(run_id))
+                                   on_progress=_progress_writer(run_id), opening=opening)
         meta = render.build_meta(run_id, topic, data, p, labels, views, tl, ainfo)
         meta["render"] = info
+        meta["opening"] = opening              # the question the video opens with + the end card's answer
+        meta["cover_seconds"] = info["cover_seconds"]   # publish_instagram sends it as thumb_offset
         _write(run_id, "meta.json", meta)
     n_ev = sum(len(s.events) for s in tl.slots)
     msg = (f"rendered {tl.n_frames} frames ({tl.n_frames / tl.fps:.1f}s, {n_ev} slow-mo events) with "
@@ -237,6 +240,29 @@ def _run_pipeline(run_id: str, from_step: str) -> bool:
         log.info("[%s] %s: %s", run_id, AFTER[step], msg)
     # no Telegram message here: the bot sends review cards one at a time from the queue
     return True
+
+
+def make_test_video(topic_id: str | None = None, source_run: str | None = None) -> str:
+    """A TEST video in out/test-<time>/ that has NO database row: it never joins the review queue and
+    can never be approved or posted. Its data comes from source_run (data.json + scores.json) or from
+    a fetch of topic_id (the series cache is used when fresh). Returns the test run id."""
+    import shutil
+    from .topics import get_topic
+    run_id = f"test-{datetime.now():%Y%m%d-%H%M%S}"
+    d = run_dir(run_id)
+    if source_run:
+        for name in ("data.json", "scores.json"):
+            shutil.copy2(run_dir(source_run) / name, d / name)
+        topic = get_topic(_read(run_id, "data.json")["topic_id"])
+    else:
+        topic = get_topic(topic_id)
+        step_fetch(run_id, topic)
+    for step in (step_pick, step_label, step_render):
+        msg, _ = step(run_id, topic)
+        log.info("[%s] %s: %s", run_id, step.__name__, msg)
+    from . import captions
+    captions.generate_for_run(run_id)
+    return run_id
 
 
 def _on_a_card(run_id: str) -> bool:

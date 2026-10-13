@@ -84,6 +84,15 @@ def track():
     return tl, mix, stems, info
 
 
+def test_audio_starts_at_t0_with_the_first_note(track):
+    """No silent lead-in: the first data note plays at t = 0 and there is no whoosh before the first country."""
+    tl, mix, stems, info = track
+    first = min(n["t"] for n in info["notes"])
+    assert first == 0.0 == tl.slots[0].onsets[0]
+    head = mix[: int(0.05 * SR)].astype(np.float64)
+    assert 20 * np.log10(np.sqrt(np.mean(head ** 2)) + 1e-12) > -40
+
+
 def test_pitch_follows_the_data_on_the_pluck_stem(track):
     tl, mix, stems, info = track
     rep = pitch_report(stems["pluck"], SR, info["notes"])

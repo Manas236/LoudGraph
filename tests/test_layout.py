@@ -1,4 +1,5 @@
-"""Layout: one centre axis measured in PIXELS, symmetric margins, safe zones, no pill/source/brand."""
+"""Layout: one centre axis measured in PIXELS, symmetric margins, safe zones, no pill/source/brand,
+the opening question from frame 0 and the end card that answers it."""
 import copy
 
 import numpy as np
@@ -14,8 +15,10 @@ from pipeline.verify import measure_band
 
 YEARS = list(range(1990, 2024))
 T = np.arange(len(YEARS))
-CENTRED = ["header_band", "dots_band", "country_band", "chart_band", "year_band", "value_band"]
-END = ["end_title_band", "end_rows_band", "end_cta_band"]
+CENTRED = ["hook_band", "header_band", "dots_band", "country_band", "chart_band", "year_band", "value_band"]
+END = ["hook_band", "end_title_band", "end_rows_band", "end_cta_band"]
+OPENING = {"id": "ends_last", "question": "Which country ends up last?", "answer": "India ends up last: 1.0 in 2023",
+           "highlight": ["India"]}
 
 
 def test_safe_zone_constants():
@@ -74,14 +77,18 @@ def test_every_centred_element_is_on_x540_in_pixels(backend):
             assert abs(m["left"] - m["right"]) <= 4, (backend, name, b, m)
 
 
-def test_stack_is_vertically_centred_in_safe_area():
+def test_stack_sits_between_the_reels_top_bar_and_caption():
+    """Below the Reels top bar and inside the profile grid's 3:4 crop (y 240..1680) at the top, clear of
+    the caption overlay at the bottom; the chart takes the height that is left."""
     topic, tl, views = _video()
-    r = R.Renderer(topic, tl, views)
-    rgb = r.frame_array(_frames(tl)["mid"])
-    rows = np.nonzero((np.abs(rgb.astype(int) - np.array([11, 13, 18])).max(axis=2) > 16).any(axis=1))[0]
-    top, bottom = rows[0], rows[-1]
-    assert bottom < R.SAFE_BOTTOM
-    assert abs(top - (R.SAFE_BOTTOM - 1 - bottom)) <= 40, (top, bottom)
+    for t in (0.0, _frames(tl)["mid"]):
+        r = R.Renderer(topic, tl, views)
+        rgb = r.frame_array(t)
+        rows = np.nonzero((np.abs(rgb.astype(int) - np.array([11, 13, 18])).max(axis=2) > 16).any(axis=1))[0]
+        top, bottom = rows[0], rows[-1]
+        assert R.SAFE_TOP <= top and 240 <= top, (t, top)
+        assert bottom <= R.STACK_BOTTOM + 0.3 * R.VALUE_SIZE < R.SAFE_BOTTOM, (t, bottom)
+        assert R.CHART_H_MIN <= r.L["chart_h"] <= R.CHART_H_MAX
 
 
 @pytest.mark.parametrize("which", ["mid0", "end7", "endcard", "intro", "transition"])
@@ -183,11 +190,12 @@ def test_line_never_shows_through_a_tick_label(backend):
     vals = [20.0 + 0.05 * k for k in range(len(YEARS))]
     vals[1], vals[2], vals[-1] = 20.0, 18.0, 25.0          # ticks 18/20/22/24
     probe = R.CountryView(iso3="USA", name="United States", iso2="us", color=pal[0], years=YEARS, values=vals)
-    px_per_unit = (R.CHART_H) / (probe.yhi - probe.ylo)
+    chart_h = R.Renderer(topic, build([("USA", YEARS, vals)], 1990, 2023, cfg), [probe], cfg, OPENING).L["chart_h"]
+    px_per_unit = chart_h / (probe.yhi - probe.ylo)
     vals[0] = 20.0 + 18 / px_per_unit                       # first point lands INSIDE the "20.0%" label box
     views = [R.CountryView(iso3="USA", name="United States", iso2="us", color=pal[0], years=YEARS, values=vals)]
     tl = build([("USA", YEARS, vals)], 1990, 2023, cfg)
-    r = R.Renderer(topic, tl, views, cfg)
+    r = R.Renderer(topic, tl, views, cfg, OPENING)
     s = tl.slots[0]
     rgb = r.frame_array(s.end - 0.01).astype(int)
     accent = np.array(hex_rgb(pal[0]))
@@ -199,3 +207,39 @@ def test_line_never_shows_through_a_tick_label(backend):
         box = rgb[int(y0) + 1:int(y1), int(x0) + 1:int(x1)]
         line_px = (np.abs(box - accent).max(axis=2) < 40).sum()
         assert line_px == 0, (backend, txt, line_px)
+
+
+def test_the_opening_question_is_big_from_frame_0_then_becomes_the_header():
+    topic, tl, views = _video()
+    r = R.Renderer(topic, tl, views, opening=OPENING)
+    hold, shrink = tl.hook_hold, tl.hook_shrink
+    sizes = {}
+    for name, t in (("t0", 0.0), ("hold", hold - 0.05), ("after", hold + shrink + 0.05), ("mid", _frames(tl)["mid"]),
+                    ("end", _frames(tl)["end"])):
+        r = R.Renderer(topic, tl, views, opening=OPENING)        # fresh: every layer records its text boxes
+        rgb = r.frame_array(t)
+        hook = [b for b in r.cv.text_boxes if b[5] == "hook"]
+        assert hook and " ".join(b[0] for b in hook) == OPENING["question"], name
+        sizes[name] = max(b[4] - b[2] for b in hook)                    # ink height of the tallest line
+        metric = [b for b in r.cv.text_boxes if b[5] == "header"]
+        assert " ".join(b[0] for b in metric) == topic["subtitle"] and r.header_size >= 44 or len(metric) == 2
+        if name == "t0":   # no empty opening: axes, the first country and its line head are on frame 0
+            assert any(b[5] == "country" for b in r.cv.text_boxes) and any(b[5] == "xlabel" for b in r.cv.text_boxes)
+            nonbg = (np.abs(rgb.astype(int) - np.array([11, 13, 18])).max(axis=2) > 40).mean()
+            assert nonbg > 0.02, nonbg
+    assert sizes["t0"] == sizes["hold"] > sizes["after"] * 1.4
+    assert sizes["after"] == sizes["mid"] == sizes["end"]
+    assert r.hook_big >= 72 and r.hook_small >= 38
+
+
+def test_the_end_card_reveals_the_answer_and_ranks_where_countries_end():
+    topic, tl, views = _video(names=("GBR", "SAU", "ZAF", "IND"))
+    r = R.Renderer(topic, tl, views)                                # opening computed from these views' facts
+    assert r.opening["question"] and r.opening["answer"]
+    r.frame_array(tl.end_start + 2.0)
+    answer = " ".join(b[0] for b in r.cv.text_boxes if b[5] == "end_answer")
+    assert answer == r.opening["answer"]
+    names = [b[0] for b in sorted((b for b in r.cv.text_boxes if b[5] == "end_name"), key=lambda b: b[2])]
+    finals = {v.name: v.values[-1] for v in views}
+    assert names == sorted(finals, key=lambda n: -finals[n])        # highest final value first
+    assert any(n in r.opening["answer"] for n in names)
