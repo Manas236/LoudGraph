@@ -4,6 +4,7 @@ URL or webhook is needed. Only the chat TELEGRAM_CHAT_ID is listened to; every o
 Review cards come ONE at a time (pipeline/review.py holds the queue and the card wording):
   * a card is the video with a short caption (title, metric, countries, length) and Approve /
     Reject / Later buttons; Later moves the video to the back of the queue;
+  * the card also lists the post caption options (captions.py) with Caption 1-3 buttons to choose one;
   * after Approve the same message edits itself through the posting stages until Done;
   * the next card goes out only after a decision and, when approved, once posting is final;
   * a video sent from the dashboard ("Send to Telegram") becomes the card now: an undecided card
@@ -46,7 +47,8 @@ HELP = ("🤖 {brand} bot\n"
         "/resume — send them again\n"
         "/help — this message\n\n"
         "Review cards come one at a time. ✅ Approve posts the video, ❌ Reject drops it, ⏭ Later moves it to the "
-        "back of the queue. The next card comes after you decide and, if you approved, once posting has finished.")
+        "back of the queue. Caption 1-3 picks the post caption shown on the card. The next card comes after you "
+        "decide and, if you approved, once posting has finished.")
 
 
 class TelegramError(RuntimeError):
@@ -237,6 +239,11 @@ class Bot:
             if not card or card["message_id"] != mid or card["state"] != "done" or latest["id"] != card_id:
                 return STALE
             answer = review.retry(card, parts[2])
+        elif parts[0] == "v" and len(parts) == 3 and parts[2].isdigit():   # a caption option on the open card
+            card = review.current_card()
+            if not card or card["id"] != card_id or card["message_id"] != mid:
+                return STALE
+            answer = review.choose_caption(card, int(parts[2]))
         else:
             action = {"a": "approve", "r": "reject", "l": "later"}.get(parts[0])
             card = review.current_card()
@@ -362,6 +369,8 @@ class Bot:
         run = wanted or review.next_for_review()
         if not run:
             return
+        from .captions import ensure
+        ensure(run["id"])   # a video made before captions existed gets plain-fill options (no network)
         cid = review.create_card(run["id"])
         if cid is None:
             return

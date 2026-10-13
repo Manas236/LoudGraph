@@ -101,7 +101,19 @@ def video(run, topics=None, accounts=None, stats=None):
                                                  if c in names and isinstance(value, dict) and value.get("label")],
             "platforms": platforms, "connected": any(p["connected"] for p in platforms if p["enabled"]),
             "has_video": (path("out") / run["id"] / "video.mp4").exists(), "age": ago(run["created_at"]),
-            "replaced": bool(run.get("replaced")), "stage": run["stage"]}
+            "replaced": bool(run.get("replaced")), "stage": run["stage"], "caption": caption(run)}
+
+
+def caption(run):
+    """The chosen post caption option (captions.json), read-only; it is chosen on the Telegram card."""
+    c = read_json(run, "captions.json")
+    if not c.get("variants"):
+        return None
+    from pipeline.captions import settings
+    n = len(c["variants"])
+    chosen = min(c.get("chosen", 0), n - 1)
+    return {"lines": c["variants"][chosen]["caption"].splitlines(), "hashtags": " ".join(c.get("hashtags") or []),
+            "chosen": chosen + 1, "n": n, "preview_only": not settings()["use_for_posting"]}
 
 
 def attention():

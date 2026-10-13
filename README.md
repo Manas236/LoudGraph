@@ -47,6 +47,7 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py verify [--run ID ...]` | ffprobe, loudness, A/V sync, stem balance, pitch-vs-data, pixel centring, contact sheet |
 | `python run.py crash-test` | `out/crash_test.mp4`: a synthetic flat-crash-recover series, to hear the event treatment |
 | `python run.py compare --old ID --new ID` | old vs new frame (`compare.png`) and spectrogram (`compare_spectrogram.png`) |
+| `python run.py captions --run ID [ID ...] [--no-llm] [--trending]` | (re)make a run's post caption options and hashtags (`captions.json`) and print them |
 | `python -m pipeline.publish_youtube --auth` | one-time YouTube OAuth (opens a browser) |
 
 ## How a video is made
@@ -62,7 +63,7 @@ queued -> data_ready -> picked -> labelled -> rendered -> awaiting_approval -> a
 | pick | `pipeline/picker.py` | `pick.json` |
 | label | `pipeline/labels.py` (Gemini, optional) | `labels.json` |
 | render | `timeline.py`, `audio.py`, `render.py` | `timeline.json`, `audio.wav`, `pluck.wav`, `pad.wav`, `fx.wav`, `video.mp4`, `meta.json`, `thumb.jpg` |
-| notify | `review.py` | (joins the review queue; the bot sends one card at a time) |
+| notify | `captions.py`, `review.py` | `captions.json` (post caption options); joins the review queue, the bot sends one card at a time |
 | publish | `publish_youtube.py`, `publish_instagram.py` | `publish_<platform>.json` in dry-run |
 
 All state lives in SQLite (`pipeline.db`, WAL): `runs` (incl. live render `progress` and the review
@@ -116,6 +117,25 @@ live after all, and records it instead of posting a second copy.
 
 Message edits are limited to one every 3 seconds per message, and the bot waits whenever Telegram
 asks it to slow down (HTTP 429).
+
+**Post captions.** A review card also lists 3 caption options for the post and a **Caption 1 / 2 / 3**
+row to choose one (the dashboard's Review page shows the chosen one). Each option is three lines: a
+hook, one plain sentence naming the metric, the countries and the years, and a question that invites
+comments. The data credit and 5 hashtags follow.
+- **Where the facts come from:** `pipeline/captions.py` computes them from the data (the most
+  surprising country, the biggest rise and fall, a crossover, a sharp one-year move, a peak, the record
+  high and low). Only those facts may put a number in a caption.
+- **What Gemini does:** it only picks hook templates from `caption_formats.json` and fills them. Each
+  option is checked in code, asked for again up to twice, then filled from its template without Gemini.
+- **Where the tags come from:** `hashtags.json` (the broad, niche, topic and country pools, and the
+  banned list).
+- **Settings:** `captions` in `config.yaml`.
+- **Posting:** while `captions.use_for_posting` is `false` the options are a preview and posts keep the
+  old caption. Set it to `true` to post the chosen option. A title edited in the dashboard then no
+  longer changes the post text.
+- **Trending tags:** `captions.trending.enabled` re-ranks the topic hashtags by recent top posts from
+  the Instagram hashtag search. Meta allows 30 unique hashtag searches per 7 days. It is off by
+  default.
 
 ### Dashboard
 

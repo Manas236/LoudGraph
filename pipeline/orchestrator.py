@@ -129,7 +129,20 @@ def _progress_writer(run_id: str):
 
 
 def step_notify(run_id: str, topic: dict) -> tuple[str, dict]:
-    return "ready for review (dashboard" + (" + Telegram queue)" if _telegram_on() else " only; Telegram not configured)"), {}
+    return "ready for review (dashboard" + (" + Telegram queue)" if _telegram_on() else " only; Telegram not configured)") \
+        + _make_captions(run_id), {}
+
+
+def _make_captions(run_id: str) -> str:
+    """Caption options for the review card (captions.json). A failure here never holds a video back."""
+    try:
+        from . import captions
+        if not captions.enabled():
+            return ""
+        return "; " + captions.summary(captions.generate_for_run(run_id))
+    except Exception as e:  # noqa: BLE001
+        log.warning("[%s] captions failed: %s", run_id, e)
+        return f"; caption options failed ({type(e).__name__}: {e})"[:300]
 
 
 def _telegram_on() -> bool:
@@ -310,6 +323,8 @@ def _publish_run(run_id: str, platform: str | None) -> bool:
     except (OSError, ValueError) as error:
         db.fail(run_id, "publish", f"Could not read the video's metadata: {error}")
         return False
+    from . import captions
+    meta = captions.apply_to_meta(run_id, meta)   # unchanged unless captions.use_for_posting is on
     video = d / "video.mp4"
     platforms = []
     from . import posted, publish_instagram, publish_youtube

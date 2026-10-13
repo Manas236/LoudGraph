@@ -152,6 +152,26 @@ gemini:
   max_retries: 5
   timeout: 40
 
+captions:                       # pipeline/captions.py; hooks in caption_formats.json, tags in hashtags.json
+  enabled: true                 # make caption options when a video reaches review
+  variants: 3                   # options per video, each from a different hook template
+  hook_max_chars: 90            # line 1
+  question_max_chars: 80        # line 3
+  max_emoji: 1                  # in the hook and question together
+  llm: true                     # Gemini picks + fills the templates; false = plain template fills only
+  llm_retries: 2                # a Gemini option that fails the checks is asked for again this often, then filled plainly
+  use_for_posting: true         # true = the option chosen on the review card is what Instagram/Facebook get;
+                                # false = the card only previews it and posts keep the old caption from meta.json
+  hashtags:
+    count: 5                    # total per video
+    broad: 1
+    niche: 2                    # the rest is split between topic tags and a country tag
+  trending:                     # Instagram hashtag search re-ranks the topic tags by recent top posts
+    enabled: false
+    weekly_search_budget: 20    # Meta allows 30 unique hashtag searches per account per 7 days
+    cache_days: 7
+    recent_days: 30
+
 telegram:
   poll_timeout: 10              # long-poll seconds while idle (a dashboard decision shows on the card within this)
   busy_poll_timeout: 2          # while a card is posting or a /new video is rendering

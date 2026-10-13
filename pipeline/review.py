@@ -411,17 +411,66 @@ def card_base(run: dict) -> str:
     return "\n".join(lines)
 
 
+def _captions(run_id: str) -> dict | None:
+    from . import captions
+    try:
+        return captions.load(run_id)
+    except Exception:  # noqa: BLE001 - a card without caption options is still a card
+        return None
+
+
+def caption_block(c: dict | None, choosing: bool) -> str:
+    """The post caption options (captions.json): all of them while the card is open, then the chosen one."""
+    if not c:
+        return ""
+    from .captions import settings
+    chosen = c.get("chosen", 0)
+    if choosing:
+        lines = [f"✍️ Post caption: tap 1-{len(c['variants'])} below to choose"]
+        for i, v in enumerate(c["variants"]):
+            lines += [f"{'✅' if i == chosen else '▫️'} {i + 1}. {v['hook']}", f"      {v['question']}"]
+    else:
+        v = c["variants"][min(chosen, len(c["variants"]) - 1)]
+        lines = [f"✍️ Post caption {chosen + 1}:", v["hook"], v["question"]]
+    lines.append(f"📝 {c['metric_line']}")
+    if c.get("hashtags"):
+        lines.append(" ".join(c["hashtags"]))
+    if not settings()["use_for_posting"]:
+        lines.append("ℹ️ Preview only: posts keep the old caption until captions.use_for_posting is on")
+    return "\n".join(lines)
+
+
+def choose_caption(card: dict, index: int) -> str:
+    """A caption option chosen on the open card."""
+    from . import captions
+    if card["state"] != "open":
+        return STALE
+    try:
+        captions.choose(card["run_id"], index)
+    except ValueError as e:
+        return str(e)[:190]
+    return f"Caption {index + 1} chosen."
+
+
 def card_view(card: dict) -> tuple[str, dict]:
     """(caption, reply_markup) the card's Telegram message should show now."""
     run = db.get_run(card["run_id"])
     base = card_base(run) if run else "🎬 This video was removed"
+    choosing = card["state"] in ("sending", "open")
+    caps = _captions(card["run_id"]) if run else None
+    if caps:
+        base += "\n\n" + caption_block(caps, choosing)
     tail, rows = [], []
     via = " in the dashboard" if card.get("decided_via") == "dashboard" else ""
     cid = card["id"]
-    if card["state"] in ("sending", "open"):
+    if choosing:
         rows = [[{"text": "✅ Approve", "callback_data": f"c:a:{cid}"},
                  {"text": "❌ Reject", "callback_data": f"c:r:{cid}"},
                  {"text": "⏭ Later", "callback_data": f"c:l:{cid}"}]]
+        if caps and len(caps["variants"]) > 1:
+            chosen = caps.get("chosen", 0)
+            rows.append([{"text": f"{'✅ ' if i == chosen else ''}Caption {i + 1}", "callback_data": f"c:v:{cid}:{i}"}
+                         for i in range(len(caps["variants"]))])
     elif card["outcome"] == "approved":
         tail.append(f"✅ Approved{via}")
         if not card["platforms"]:

@@ -12,6 +12,7 @@
     python run.py verify [--run RUN_ID ...]
     python run.py crash-test
     python run.py compare --old RUN_ID --new RUN_ID
+    python run.py captions --run RUN_ID [RUN_ID ...] [--no-llm] [--trending]
     python run.py go-live [--check-only]
 """
 from __future__ import annotations
@@ -114,6 +115,14 @@ def cmd_compare(a):
     return 0
 
 
+def cmd_captions(a):
+    from pipeline import captions
+    for rid in a.run:
+        c = captions.generate_for_run(rid, llm=False if a.no_llm else None, trending=True if a.trending else None)
+        print(f"=== {rid}\n{captions.preview_text(c)}\n")
+    return 0
+
+
 def cmd_go_live(a):
     from pipeline import golive
     report = golive.run(apply=not a.check_only)
@@ -157,6 +166,11 @@ def main(argv=None):
     s.add_argument("--old", required=True)
     s.add_argument("--new", required=True)
     s.set_defaults(fn=cmd_compare)
+    s = sub.add_parser("captions", help="(re)make the caption options and hashtags of runs (out/<run>/captions.json)")
+    s.add_argument("--run", nargs="+", required=True)
+    s.add_argument("--no-llm", action="store_true", help="plain template fills only, no Gemini")
+    s.add_argument("--trending", action="store_true", help="re-rank topic hashtags with the Instagram hashtag search")
+    s.set_defaults(fn=cmd_captions)
     s = sub.add_parser("go-live", help="check Instagram + Facebook (read-only), then leave test mode for those that pass")
     s.add_argument("--check-only", action="store_true", help="only run the checks; change nothing")
     s.set_defaults(fn=cmd_go_live)
