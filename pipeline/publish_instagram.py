@@ -1,7 +1,8 @@
 """Instagram Reels (+ optional Facebook Page Reels) publishing (section 11).
 
 Verified against the Meta docs on 2026-10-07 (examples use v25.0):
-  IG:  POST /{ig-user-id}/media  media_type=REELS, upload_type=resumable, caption, share_to_feed
+  IG:  POST /{ig-user-id}/media  media_type=REELS, upload_type=resumable, caption, share_to_feed,
+            thumb_offset (ms of the cover frame; default 0 = first frame)
        POST https://rupload.facebook.com/ig-api-upload/{ver}/{container-id}
             headers: Authorization: OAuth <token>, offset: 0, file_size: <bytes>; body = file bytes
        GET  /{container-id}?fields=status_code   -> FINISHED | IN_PROGRESS | ERROR | EXPIRED | PUBLISHED
@@ -14,6 +15,7 @@ Verified against the Meta docs on 2026-10-07 (examples use v25.0):
        Page Reels need a PAGE access token with pages_show_list, pages_read_engagement and
        pages_manage_posts (Meta "Reels Publishing API" docs, checked 2026-10-09).
 With Facebook Login both use a Page access token (IG_ACCESS_TOKEN).
+Every request is sent through meta_api, which keeps them at least meta_api.min_gap_seconds apart.
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ from pathlib import Path
 
 import requests
 
-from . import db
+from . import db, meta_api
 from .config import get_config, run_dir, secret
 
 log = logging.getLogger(__name__)
@@ -60,7 +62,7 @@ def _check_json(r: requests.Response, what: str) -> dict:
 
 def token_info(tok: str) -> dict:
     """GET /debug_token for the token itself: is_valid, expires_at (0 = never), scopes."""
-    r = requests.get(f"{base()}/debug_token", params={"input_token": tok, "access_token": tok}, timeout=30)
+    r = meta_api.get(f"{base()}/debug_token", params={"input_token": tok, "access_token": tok}, timeout=30)
     return _check_json(r, "debug_token").get("data", {})
 
 
@@ -78,7 +80,7 @@ def check() -> dict:
         why = (info.get("error") or {}).get("message", "debug_token is_valid=false")
         return {"level": "FAIL", "state": "expired", "detail": f"IG_ACCESS_TOKEN no longer valid: {why}"[:300]}
     try:
-        d = _check_json(requests.get(f"{base()}/{ig}", params={"fields": "id,username", "access_token": tok},
+        d = _check_json(meta_api.get(f"{base()}/{ig}", params={"fields": "id,username", "access_token": tok},
                                      timeout=30), "IG user lookup")
     except Exception as e:  # noqa: BLE001
         state = "expired" if "'code': 190" in str(e) else "error"   # 190 = invalid / expired OAuth token
@@ -101,7 +103,7 @@ def check() -> dict:
     else:
         parts.append(f"permissions not checked ({info.get('_error', 'debug_token returned no scopes')})")
     try:
-        lim = requests.get(f"{base()}/{ig}/content_publishing_limit", params={"access_token": tok}, timeout=30)
+        lim = meta_api.get(f"{base()}/{ig}/content_publishing_limit", params={"access_token": tok}, timeout=30)
         if lim.status_code == 200:
             parts.append(f"publishing limit {lim.json().get('data')}")
     except requests.RequestException:
@@ -125,7 +127,7 @@ def check_facebook(force: bool = False) -> dict:
         why = (info.get("error") or {}).get("message", "debug_token is_valid=false")
         return {"level": "FAIL", "state": "expired", "detail": f"IG_ACCESS_TOKEN no longer valid: {why}"[:400]}
     try:
-        d = _check_json(requests.get(f"{base('facebook')}/{page}", params={"fields": "id,name", "access_token": tok},
+        d = _check_json(meta_api.get(f"{base('facebook')}/{page}", params={"fields": "id,name", "access_token": tok},
                                      timeout=30), "FB page lookup")
     except Exception as e:  # noqa: BLE001
         state = "expired" if "'code': 190" in str(e) else "error"
@@ -145,10 +147,23 @@ def check_facebook(force: bool = False) -> dict:
             "detail": detail + f", Page token with {', '.join(SCOPES_FB)} (dry_run={get_config()['dry_run']['facebook']})"}
 
 
+def _cover_ms(run_id: str) -> int | None:
+    """Cover frame: the first country's finished chart (the hold after its line is drawn). Instagram's
+    default is frame 0, the intro: title only on the dark background, and the grid crop cuts the title."""
+    try:
+        slot = json.loads((run_dir(run_id) / "timeline.json").read_text(encoding="utf-8"))["slots"][0]
+        return round((slot["draw_end"] + slot["end"]) / 2 * 1000)
+    except (OSError, ValueError, KeyError, IndexError):
+        return None
+
+
 def _plan(run_id: str, meta: dict, video: Path) -> tuple[dict, str | None]:
     ic = _ic()
     params = {"media_type": "REELS", "caption": meta["description_instagram"][:2200],
               "share_to_feed": "true" if ic["share_to_feed"] else "false"}
+    cover = _cover_ms(run_id)
+    if cover is not None:
+        params["thumb_offset"] = cover
     blocked = None
     if ic["upload_mode"] == "resumable":
         params["upload_type"] = "resumable"
@@ -189,14 +204,14 @@ def publish(run_id: str, meta: dict, video: Path) -> str:
         db.upsert_post(run_id, "instagram", "failed", message="BLOCKED: IG_USER_ID / IG_ACCESS_TOKEN missing")
         return "failed"
     db.upsert_post(run_id, "instagram", "uploading", message="creating the REELS container")
-    d = _check_json(requests.post(f"{base()}/{ig}/media", data={**params, "access_token": tok}, timeout=60),
+    d = _check_json(meta_api.post(f"{base()}/{ig}/media", data={**params, "access_token": tok}, timeout=60),
                     "create REELS container")
     cid = d["id"]
     db.upsert_post(run_id, "instagram", "uploading", remote_id=cid, message="container created, uploading")
     if params.get("upload_type") == "resumable":
         size = video.stat().st_size
         with open(video, "rb") as f:
-            r = requests.post(f"https://rupload.facebook.com/ig-api-upload/{ic['api_version']}/{cid}",
+            r = meta_api.post(f"https://rupload.facebook.com/ig-api-upload/{ic['api_version']}/{cid}",
                               headers={"Authorization": f"OAuth {tok}", "offset": "0", "file_size": str(size)},
                               data=f, timeout=600)
         up = _check_json(r, "rupload")
@@ -206,7 +221,7 @@ def publish(run_id: str, meta: dict, video: Path) -> str:
     deadline = time.time() + ic["poll_max_minutes"] * 60
     status = None
     while time.time() < deadline:
-        s = _check_json(requests.get(f"{base()}/{cid}", params={"fields": "status_code,status", "access_token": tok},
+        s = _check_json(meta_api.get(f"{base()}/{cid}", params={"fields": "status_code,status", "access_token": tok},
                                      timeout=30), "container status")
         status = s.get("status_code")
         if status == "FINISHED":
@@ -218,12 +233,12 @@ def publish(run_id: str, meta: dict, video: Path) -> str:
     if status != "FINISHED":
         db.upsert_post(run_id, "instagram", "failed", remote_id=cid, message=f"container not FINISHED in time ({status})")
         return "failed"
-    pub = _check_json(requests.post(f"{base()}/{ig}/media_publish", data={"creation_id": cid, "access_token": tok},
+    pub = _check_json(meta_api.post(f"{base()}/{ig}/media_publish", data={"creation_id": cid, "access_token": tok},
                                     timeout=60), "media_publish")
     mid = pub["id"]
     link = None
     try:
-        link = requests.get(f"{base()}/{mid}", params={"fields": "permalink", "access_token": tok},
+        link = meta_api.get(f"{base()}/{mid}", params={"fields": "permalink", "access_token": tok},
                             timeout=30).json().get("permalink")
     except Exception:  # noqa: BLE001 - the post is live either way
         pass
@@ -257,17 +272,17 @@ def publish_facebook(run_id: str, meta: dict, video: Path) -> str:
         db.upsert_post(run_id, "facebook", "failed", message="BLOCKED: FB_PAGE_ID / page token missing")
         return "failed"
     db.upsert_post(run_id, "facebook", "uploading", message="starting the Reels upload")
-    start = _check_json(requests.post(f"{base('facebook')}/{page}/video_reels",
+    start = _check_json(meta_api.post(f"{base('facebook')}/{page}/video_reels",
                                       data={"upload_phase": "start", "access_token": tok}, timeout=60), "FB reels start")
     vid = start["video_id"]
     db.upsert_post(run_id, "facebook", "uploading", remote_id=vid, message="upload session started, uploading")
     with open(video, "rb") as f:
-        up = _check_json(requests.post(f"https://rupload.facebook.com/video-upload/{fc['api_version']}/{vid}",
+        up = _check_json(meta_api.post(f"https://rupload.facebook.com/video-upload/{fc['api_version']}/{vid}",
                                        headers={"Authorization": f"OAuth {tok}", "offset": "0",
                                                 "file_size": str(video.stat().st_size)}, data=f, timeout=600), "FB rupload")
     if not up.get("success", True):
         raise RuntimeError(f"FB rupload: {up}")
-    fin = _check_json(requests.post(f"{base('facebook')}/{page}/video_reels",
+    fin = _check_json(meta_api.post(f"{base('facebook')}/{page}/video_reels",
                                     data={"upload_phase": "finish", "video_id": vid, "video_state": "PUBLISHED",
                                           "description": desc, "access_token": tok}, timeout=60), "FB reels finish")
     if not fin.get("success", True):
@@ -277,7 +292,7 @@ def publish_facebook(run_id: str, meta: dict, video: Path) -> str:
     deadline = time.time() + fc.get("poll_max_minutes", 5) * 60
     link, note = None, "published (Facebook was still processing)"
     while time.time() < deadline:
-        s = _check_json(requests.get(f"{base('facebook')}/{vid}", params={"fields": "status,permalink_url",
+        s = _check_json(meta_api.get(f"{base('facebook')}/{vid}", params={"fields": "status,permalink_url",
                                                                          "access_token": tok}, timeout=30), "FB reel status")
         st = s.get("status") or {}
         link = s.get("permalink_url") or link

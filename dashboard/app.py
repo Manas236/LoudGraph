@@ -78,8 +78,11 @@ def review_context():
     videos = [vm.video(r) for r in waiting]
     selected = request.args.get("selected", type=int)
     current = next((v for v in videos if v["ref"] == selected), videos[0] if videos else None)
+    run = next((r for r in waiting if current and r["ref"] == current["ref"]), None)
+    telegram = {"on": account_states()["telegram"]["configured"],
+                "state": review_queue.telegram_state(run["id"]) if run else None}
     return {"videos": videos, "video": current, "position": videos.index(current) + 1 if current else 0,
-            "next_video": vm.next_video()}
+            "next_video": vm.next_video(), "telegram": telegram}
 
 
 @app.get("/ping")
@@ -185,7 +188,7 @@ def result(fn, back="review"):
 def video_action(ref, operation):
     run = get_run(ref)
     rid = run["id"]
-    if operation not in {"approve", "reject", "remake", "title", "retry", "publish"}:
+    if operation not in {"approve", "telegram", "reject", "remake", "title", "retry", "publish"}:
         abort(404)
 
     def act():
@@ -194,6 +197,8 @@ def video_action(ref, operation):
             actions.approve(rid, "dashboard", platforms=chosen)
             ready = ready_destinations(db.get_run(rid))
             return "Approved — posting to " + ", ".join(PLATFORMS[p] for p in ready) if ready else "Approved — waiting in Library until accounts are connected"
+        if operation == "telegram":
+            return actions.send_to_telegram(rid, "dashboard")
         if operation == "reject":
             actions.reject(rid, "dashboard")
             return "Rejected — moved to Library"

@@ -20,3 +20,9 @@ __pycache__/
 
 # local safety copies (contain secrets)
 backups/
+
+# backups made before every edit (<file>.bak-YYYYMMDD-HHMM)
+*.bak-*
+
+# raw Graph API responses from the diagnosis (account and Page ids)
+diagnosis_frames/graph_api_pull.json

@@ -12,9 +12,8 @@ import math
 from datetime import datetime, timezone
 
 import numpy as np
-import requests
 
-from . import db
+from . import db, meta_api
 from .config import get_config, secret
 
 log = logging.getLogger(__name__)
@@ -72,7 +71,7 @@ def fetch_instagram() -> int:
     from .publish_instagram import base
     n = 0
     for p in posts:
-        r = requests.get(f"{base()}/{p['remote_id']}/insights", params={"metric": IG_METRICS, "access_token": tok},
+        r = meta_api.get(f"{base()}/{p['remote_id']}/insights", params={"metric": IG_METRICS, "access_token": tok},
                          timeout=30)
         d = r.json()
         if r.status_code != 200 or "error" in d:

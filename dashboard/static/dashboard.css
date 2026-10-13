@@ -309,6 +309,8 @@ main {
   font-size:17px;
   font-weight:650;
   padding:13px 20px}
+.review-buttons .wide {
+  grid-column:1/-1}
 .primary:hover {
   background:#52d283!important}
 kbd {

@@ -13,6 +13,10 @@ import yaml
     ("media processing failed", "could not process", "posting"),
     ("missing permissions", "missing permission", "accounts"),
     ("ffmpeg exited 1", "video maker stopped", "advanced"),
+    ("HTTP 400 {'message': 'Cannot call API for app 1 on behalf of user 2', 'type': 'OAuthException', 'code': 200}",
+     "Meta is refusing requests", "accounts"),
+    ("the upload stopped unexpectedly (it had got as far as: file uploaded, Instagram is processing)",
+     "upload stopped before it finished", "posting"),
     ("mysterious thing", "Something went wrong while making the video", "advanced"),
 ])
 def test_error_mapping(raw, expected, section):

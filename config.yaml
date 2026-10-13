@@ -191,6 +191,9 @@ facebook:
   graph_base: "https://graph.facebook.com"
   api_version: "v25.0"           # verified in Meta docs 2026-10-07
 
+meta_api:                       # every request to Meta (Instagram + Facebook), from every process
+  min_gap_seconds: 3            # a request waits until the one before it is at least this old; 0 = no limit
+
 analytics:
   min_age_hours: 72
   shrink_n: 3

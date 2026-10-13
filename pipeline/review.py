@@ -8,6 +8,8 @@ stage takes longer than STAGE_TIMEOUT_S); only then is the slot freed and the ne
 
 Decisions go through the run's state machine (actions.approve / reject), so the dashboard and
 Telegram act on the same queue, and a second approval of the same run is refused: it posts once.
+The dashboard can also send one chosen video to Telegram (send_to_telegram): it becomes the card
+now, and an undecided card for another video gives way to it.
 
 /new production requests are make_jobs; one runs at a time and the rest wait their turn.
 This module holds the state and the card wording; approve_telegram.py does the Telegram calls.
@@ -437,6 +439,8 @@ def card_view(card: dict) -> tuple[str, dict]:
         tail.append("⏭ Later — moved to the back of the queue")
     elif card["outcome"] == "gone":
         tail.append("↩️ Taken back in the dashboard — no longer waiting for review")
+    elif card["outcome"] == "swapped":
+        tail.append("↩️ Swapped for another video from the dashboard — this one is still in the queue")
     return fit(base, tail), {"inline_keyboard": rows}
 
 
@@ -522,6 +526,66 @@ def bring_to_front(run_id: str, by: str) -> str:
     move_to_front(run_id)
     db.log(run_id, "awaiting_approval", f"moved to the front of the review queue via {by}")
     return "Next in the review queue."
+
+
+# ------------------------------------------------------------------ Send to Telegram (dashboard)
+
+K_REQUESTED = "review:requested"   # the run the dashboard sent to Telegram, until its card is out
+
+
+def requested_run() -> dict | None:
+    """The video the dashboard sent to Telegram, while it still waits for review and for its card."""
+    run_id = db.kv_get(K_REQUESTED)
+    run = db.get_run(run_id) if run_id else None
+    if run and run["stage"] == "awaiting_approval":
+        return run
+    if run_id:
+        clear_request(run_id)   # decided, remade or removed in the meantime
+    return None
+
+
+def clear_request(run_id: str) -> None:
+    with db.db() as c:
+        c.execute("UPDATE kv SET value='', updated_at=? WHERE key=? AND value=?", (db.now(), K_REQUESTED, run_id))
+
+
+def send_to_telegram(run_id: str, by: str) -> str:
+    """Ask the bot to put this video on the review card now: it moves to the front of the queue and
+    is sent even while cards are paused. An undecided card for another video gives way to it
+    (give_way); a card that is posting finishes first. Nothing is approved or posted by this."""
+    run = db.get_run(run_id)
+    if not run or run["stage"] != "awaiting_approval":
+        raise ValueError("Only a video waiting for review can be sent to Telegram.")
+    card = current_card()
+    if card and card["run_id"] == run_id:
+        return "This video is already on Telegram."
+    move_to_front(run_id)
+    db.kv_set(K_REQUESTED, run_id)
+    db.log(run_id, "awaiting_approval", f"sent to Telegram for approval via {by}")
+    if card and card["state"] == "posting":
+        return "Sent to Telegram — the card arrives when the video posting there now has finished."
+    if card:
+        return "Sent to Telegram — it takes the place of the card that is open there now."
+    return "Sent to Telegram — approve it there."
+
+
+def give_way(card: dict) -> dict:
+    """An undecided card steps aside for the video the dashboard sent to Telegram. Its own video
+    keeps its place in the queue and comes back on a later card."""
+    wanted = requested_run()
+    if card["state"] != "open" or not wanted or wanted["id"] == card["run_id"]:
+        return card
+    close_card(card["id"], "open", "closed", "swapped", decided_via="dashboard")
+    return get_card(card["id"])
+
+
+def telegram_state(run_id: str) -> str | None:
+    """Where a waiting video stands on Telegram, for the dashboard: "card" (its review card is out),
+    "next" (sent from the dashboard, the card is on its way) or None."""
+    card = current_card()
+    if card and card["run_id"] == run_id:
+        return "card"
+    return "next" if db.kv_get(K_REQUESTED) == run_id else None
 
 
 # ------------------------------------------------------------------ /new: topics and make jobs

@@ -23,11 +23,13 @@ def no_real_secrets(monkeypatch):
 def pinned_config(monkeypatch):
     """Tests never depend on the owner's live switches: every get_config() returns a copy of
     config.yaml with platforms and test mode pinned (YouTube + Instagram on, Facebook off, all in
-    test mode). A test that needs live posting changes this dict."""
+    test mode). A test that needs live posting changes this dict. The Meta request limit is off, so
+    a faked Graph call neither waits nor touches the database; its own tests turn it on."""
     from pipeline import config
     cfg = copy.deepcopy(_OWNER_CONFIG)
     cfg["youtube"]["enabled"], cfg["instagram"]["enabled"], cfg["facebook"]["enabled"] = True, True, False
     cfg["dry_run"] = {"youtube": True, "instagram": True, "facebook": True}
+    cfg["meta_api"] = {"min_gap_seconds": 0}
     monkeypatch.setattr(config, "_read_config", lambda filename, modified: cfg)
     return cfg
 

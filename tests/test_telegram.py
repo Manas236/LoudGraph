@@ -484,6 +484,71 @@ def test_ready_lists_unposted_videos_and_moves_one_to_the_front(env):
     assert [r["id"] for r in review.queue()][:2] == [third, first]
 
 
+# ------------------------------------------------------------------ Send to Telegram (dashboard)
+
+def test_dashboard_sends_a_chosen_video_to_telegram(env):
+    from pipeline import actions, health, review
+    db, bot, fake, clock = env["db"], env["bot"], env["fake"], env["clock"]
+    first, second, third = waiting(db, "inflation"), waiting(db, "gdp_growth"), waiting(db, "unemployment")
+    bot.tick()
+    old = review.current_card()                                # first is on the open card
+    assert "the bot is stopped" in actions.send_to_telegram(third, "dashboard")   # no heartbeat: said plainly
+    health.beat("bot")
+    assert actions.send_to_telegram(third, "dashboard") == \
+        "Sent to Telegram — it takes the place of the card that is open there now."
+    assert review.telegram_state(third) == "next" and env["spawned"] == []   # nothing is approved or posted
+    clock.t += 5
+    bot.tick()
+    card = review.current_card()
+    assert card["run_id"] == third and len(fake.of("sendVideo")) == 2 and review.telegram_state(third) == "card"
+    assert review.get_card(old["id"])["outcome"] == "swapped" and db.get_run(first)["stage"] == "awaiting_approval"
+    edit = [e for e in fake.of("editMessageCaption") if e["message_id"] == old["message_id"]][-1]
+    assert edit["caption"].endswith("this one is still in the queue") and edit["reply_markup"] == {"inline_keyboard": []}
+    assert press(env, card_button(old, "a"), old["message_id"]) == "This card is stale"
+    assert actions.send_to_telegram(third, "dashboard") == "This video is already on Telegram."
+    assert press(env, card_button(card, "l"), card["message_id"]) == "Moved to the back of the queue."
+    assert review.current_card()["run_id"] == first            # sent once: Later does not bring it straight back
+
+
+def test_a_video_sent_from_the_dashboard_waits_for_posting_and_ignores_pause(env):
+    from pipeline import actions, health, review
+    db, bot, fake, clock = env["db"], env["bot"], env["fake"], env["clock"]
+    health.beat("bot")
+    first, second, third = waiting(db, "inflation"), waiting(db, "gdp_growth"), waiting(db, "unemployment")
+    bot.tick()
+    card = review.current_card()
+    press(env, card_button(card, "a"), card["message_id"])     # first is posting
+    assert actions.send_to_telegram(third, "dashboard").endswith("when the video posting there now has finished.")
+    clock.t += 5
+    bot.tick()
+    assert review.current_card()["id"] == card["id"] and len(fake.of("sendVideo")) == 1   # a posting card stays
+    review.set_paused(True)
+    publisher_finishes(db, first, instagram="live", facebook="live")
+    clock.t += 5
+    bot.tick()
+    sent = review.current_card()
+    assert sent["run_id"] == third                             # before second, and although cards are paused
+    press(env, card_button(sent, "r"), sent["message_id"])
+    assert review.current_card() is None and len(fake.of("sendVideo")) == 2   # the pause still holds the rest
+
+
+def test_send_to_telegram_needs_a_waiting_video_and_a_connected_bot(env, monkeypatch):
+    from pipeline import actions, review
+    db, bot = env["db"], env["bot"]
+    first, second = waiting(db, "inflation"), waiting(db, "gdp_growth")
+    bot.tick()
+    actions.send_to_telegram(second, "dashboard")
+    actions.reject(second, "dashboard")                        # decided before its card went out
+    env["clock"].t += 5
+    bot.tick()
+    assert review.current_card()["run_id"] == first and review.requested_run() is None   # the open card is kept
+    with pytest.raises(ValueError, match="waiting for review"):
+        actions.send_to_telegram(second, "dashboard")
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN")
+    with pytest.raises(ValueError, match="not connected"):
+        actions.send_to_telegram(first, "dashboard")
+
+
 # ------------------------------------------------------------------ polling
 
 def test_offset_survives_a_restart(env):

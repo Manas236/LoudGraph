@@ -7,7 +7,14 @@ def explain_error(error: str | None, stage: str = "publish", service: str | None
     text = raw.lower()
     prefix = f"{service} upload failed: " if service else ""
     section = "accounts"
-    if any(x in text for x in ("expired", "invalid_grant", "invalid token", "code': 190", '"code": 190', "unauthorized")):
+    if "upload stopped" in text:   # orchestrator.settle_stopped: the publisher process died
+        sentence, fix, section = ("the upload stopped before it finished.",
+                                  "Try again. A video that already went live is not posted a second time.", "posting")
+    elif "cannot call api for app" in text:   # Graph API (#200): Meta blocks this app for this Facebook account
+        sentence, fix = ("Meta is refusing requests from your app for this Facebook account.",
+                         "Log in to Facebook and to developers.facebook.com with the account that made the token, clear "
+                         "any security check or restriction, then make a new token and press Test in Settings.")
+    elif any(x in text for x in ("expired", "invalid_grant", "invalid token", "code': 190", '"code": 190', "unauthorized")):
         sentence, fix = "the access token expired.", "Reconnect the account in Settings, then try again."
     elif any(x in text for x in ("quota", "uploadlimit", "daily cap", "rate limit")):
         sentence, fix, section = "the daily posting limit was reached.", "Wait until the daily limit resets, then try again.", "posting"

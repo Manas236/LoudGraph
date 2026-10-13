@@ -5,7 +5,9 @@ Review cards come ONE at a time (pipeline/review.py holds the queue and the card
   * a card is the video with a short caption (title, metric, countries, length) and Approve /
     Reject / Later buttons; Later moves the video to the back of the queue;
   * after Approve the same message edits itself through the posting stages until Done;
-  * the next card goes out only after a decision and, when approved, once posting is final.
+  * the next card goes out only after a decision and, when approved, once posting is final;
+  * a video sent from the dashboard ("Send to Telegram") becomes the card now: an undecided card
+    for another video is swapped out and its video stays in the queue.
 Buttons on any other message answer "This card is stale" and do nothing.
 Commands (registered with setMyCommands): /new /ready /status /pause /resume /help.
 Edits are throttled to one per EDIT_GAP_S per message, and a 429 waits for its retry_after.
@@ -327,6 +329,8 @@ class Bot:
             card = None
         if card and card["state"] == "open":
             card = review.sync_open(card)
+        if card and card["state"] == "open":
+            card = review.give_way(card)   # the dashboard sent another video to Telegram
         if card and card["state"] == "posting":
             review.check_posting(card)
         for c in review.cards_to_render():
@@ -350,10 +354,12 @@ class Bot:
                          on_sent=lambda: review.update_card(cid, caption=text, buttons=markup))
 
     def dispatch(self) -> None:
-        """Send the next review card, unless one is already out, the queue is paused or empty."""
-        if review.paused() or self.clock() < self.send_after or review.current_card():
+        """Send the next review card, unless one is already out, the queue is paused or empty. A
+        video sent from the dashboard goes first, and goes out even while cards are paused."""
+        wanted = review.requested_run()
+        if self.clock() < self.send_after or review.current_card() or (review.paused() and not wanted):
             return
-        run = review.next_for_review()
+        run = wanted or review.next_for_review()
         if not run:
             return
         cid = review.create_card(run["id"])
@@ -369,6 +375,7 @@ class Bot:
             log.warning("telegram: could not send the review card for %s (%s); trying again in %ss", run["id"], e, wait)
             return
         review.card_sent(cid, msg["message_id"], kind, text, markup)
+        review.clear_request(run["id"])
         self.editor.touch(msg["message_id"])
         db.log(run["id"], "awaiting_approval", f"telegram: review card {cid} sent (message {msg['message_id']})")
 
@@ -619,6 +626,8 @@ def _bot_loop() -> int:
                 health.beat("bot", telegram=tg)   # the dashboard turns red when this is > 3 min old
                 last_beat = time.time()
             if time.time() - last_scan > 30:
+                from .orchestrator import settle_stopped
+                settle_stopped()   # a publisher that died mid-post is reported, not left "posting"
                 _publish_stragglers()
                 last_scan = time.time()
             if not tg:

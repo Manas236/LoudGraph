@@ -47,6 +47,19 @@ def reject(run_id: str, by: str) -> str:
     return "rejected"
 
 
+def send_to_telegram(run_id: str, by: str) -> str:
+    """The dashboard's "Send to Telegram for approval": the bot shows this video on its review card
+    now, and it is approved (or not) there. Nothing is posted by this."""
+    from . import health, review
+    from .accounts import account_states
+    if not account_states()["telegram"]["configured"]:
+        raise ValueError("Telegram is not connected. Set it up in Settings first.")
+    message = review.send_to_telegram(run_id, by)
+    if health.heartbeat_state(db.kv_get("heartbeat:bot"))["state"] != "ok":
+        return "Sent to Telegram — the bot is stopped, so double-click Bot.bat and the card will arrive."
+    return message
+
+
 def regenerate(run_id: str, by: str) -> str:
     """Same topic, new country set: reject the current run (if it is waiting) and start a new one."""
     run = db.get_run(run_id)

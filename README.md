@@ -94,6 +94,16 @@ says "in the dashboard" and the queue moves on. A video is never posted twice, e
 in both places or tap a button twice. Buttons on older messages answer "This card is stale" and do
 nothing. If the bot restarts, it carries on with the same card instead of sending it again.
 
+**Send to Telegram for approval** in the dashboard picks the card yourself: that video becomes the
+card within about 10 seconds, even while cards are paused. A card that is still waiting for your
+decision is swapped out (its video stays in the queue and comes back later); a card that is posting
+finishes first.
+
+**If an upload stops half-way** (the posting process crashed, or the PC restarted), the bot notices
+within about two minutes: the unfinished platforms are marked failed with a Retry, instead of
+showing "posting…" for ever. A retry first asks Instagram / Facebook whether the earlier upload went
+live after all, and records it instead of posting a second copy.
+
 **Commands** (also in the bot's menu):
 
 | command | what it does |
@@ -116,8 +126,10 @@ the browser). `python run.py dashboard` and `python dashboard/app.py` start the 
 second copy notices the first and exits. Everything is local; no frontend build or internet
 connection is needed for the dashboard.
 
-- **Review** (`/`): one large, playable video, with **Approve & post**, **Remake** and **Reject**.
-  Use A / M / X, or left/right arrows to move through the thumbnail queue. Click the hook title
+- **Review** (`/`): one large, playable video, with **Approve & post**, **Send to Telegram for
+  approval** (shown when Telegram is connected: nothing is posted, the bot puts this video on its
+  review card and you approve it there), **Remake** and **Reject**.
+  Use A / T / M / X, or left/right arrows to move through the thumbnail queue. Click the hook title
   and press Enter to save it to the post title and captions. Platform chips choose where this
   video posts. Disconnected accounts are disabled; you can still approve and the video waits in
   Library. The bot posts waiting approvals after you connect the accounts, or use **Post now**
@@ -222,6 +234,13 @@ is a long-lived **Page** access token; `IG_USER_ID` is the Page's `instagram_bus
 Facebook Test (and `go-live`) checks that the token is a Page token for that Page with all three
 permissions, and names any that are missing.
 
+**Request limit for Meta.** Every request to Instagram and Facebook (uploads, posts, status checks,
+account tests, insights) is sent from `pipeline/meta_api.py`. Before a request goes out it checks
+when the previous one was sent and waits until that is at least `meta_api.min_gap_seconds` old
+(3 by default; 0 turns it off). The time of the last request is kept in the database, so the gap
+holds across everything running at once: two videos posting, the bot and the dashboard. It spaces
+requests, not posts: three approved videos still go out one after another.
+
 ## Scheduling
 
 Default cadence: 2 videos/day (`cadence.videos_per_day`). Paths and names below are placeholders.
@@ -292,7 +311,11 @@ YouTube token-refresh detection and the Pacific-time quota day; and the Telegram
 open card at a time, the next card waiting for the decision and the posting, stale buttons, a double
 approval posting once, Later and /ready ordering, /new topics and one render at a time, restart resume,
 the 10-minute stage limit, edit throttling and 429, chat filtering, the test-mode reset before going
-live, the Facebook permission check, and YouTube off skipping its upload.
+live, the Facebook permission check, and YouTube off skipping its upload; the dashboard's Send to
+Telegram (swapping an open card, waiting for a posting one, ignoring the pause); a publisher that
+died mid-post being settled as failed, with a retry that never uploads a reel that already went live;
+and the Meta request limit (the gap between requests, shared through the database, and that no
+module calls the Graph API around it).
 
 ## Data licences
 

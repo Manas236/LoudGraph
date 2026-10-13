@@ -85,6 +85,25 @@ def test_no_accounts_approval_stays_in_library_and_never_calls_publisher(client,
     assert not re.search(r"r\d{8}-\d{6}-[0-9a-f]{4}|air_passengers", html)
 
 
+def test_send_to_telegram_asks_the_bot_and_posts_nothing(client, monkeypatch):
+    web, c = client
+    from pipeline import actions, db, review
+    spawned = []
+    monkeypatch.setattr(actions, "spawn", lambda *args: spawned.append(args))
+    run = waiting(db)
+    assert 'data-action="telegram"' not in c.get("/").text          # Telegram is not connected: no button
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "555")
+    html = c.get("/").text
+    assert "Send to Telegram for approval" in html and 'data-action="approve"' in html   # next to Approve, not instead
+    response = post(c, web, run, "telegram")
+    assert response.status_code == 200 and response.json["message"].startswith("Sent to Telegram")
+    assert db.get_run(run["id"])["stage"] == "awaiting_approval" and spawned == []
+    assert review.requested_run()["id"] == run["id"]
+    assert "On its way to Telegram" in c.get("/fragment/review").text
+    assert post(c, web, waiting(db, "homicide_rate", "approved"), "telegram").status_code == 409
+
+
 def test_title_edit_persists_exact_payload_consumed_by_publishers(client, monkeypatch):
     web, c = client
     from pipeline import accounts, db, orchestrator, publish_instagram, publish_youtube
@@ -190,7 +209,7 @@ def test_pages_render(client, url):
     assert client[1].get(url).status_code == 200
 
 
-@pytest.mark.parametrize("url", ["/make", "/settings/posting", "/settings/topics/inflation", "/settings/accounts/youtube/test", "/attention/dismiss", "/video/1/approve", "/video/1/title"])
+@pytest.mark.parametrize("url", ["/make", "/settings/posting", "/settings/topics/inflation", "/settings/accounts/youtube/test", "/attention/dismiss", "/video/1/approve", "/video/1/telegram", "/video/1/title"])
 def test_every_post_requires_csrf(client, url):
     assert client[1].post(url).status_code == 403
 

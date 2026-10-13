@@ -16,6 +16,7 @@ import json
 import logging
 import traceback
 import zlib
+from datetime import datetime, timezone
 
 from . import db
 from .config import country_by_iso3, get_config, run_dir
@@ -311,14 +312,15 @@ def _publish_run(run_id: str, platform: str | None) -> bool:
         return False
     video = d / "video.mp4"
     platforms = []
-    from . import publish_instagram, publish_youtube
+    from . import posted, publish_instagram, publish_youtube
     functions = {"youtube": publish_youtube.publish, "instagram": publish_instagram.publish,
                  "facebook": publish_instagram.publish_facebook}
     platforms = [(p, functions[p]) for p in ready]
     statuses = {}
     for name, fn in platforms:
         try:
-            statuses[name] = fn(run_id, meta, video)
+            # an earlier attempt that went live without being recorded is recorded, not uploaded again
+            statuses[name] = posted.earlier_attempt_live(run_id, name, meta) or fn(run_id, meta, video)
         except Exception as e:  # noqa: BLE001
             log.exception("publish %s %s failed", run_id, name)
             db.upsert_post(run_id, name, "failed", message=f"{type(e).__name__}: {e}"[:500])
@@ -336,6 +338,47 @@ def _publish_run(run_id: str, platform: str | None) -> bool:
         return True
     db.fail(run_id, "publish", f"all platforms failed: {summary}")
     return False
+
+
+STOPPED = "the upload stopped unexpectedly"
+STOPPED_GRACE_S = 120   # no publisher and no progress for this long: the publisher is gone, not starting
+
+
+def settle_stopped() -> list[str]:
+    """Runs left in `publishing` by a publisher that is gone (it crashed, or the PC restarted): each
+    platform it had not finished is marked failed and the run is settled as a finished publish, so
+    the status line, the Library and the review card say so and offer a retry instead of showing
+    "posting…" for ever. Nothing is uploaded here; a retry first checks whether the earlier upload
+    went live after all (posted.py). Returns the runs it settled."""
+    from .accounts import destinations
+    from .lock import held_elsewhere, publish_lock
+    settled = []
+    for run in db.list_runs(stage="publishing"):
+        rid = run["id"]
+        posts = {p["platform"]: p for p in db.get_posts(rid)}
+        last = max([run["updated_at"], *(p["updated_at"] for p in posts.values())])
+        idle = (datetime.now(timezone.utc) - db.parse_ts(last)).total_seconds()
+        if idle < STOPPED_GRACE_S or held_elsewhere(publish_lock(rid)):
+            continue
+        for p in destinations(run):
+            post = posts.get(p)
+            if not post:
+                db.upsert_post(rid, p, "failed", message=f"{STOPPED} before this platform was started")
+            elif post["status"] == "uploading":
+                db.upsert_post(rid, p, "failed", message=f"{STOPPED} (it had got as far as: {post['message']})")
+        statuses = {p["platform"]: p["status"] for p in db.get_posts(rid)}
+        summary = ", ".join(f"{k}={v}" for k, v in statuses.items())
+        if any(v == "pending" for v in statuses.values()):
+            db.transition(rid, "approved", f"{STOPPED}; deferred, will retry: {summary}", reset=True)
+        elif any(v in LIVE or v == "dry_run" for v in statuses.values()):
+            db.transition(rid, "published", f"{STOPPED}: {summary}")
+        else:
+            db.fail(rid, "publish", f"{STOPPED}: {summary}")
+        log.warning("publish %s: %s (%s)", rid, STOPPED, summary)
+        if not _on_a_card(rid):   # the review card shows the failures and a Retry button
+            alert(f"❌ posting stopped unexpectedly for {rid}: {summary}. Open the Library to try again."[:900])
+        settled.append(rid)
+    return settled
 
 
 def publish_approved(run_id: str | None = None, platform: str | None = None) -> int:

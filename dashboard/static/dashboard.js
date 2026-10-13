@@ -90,8 +90,9 @@
   document.addEventListener('keydown', event => {
     if (event.target.id === 'video-title' && event.key === 'Enter') { event.preventDefault(); event.target.form.requestSubmit(); return; }
     if (busy || event.repeat || isEditing() || event.ctrlKey || event.metaKey || event.altKey || $('#video-drawer')?.open || event.target.tagName === 'VIDEO') return;
-    const action = {a: 'approve', m: 'remake', x: 'reject'}[event.key.toLowerCase()];
-    if (action && $('[data-review-action]')) { event.preventDefault(); const button = $(`[data-action="${action}"]`); button.form.requestSubmit(button); }
+    const action = {a: 'approve', t: 'telegram', m: 'remake', x: 'reject'}[event.key.toLowerCase()];
+    const button = action && $('[data-review-action]') && $(`[data-action="${action}"]`);
+    if (button) { event.preventDefault(); button.form.requestSubmit(button); }
     if (['ArrowLeft', 'ArrowRight'].includes(event.key) && queue().length) { event.preventDefault(); $(`[data-step="${event.key === 'ArrowLeft' ? '-1' : '1'}"]`).click(); }
   });
   const advanced = $('#advanced'); if (advanced && location.hash === '#advanced') advanced.open = true;
