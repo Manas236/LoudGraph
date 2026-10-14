@@ -63,7 +63,7 @@
   $('#video-drawer')?.addEventListener('close', () => { $$('#video-drawer video').forEach(v => v.pause()); });
   document.addEventListener('submit', async event => {
     const form = event.target;
-    if (!form.matches('[data-async], [data-review-action], [data-title-form]')) return;
+    if (!form.matches('[data-async], [data-review-action], [data-title-form], [data-caption-form]')) return;
     event.preventDefault(); if (busy) return;
     busy = true;
     const buttons = $$('button', form); buttons.forEach(b => { b.disabled = true; });
@@ -74,6 +74,7 @@
       else if (form.matches('[data-account-test]')) { $('.test-result', form.closest('.account-row')).textContent = message; }
       else { toast(message); const inline = $('.inline-result', form); if (inline) inline.textContent = message; }
       if (form.matches('[data-review-action]')) await select(next);
+      if (form.matches('[data-caption-form]')) await select(current(), true);
       if (form.dataset.refreshDrawer) await openDrawer(form.dataset.refreshDrawer);
     } catch (error) {
       toast(error.message);

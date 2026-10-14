@@ -453,3 +453,84 @@ def test_the_video_opening_question_and_its_answer_come_from_the_facts(ctx):
     assert seen == {"overtakes", "ends_last"}                         # the two strongest openers, varied by seed
     assert captions.opening(ctx.facts, 0)["answer"] == "India overtakes France in 2007"
     assert captions.opening(ctx.facts, 1)["answer"] == "France ends up last: 5.0 in 2010"
+
+
+# ------------------------------------------------------------------ the owner's own caption
+
+def test_an_edit_is_checked_stored_and_posted_with_the_credit(files):
+    from pipeline import captions
+    db, run_dir = files
+    rid = make_run(db, run_dir)
+    c = captions.generate_for_run(rid, llm=False)
+    with pytest.raises(captions.CaptionRejected, match="em dash"):
+        captions.save_edit(rid, "India rose — fast", ["#dataviz"])
+    with pytest.raises(captions.CaptionRejected, match="2,200"):
+        captions.save_edit(rid, "x" * 2190, ["#dataviz"])
+    with pytest.raises(captions.CaptionRejected, match="at most 30"):
+        captions.save_edit(rid, "Watch India", [f"#tag{i}" for i in range(31)])
+    with pytest.raises(captions.CaptionRejected, match="empty"):
+        captions.save_edit(rid, "  \n ", ["#dataviz"])
+    assert "edit" not in captions.load(rid)                        # nothing blocked was stored
+    res = captions.save_edit(rid, "India went from 1.0 to 30.0 by 2010.\nWho saw 1975 coming?", "#data, #india", "telegram")
+    assert res["errors"] == [] and res["warnings"] == ["Check 1975: not in the facts computed from the data."]
+    saved = captions.load(rid)
+    assert saved["variants"] == c["variants"] and saved["use_edit"] is True      # the generated options stay
+    assert saved["edit"]["hashtags"] == ["#data", "#india"] and saved["edit"]["by"] == "telegram"
+    text = captions.compose(saved)
+    assert text == ("India went from 1.0 to 30.0 by 2010.\nWho saw 1975 coming?\n\n"
+                    "Data: Our World in Data (CC BY 4.0).\nOriginal sources: UNODC (2025).\n\n#data #india")
+
+
+def test_the_credit_cannot_be_edited_away_or_doubled(files):
+    from pipeline import captions
+    db, run_dir = files
+    rid = make_run(db, run_dir)
+    captions.generate_for_run(rid, llm=False)
+    captions.save_edit(rid, "Watch France.\nData: Our World in Data (CC BY 4.0).", [])
+    text = captions.compose(captions.load(rid))
+    assert text.count("CC BY 4.0") == 1 and text.startswith("Watch France.\n\nData: Our World in Data (CC BY 4.0).")
+    captions.save_edit(rid, "x" * 2100, [])                         # long: the source list gives way, the credit stays
+    assert "CC BY 4.0" in captions.compose(captions.load(rid)) and len(captions.compose(captions.load(rid))) <= 2200
+
+
+def test_a_typed_reply_keeps_or_replaces_the_hashtags(files):
+    from pipeline import captions
+    db, run_dir = files
+    rid = make_run(db, run_dir)
+    tags = captions.generate_for_run(rid, llm=False)["hashtags"]
+    captions.save_edit(rid, "Watch France after 2005.")              # no hashtag lines: the current ones are kept
+    assert captions.load(rid)["edit"]["hashtags"] == tags
+    captions.save_edit(rid, "Watch France after 2005.\n\n#france #data")
+    edit = captions.load(rid)["edit"]
+    assert edit == {**edit, "text": "Watch France after 2005.", "hashtags": ["#france", "#data"]}
+    assert len(captions.load(rid)["edits"]) == 2                    # every saved edit is kept
+
+
+def test_choosing_an_option_goes_back_from_the_edit_and_regeneration_keeps_it(files):
+    from pipeline import captions
+    db, run_dir = files
+    rid = make_run(db, run_dir)
+    c = captions.generate_for_run(rid, llm=False)
+    captions.save_edit(rid, "My own words.", ["#mine"])
+    assert captions.generate_for_run(rid, llm=False)["edit"]["text"] == "My own words."
+    assert captions.compose(captions.load(rid)).startswith("My own words.")
+    captions.choose(rid, 1)
+    assert captions.compose(captions.load(rid)) == captions.compose(c, 1)
+    assert captions.load(rid)["edit"]["text"] == "My own words."     # still stored
+
+
+def test_the_caption_can_be_edited_until_posting_starts(files):
+    from pipeline import actions, captions
+    db, run_dir = files
+    rid = make_run(db, run_dir)
+    for st in ["data_ready", "picked", "labelled", "rendered", "awaiting_approval"]:
+        db.transition(rid, st)
+    captions.generate_for_run(rid, llm=False)
+    out = actions.edit_caption(rid, "Watch India in 2042.", "#india", "dashboard")
+    assert out["warnings"] and "Check 2042" in out["message"]
+    assert actions.choose_caption(rid, 2, "dashboard") == "Caption 3 chosen."
+    db.transition(rid, "approved")
+    actions.edit_caption(rid, "Still editable while it waits to post.", None, "telegram")
+    db.transition(rid, "publishing")
+    with pytest.raises(ValueError, match="before the video is posted"):
+        actions.edit_caption(rid, "Too late.", None, "telegram")

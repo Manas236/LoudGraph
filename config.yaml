@@ -148,9 +148,8 @@ labels:
   shock_threshold: 0.25         # use largest single-year move if it is >= this share of the range
 
 gemini:                         # every call (labels + captions) goes through pipeline/gemini.py
-  model: auto                   # primary. "auto" = list models on first run, pick a flash-class one, log it
-                                # (cached in cache/gemini_model.json; currently gemini-3.8-flash)
-  fallback_models: ["gemini-2.5-flash"]   # tried in order, AT ONCE, when the model before is overloaded (503),
+  model: gemini-2.5-flash       # primary ("auto" = list models on first run and pick a flash-class one)
+  fallback_models: ["gemini-3.8-flash"]   # tried in order, AT ONCE, when the model before is overloaded (503),
                                 # rate limited (429), down (5xx), unknown (404) or does not answer in `timeout`
   prefer: ["flash"]
   avoid: ["lite", "image", "tts", "audio", "live", "thinking", "embedding", "exp", "preview"]

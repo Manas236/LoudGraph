@@ -130,6 +130,31 @@ def test_title_edit_persists_exact_payload_consumed_by_publishers(client, monkey
     assert post(c, web, run, "title", title="Too late").status_code == 409
 
 
+def test_caption_and_hashtags_are_editable_on_the_review_page(client):
+    web, c = client
+    from pipeline import captions, db
+    from pipeline.config import run_dir
+    run = waiting(db)
+    folder = run_dir(run["id"])
+    years = list(range(2000, 2011))
+    (folder / "data.json").write_text(json.dumps({"topic_id": "air_passengers", "series": {
+        "IND": [[y, 1 + 3 * i] for i, y in enumerate(years)], "USA": [[y, 30 - 2 * i] for i, y in enumerate(years)]}}))
+    (folder / "pick.json").write_text(json.dumps({"countries": ["IND", "USA"], "x_start": 2000, "x_end": 2010}))
+    generated = captions.generate_for_run(run["id"], llm=False)
+    html = c.get("/").text
+    assert 'id="caption-text"' in html and 'id="caption-tags"' in html and "Use option 2" in html
+    assert "can’t be removed: Data: World Bank WDI (CC BY 4.0)." in html
+    refused = post(c, web, run, "caption", text="India — the riser", hashtags="#india")
+    assert refused.status_code == 409 and "em dash" in refused.json["message"]
+    saved = post(c, web, run, "caption", text="India climbs every year.\nGuess the 2031 value?", hashtags="#india #flying")
+    assert saved.status_code == 200 and "Check 2031" in saved.json["message"]
+    html = c.get("/fragment/review").text
+    assert "your own text" in html and "India climbs every year." in html and "#india #flying" in html
+    assert "⚠ Check 2031" in html and not re.search(r"r\d{8}-\d{6}-[0-9a-f]{4}", html)
+    assert post(c, web, run, "caption", choose="1").json["message"] == "Caption 2 chosen."
+    assert captions.compose(captions.load(run["id"])) == captions.compose(generated, 1)
+
+
 def test_video_range_response_and_whitelist(client):
     web, c = client
     from pipeline import db

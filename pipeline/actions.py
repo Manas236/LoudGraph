@@ -160,6 +160,39 @@ def edit_title(run_id: str, title: str, by: str) -> str:
     return "Title saved"
 
 
+CAPTION_STAGES = ("awaiting_approval", "approved")   # the caption can change until posting starts
+
+
+def _caption_run(run_id: str) -> dict:
+    run = db.get_run(run_id)
+    if not run or run["stage"] not in CAPTION_STAGES:
+        raise ValueError("The caption can only be changed before the video is posted.")
+    return run
+
+
+def edit_caption(run_id: str, text: str, hashtags, by: str) -> dict:
+    """The owner's own caption (dashboard or Telegram). hashtags: a list, a space/comma separated string,
+    or None to take them from the text's last lines (keeping the current ones when there are none).
+    Raises ValueError (captions.CaptionRejected) with the reasons; returns {"message", "warnings"}."""
+    from . import captions
+    run = _caption_run(run_id)
+    res = captions.save_edit(run_id, text, hashtags, by)
+    db.log(run_id, run["stage"], f"caption edited via {by}" + (f"; warnings: {'; '.join(res['warnings'])}"
+                                                               if res["warnings"] else ""))
+    message = "Caption saved. The data credit is added when it posts."
+    if res["warnings"]:
+        message += " " + " ".join(res["warnings"])
+    return {"message": message, "warnings": res["warnings"]}
+
+
+def choose_caption(run_id: str, index: int, by: str) -> str:
+    from . import captions
+    run = _caption_run(run_id)
+    captions.choose(run_id, index)
+    db.log(run_id, run["stage"], f"caption option {index + 1} chosen via {by}")
+    return f"Caption {index + 1} chosen."
+
+
 def retry_platform(run_id: str, platform: str, by: str) -> str:
     """Post one platform again. Refused while a publisher for this run is still running, so a
     slow upload is never doubled; an upload whose publisher died counts as failed."""

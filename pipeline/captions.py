@@ -23,6 +23,12 @@ active their top posts are, through the Instagram hashtag search (30 unique tags
 Output: out/<run_id>/captions.json (facts, variants, hashtags, the chosen variant). The review card
 shows the variants and lets the owner choose one. Posting uses the chosen one only when
 captions.use_for_posting is true; otherwise the card is a preview and the post keeps meta.json's caption.
+
+The owner may also rewrite the caption and hashtags (dashboard, or Edit caption on the Telegram card):
+save_edit() blocks an em dash, more than Instagram's 2,200 characters (with the credit and hashtags) or
+30 hashtags, and WARNS about a number that is not in the computed facts. The generated variants stay in
+captions.json next to the edit ("edit", every saved one in "edits"). The data credit is never part of the
+editable text: compose() appends it when the post is made, so no edit can remove it.
 """
 from __future__ import annotations
 
@@ -906,16 +912,145 @@ def generate(topic: dict, countries: list[tuple[str, str]], series: dict, x_star
             "notes": notes + tag_notes}
 
 
-def compose(c: dict, index: int | None = None) -> str:
-    """The full post caption: hook, metric line, question, the data credit, the hashtags."""
-    v = c["variants"][c.get("chosen", 0) if index is None else index]
-    credit = "\n".join(c.get("credit") or [])
-    tags = " ".join(c.get("hashtags") or [])
-    text = "\n\n".join(p for p in (v["caption"], credit, tags) if p)
-    if len(text) > IG_CAPTION_LIMIT:   # the long source list gives way first
-        credit = (c.get("credit") or [""])[0]
-        text = "\n\n".join(p for p in (v["caption"], credit, tags) if p)[:IG_CAPTION_LIMIT]
+def current(c: dict) -> dict:
+    """What would be posted now: the owner's edit when it is in use, else the chosen option."""
+    n = len(c["variants"])
+    index = min(c.get("chosen", 0), n - 1)
+    edit = c.get("edit") if c.get("use_edit") else None
+    if edit:
+        return {"text": edit["text"], "hashtags": list(edit["hashtags"]), "edited": True, "index": index,
+                "warnings": list(edit.get("warnings") or [])}
+    return {"text": c["variants"][index]["caption"], "hashtags": list(c.get("hashtags") or []), "edited": False,
+            "index": index, "warnings": []}
+
+
+def _compose(body: str, credit: list[str], tags: list[str]) -> str:
+    text = "\n\n".join(p for p in (body, "\n".join(credit), " ".join(tags)) if p)
+    if len(text) > IG_CAPTION_LIMIT:   # the long source list gives way first; the CC BY line stays
+        text = "\n\n".join(p for p in (body, (credit or [""])[0], " ".join(tags)) if p)[:IG_CAPTION_LIMIT]
     return text
+
+
+def compose(c: dict, index: int | None = None) -> str:
+    """The full post caption: the chosen option (hook, metric line, question) or the owner's edit, then
+    the data credit and the hashtags. The credit is always added here, whatever the edit says."""
+    if index is None:
+        cur = current(c)
+        return _compose(cur["text"], c.get("credit") or [], cur["hashtags"])
+    return _compose(c["variants"][index]["caption"], c.get("credit") or [], c.get("hashtags") or [])
+
+
+# ------------------------------------------------------------------ the owner's edit
+
+EM_DASHES = ("—", "―")
+MAX_HASHTAGS = 30          # Instagram's limit per caption
+TAG = re.compile(r"#[^\s#]+")
+
+
+class CaptionRejected(ValueError):
+    """An edit that cannot be saved; str() is the reasons in plain words."""
+
+    def __init__(self, errors: list[str]):
+        super().__init__(" ".join(errors))
+        self.errors = errors
+
+
+def allowed_numbers(c: dict) -> set[str]:
+    """Numbers a caption may use without a warning: the computed facts and the metric line's years."""
+    nums = set(numbers_in(c.get("metric_line", "")))
+    for f in c.get("facts", []):
+        nums |= fact_numbers(f)
+    return nums
+
+
+def split_hashtags(text: str) -> tuple[str, list[str] | None]:
+    """A typed caption's trailing hashtag-only lines become its hashtags (None when there are none)."""
+    lines = (text or "").replace("\r\n", "\n").strip().split("\n")
+    tags: list[str] = []
+    while lines and lines[-1].split() and all(w.startswith("#") for w in lines[-1].split()):
+        tags = lines.pop().split() + tags
+    return "\n".join(lines).strip(), (tags or None)
+
+
+def _tags(raw) -> list[str]:
+    words = re.split(r"[\s,]+", raw) if isinstance(raw, str) else list(raw or [])
+    out, seen = [], set()
+    for w in words:
+        w = w.strip()
+        if not w:
+            continue
+        t = "#" + w.lstrip("#")
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out
+
+
+def _body(text: str, credit: list[str]) -> str:
+    """Each line's spaces tidied, at most one blank line in a row, and the credit lines taken out
+    (the credit is added at posting time, so it would otherwise appear twice)."""
+    skip = {" ".join(x.split()) for x in credit}
+    lines, blank = [], False
+    for ln in (text or "").replace("\r\n", "\n").split("\n"):
+        ln = " ".join(ln.split())
+        if ln in skip:
+            continue
+        if not ln:
+            if lines and not blank:
+                lines.append("")
+            blank = True
+            continue
+        lines.append(ln)
+        blank = False
+    return "\n".join(lines).strip()
+
+
+def check_edit(c: dict, text: str, hashtags) -> dict:
+    """{"text", "hashtags", "errors", "warnings"}: errors block saving, warnings only ask for a check."""
+    credit = c.get("credit") or []
+    body, tags = _body(text, credit), _tags(hashtags)
+    errors, warnings = [], []
+    if not body:
+        errors.append("The caption is empty.")
+    if any(d in body or any(d in t for t in tags) for d in EM_DASHES):
+        errors.append("Remove the em dash (—): use a comma, a colon or a full stop instead.")
+    bad = [t for t in tags if not re.fullmatch(r"#\w{1,100}", t)]
+    if bad:
+        errors.append(f"{bad[0]} is not a hashtag Instagram accepts (letters, numbers and _ only).")
+    n_tags = len({t.lower() for t in tags} | {t.lower() for t in TAG.findall(body)})
+    if n_tags > MAX_HASHTAGS:
+        errors.append(f"There are {n_tags} hashtags; Instagram allows at most {MAX_HASHTAGS}.")
+    size = len("\n\n".join(p for p in (body, (credit or [""])[0], " ".join(tags)) if p))   # the shortest posting
+    if size > IG_CAPTION_LIMIT:
+        errors.append(f"With the data credit and hashtags the caption is {size:,} characters; Instagram allows "
+                      f"{IG_CAPTION_LIMIT:,}. Cut {size - IG_CAPTION_LIMIT:,}.")
+    allowed = allowed_numbers(c)
+    unknown = list(dict.fromkeys(n for n in numbers_in(TAG.sub(" ", body)) if n not in allowed))
+    if unknown:
+        warnings.append(f"Check {', '.join(unknown[:4])}: not in the facts computed from the data.")
+    return {"text": body, "hashtags": tags, "errors": errors, "warnings": warnings}
+
+
+def save_edit(run_id: str, text: str, hashtags=None, by: str = "dashboard") -> dict:
+    """Validate and store the owner's caption; it is what gets posted from now on (choose() goes back to
+    an option). hashtags=None: hashtag-only lines at the end of the text are the hashtags, and without any
+    the current ones are kept. Raises CaptionRejected with the reasons. Returns check_edit()'s result."""
+    c = load(run_id)
+    if not c:
+        raise ValueError("This video has no caption yet.")
+    if hashtags is None:
+        text, hashtags = split_hashtags(text)
+        if hashtags is None:
+            hashtags = current(c)["hashtags"]
+    res = check_edit(c, text, hashtags)
+    if res["errors"]:
+        raise CaptionRejected(res["errors"])
+    edit = {"text": res["text"], "hashtags": res["hashtags"], "warnings": res["warnings"], "by": by,
+            "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    c["edit"], c["use_edit"] = edit, True
+    c["edits"] = (c.get("edits") or []) + [edit]
+    save(run_id, c)
+    return res
 
 
 # ------------------------------------------------------------------ files
@@ -956,6 +1091,9 @@ def generate_for_run(run_id: str, llm: bool | None = None, trending: bool | None
     old = load(run_id)
     if old and 0 < old.get("chosen", 0) < len(c["variants"]):
         c["chosen"] = old["chosen"]
+    for k in ("edit", "edits", "use_edit"):   # the owner's own caption survives a regeneration
+        if old and k in old:
+            c[k] = old[k]
     save(run_id, c)
     return c
 
@@ -980,7 +1118,7 @@ def choose(run_id: str, index: int) -> dict:
         raise ValueError("This video has no caption options.")
     if not 0 <= index < len(c["variants"]):
         raise ValueError("No such caption option.")
-    c["chosen"] = index
+    c["chosen"], c["use_edit"] = index, False   # an edit stays stored, but the option is posted
     save(run_id, c)
     return c
 

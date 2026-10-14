@@ -22,7 +22,7 @@ def ok(obj):
 def gem(monkeypatch, pinned_config):
     from pipeline import gemini
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
-    pinned_config["gemini"].update(model="gemini-3.8-flash", fallback_models=["gemini-2.5-flash"], timeout=5)
+    pinned_config["gemini"]["timeout"] = 5          # the model order is the owner's config.yaml
     calls, answers = [], {}
 
     def post(url, json=None, headers=None, timeout=None):
@@ -37,46 +37,51 @@ def gem(monkeypatch, pinned_config):
     return gemini, calls, answers
 
 
+def test_the_owner_config_tries_2_5_flash_first_then_3_8(gem):
+    gemini = gem[0]
+    assert gemini.models() == ["gemini-2.5-flash", "gemini-3.8-flash"]
+
+
 @pytest.mark.parametrize("failure", [Resp(503, {"error": {"status": "UNAVAILABLE", "message": "high demand"}}),
                                      Resp(429, {"error": {"status": "RESOURCE_EXHAUSTED", "message": "per day"}}),
                                      requests.Timeout("read timed out")])
 def test_an_overloaded_model_hands_over_to_the_fallback_at_once(gem, caplog, failure):
     gemini, calls, answers = gem
-    answers.update({"gemini-3.8-flash": failure, "gemini-2.5-flash": ok({"label": "x"})})
+    answers.update({"gemini-2.5-flash": failure, "gemini-3.8-flash": ok({"label": "x"})})
     caplog.set_level("INFO")
     reply, model = gemini.ask_json("prompt", what="label test")
-    assert reply == {"label": "x"} and model == "gemini-2.5-flash"
-    assert calls == ["gemini-3.8-flash", "gemini-2.5-flash"]          # one try each: no retries on the busy one
-    assert "label test: served by gemini-2.5-flash" in caplog.text
+    assert reply == {"label": "x"} and model == "gemini-3.8-flash"
+    assert calls == ["gemini-2.5-flash", "gemini-3.8-flash"]          # one try each: no retries on the busy one
+    assert "label test: served by gemini-3.8-flash" in caplog.text
 
 
 def test_the_primary_serves_when_it_can_and_nothing_answering_raises(gem):
     gemini, calls, answers = gem
-    answers.update({"gemini-3.8-flash": ok({"a": 1}), "gemini-2.5-flash": ok({"b": 2})})
-    assert gemini.ask_json("p") == ({"a": 1}, "gemini-3.8-flash") and calls == ["gemini-3.8-flash"]
+    answers.update({"gemini-2.5-flash": ok({"a": 1}), "gemini-3.8-flash": ok({"b": 2})})
+    assert gemini.ask_json("p") == ({"a": 1}, "gemini-2.5-flash") and calls == ["gemini-2.5-flash"]
     calls.clear()
-    answers.update({"gemini-3.8-flash": Resp(503, {}), "gemini-2.5-flash": Resp(500, {})})
+    answers.update({"gemini-2.5-flash": Resp(503, {}), "gemini-3.8-flash": Resp(500, {})})
     with pytest.raises(gemini.QuotaExhausted, match="no Gemini model answered"):
         gemini.ask_json("p")
-    assert calls == ["gemini-3.8-flash", "gemini-2.5-flash"]
+    assert calls == ["gemini-2.5-flash", "gemini-3.8-flash"]
     calls.clear()
-    answers["gemini-3.8-flash"] = Resp(400, {"error": {"message": "bad request"}})
+    answers["gemini-2.5-flash"] = Resp(400, {"error": {"message": "bad request"}})
     with pytest.raises(RuntimeError, match="HTTP 400"):           # a refused request is not retried elsewhere
         gemini.ask_json("p")
-    assert calls == ["gemini-3.8-flash"]
+    assert calls == ["gemini-2.5-flash"]
 
 
 def test_labels_go_through_the_shared_helper_and_record_the_model(gem, tmp_path, pinned_config):
     from pipeline import labels
     gemini, calls, answers = gem
     pinned_config["paths"]["cache"] = str(tmp_path / "cache")
-    answers.update({"gemini-3.8-flash": Resp(503, {}),
-                    "gemini-2.5-flash": ok({"label": "Oil price crash", "event_year": 2014, "confident": True})})
+    answers.update({"gemini-2.5-flash": Resp(503, {}),
+                    "gemini-3.8-flash": ok({"label": "Oil price crash", "event_year": 2014, "confident": True})})
     years = list(range(2000, 2021))
     vals = [10.0 + 0.1 * k for k in range(14)] + [2.0] + [2.0 + 0.1 * k for k in range(6)]
     out = labels.label_run({"id": "t", "start_year": 2000, "subtitle": "x"}, ["NOR"], {"NOR": list(zip(years, vals))},
                            "x", {"NOR": "Norway"})
-    assert out["NOR"]["label"] == "Oil price crash" and out["NOR"]["model"] == "gemini-2.5-flash"
+    assert out["NOR"]["label"] == "Oil price crash" and out["NOR"]["model"] == "gemini-3.8-flash"
 
 
 # ------------------------------------------------------------------ stats in the bot

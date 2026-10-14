@@ -105,15 +105,18 @@ def video(run, topics=None, accounts=None, stats=None):
 
 
 def caption(run):
-    """The chosen post caption option (captions.json), read-only; it is chosen on the Telegram card."""
+    """The post caption (captions.json): the options to choose from and what would be posted now (an option
+    or the owner's edit), editable here or on the Telegram card. The data credit is shown, never editable."""
     c = read_json(run, "captions.json")
     if not c.get("variants"):
         return None
-    from pipeline.captions import settings
-    n = len(c["variants"])
-    chosen = min(c.get("chosen", 0), n - 1)
-    return {"lines": c["variants"][chosen]["caption"].splitlines(), "hashtags": " ".join(c.get("hashtags") or []),
-            "chosen": chosen + 1, "n": n, "preview_only": not settings()["use_for_posting"]}
+    from pipeline.captions import current, settings
+    cur = current(c)
+    return {"options": [{"hook": v["hook"], "question": v["question"], "chosen": not cur["edited"] and i == cur["index"]}
+                        for i, v in enumerate(c["variants"])],
+            "text": cur["text"], "hashtags": " ".join(cur["hashtags"]), "edited": cur["edited"],
+            "warnings": cur["warnings"], "chosen": cur["index"] + 1, "n": len(c["variants"]),
+            "credit": " ".join(c.get("credit") or []), "preview_only": not settings()["use_for_posting"]}
 
 
 def attention():

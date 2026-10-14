@@ -1,7 +1,8 @@
 """Every Gemini call goes through ask_json(): labels (labels.py) and captions (captions.py).
 
-Models are tried in order: gemini.model (the primary; "auto" = list the models once, pick a
-flash-class one and cache the choice in cache/gemini_model.json), then each of gemini.fallback_models.
+Models are tried in order: gemini.model (the primary, gemini-2.5-flash; "auto" = list the models once,
+pick a flash-class one and cache the choice in cache/gemini_model.json), then each of
+gemini.fallback_models (gemini-3.8-flash).
 An overloaded model (HTTP 503), a rate limit or exhausted quota (429), any other 5xx, an unknown
 model (404) or a network error / timeout moves on to the next model AT ONCE: no minutes of retries.
 The model that answered is logged and returned. When none answers, QuotaExhausted is raised and the

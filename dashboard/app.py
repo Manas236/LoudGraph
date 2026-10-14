@@ -218,6 +218,19 @@ def video_action(ref, operation):
     return result(act)
 
 
+@app.post("/video/<int:ref>/caption")
+def caption_action(ref):
+    """Use one of the caption options, or save the owner's own caption + hashtags."""
+    rid = get_run(ref)["id"]
+
+    def act():
+        if request.form.get("choose") is not None:
+            return actions.choose_caption(rid, request.form.get("choose", type=int, default=-1), "dashboard")
+        return actions.edit_caption(rid, request.form.get("text", ""), request.form.get("hashtags", ""),
+                                    "dashboard")["message"]
+    return result(act)
+
+
 @app.post("/make")
 def make_video():
     return result(lambda: actions.make_video("dashboard"))

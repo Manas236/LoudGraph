@@ -262,6 +262,43 @@ main {
 .label-line {
   font-size:14px!important;
   margin:4px 0}
+.caption-options {
+  list-style:none;
+  margin:0 0 14px;
+  padding:0;
+  display:grid;
+  gap:8px}
+.caption-options li {
+  padding:10px 12px;
+  background:var(--surface);
+  border:1px solid transparent;
+  border-radius:8px}
+.caption-options li.chosen {
+  border-color:var(--green)}
+.caption-options button {
+  margin-top:6px;
+  font-size:12px;
+  padding:5px 10px}
+.caption-form label {
+  display:block;
+  font-size:12px;
+  color:var(--muted);
+  margin:10px 0 4px}
+.caption-form textarea,.caption-form input {
+  display:block;
+  width:100%;
+  max-width:560px;
+  background:var(--surface);
+  color:var(--text);
+  border:1px solid var(--line);
+  border-radius:6px;
+  padding:8px 10px;
+  font:14px/1.4 inherit;
+  resize:vertical}
+.caption-form button {
+  margin-top:10px}
+.caption-warning {
+  color:var(--amber)!important}
 .platform-toggles {
   display:flex;
   gap:10px;

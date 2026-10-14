@@ -138,6 +138,14 @@ comments. The data credit and 5 hashtags follow.
 - **Trending tags:** `captions.trending.enabled` re-ranks the topic hashtags by recent top posts from
   the Instagram hashtag search. Meta allows 30 unique hashtag searches per 7 days. It is off by
   default.
+- **Your own caption:** edit the caption and hashtags on the dashboard's Review page, or tap **Edit
+  caption** on the Telegram review card and reply with the new text (hashtag-only lines at the end
+  replace the hashtags; leave them out to keep the current ones). An em dash, more than Instagram's
+  2,200 characters (counting the credit and hashtags) or more than 30 hashtags is refused with the
+  reason; a number that is not in the computed facts only gets a warning to check it. The generated
+  options and every saved edit stay in `captions.json`; choosing an option again goes back to it.
+  The CC BY 4.0 data credit is not part of the editable text: it is added when the post is made, so
+  no edit can remove it.
 
 ### Dashboard
 
@@ -215,8 +223,9 @@ two batches. Settings changes are picked up by running processes without restart
   cover image (`cover_url`) would need a public file host, which the resumable upload does not have.
 - **Labels**: code finds the turning point; Gemini may only name the event (2–4 words) and is
   rejected unless confident, short, within ±1 year and free of numbers. No label is fine.
-- **Gemini** (`pipeline/gemini.py`, used for labels and captions): `gemini.model` first, then
-  `gemini.fallback_models` (gemini-2.5-flash). An overloaded (503), rate-limited (429), down or silent
+- **Gemini** (`pipeline/gemini.py`, the one helper every label and caption call goes through):
+  `gemini.model` (gemini-2.5-flash) first, then `gemini.fallback_models` (gemini-3.8-flash). An
+  overloaded (503), rate-limited (429), down or silent
   model hands over to the next one at once, without minutes of retries; the log says which model served
   each call, and `labels.json` / `captions.json` record it.
 - **Stats**: the bot collects them itself every `analytics.every_hours` (6 h) on a background thread, so
@@ -235,8 +244,8 @@ fresh approval.
 `.env.example` lists exactly the variables the code reads (checked by `tests/test_env_example.py`).
 
 **GEMINI_API_KEY** (labels) – create a key at https://aistudio.google.com/apikey.
-On first use the pipeline lists available models and picks a flash-class one (logged to
-`cache/gemini_model.json`); pin one with `gemini.model` in config if you prefer.
+`gemini.model` is pinned to gemini-2.5-flash; set it to `auto` to list the available models on first
+use and pick a flash-class one (logged to `cache/gemini_model.json`).
 
 **TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID** (approval) – talk to @BotFather → `/newbot` → token.
 Send your bot any message, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy
