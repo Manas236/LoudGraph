@@ -15,6 +15,7 @@
     python run.py captions --run RUN_ID [RUN_ID ...] [--no-llm] [--trending]
     python run.py preview (--topic ID | --from-run RUN_ID) [--no-send]
     python run.py go-live [--check-only]
+    python run.py account
 """
 from __future__ import annotations
 
@@ -153,6 +154,13 @@ def cmd_go_live(a):
     return 0 if report["passed"] else 1
 
 
+def cmd_account(a):
+    """The connected Instagram account and Facebook Page, read live from Meta by id (read-only)."""
+    from pipeline.approve_telegram import account_text
+    print(account_text())
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="run.py", description="Graphony: data-sonification Shorts/Reels pipeline")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -205,6 +213,8 @@ def main(argv=None):
     s = sub.add_parser("go-live", help="check Instagram + Facebook (read-only), then leave test mode for those that pass")
     s.add_argument("--check-only", action="store_true", help="only run the checks; change nothing")
     s.set_defaults(fn=cmd_go_live)
+    sub.add_parser("account", help="show the connected Instagram account and Facebook Page, read live by id "
+                                   "(read-only)").set_defaults(fn=cmd_account)
     a = p.parse_args(argv)
     setup_logging()
     return a.fn(a) or 0

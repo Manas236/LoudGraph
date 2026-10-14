@@ -49,6 +49,7 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py compare --old ID --new ID` | old vs new frame (`compare.png`) and spectrogram (`compare_spectrogram.png`) |
 | `python run.py captions --run ID [ID ...] [--no-llm] [--trending]` | (re)make a run's post caption options and hashtags (`captions.json`) and print them |
 | `python run.py preview (--topic ID \| --from-run ID) [--no-send]` | render a TEST video in `out/test-<time>/` (no database row: never in the review queue, never posted), check its first seconds, and send it to Telegram marked TEST |
+| `python run.py account` | the connected Instagram account (username, name, followers, posts) and Facebook Page, read live from Meta by id (read-only) |
 | `python -m pipeline.publish_youtube --auth` | one-time YouTube OAuth (opens a browser) |
 
 ## How a video is made

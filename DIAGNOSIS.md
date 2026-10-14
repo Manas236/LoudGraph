@@ -12,6 +12,14 @@ Evidence files:
 - `diagnosis_frames/frame_stats.json`: brightness and per-element pixel coverage for each frame
 - `diagnosis_frames/graph_api_pull.json`: the raw Graph API responses (token redacted)
 
+## Update 2026-10-14: the account was renamed
+
+Read live by id (`python run.py account`, the same read-only call as the bot's Account screen), 2026-10-14
+10:30 IST: the Instagram account is now **@graphonyy**, name **Graphony**, with **1 follower** and
+**34 posts**. The Facebook Page is "Graphony" with 0 followers. Fix 1 below (an identity that matches the
+content) is done for the name; the follower count has not moved yet. The rest of this file describes
+the account as it was on 2026-10-13 (`@dankdoodlesxd`).
+
 ## Short answer
 
 1. **The Instagram account has no audience, and its profile says "meme page".** The reels go out on
