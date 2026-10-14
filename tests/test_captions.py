@@ -421,7 +421,8 @@ def test_the_card_offers_the_caption_options_and_a_choice(bot, pinned_config):
     edit = bot["fake"].of("editMessageCaption")[-1]
     assert [b["text"] for b in edit["reply_markup"]["inline_keyboard"][0]] == ["Use caption 1", "✔️ Caption 2", "Use caption 3"]
     assert press(bot, f"v:cap:{ref}:9", mid) == "No such caption option."
-    assert press(bot, f"v:ok:{ref}", mid) == "Approved: posting it now. That was the last one."
+    answer = press(bot, f"v:ok:{ref}", mid)
+    assert answer.startswith("Approved: it posts ") and answer.endswith("IST. That was the last one.")
     assert press(bot, f"v:cap:{ref}:0", mid) == review.STALE      # the card closed after the last reel
     assert captions.load(rid)["chosen"] == 1
 
@@ -432,7 +433,7 @@ def test_a_card_without_data_still_goes_out(bot):
     (bot["run_dir"](rid) / "pick.json").unlink()
     bot["bot"].open_review()
     sent = bot["fake"].of("sendVideo")[0]
-    assert "Caption" not in sent["caption"] and [b["text"] for b in sent["reply_markup"]["inline_keyboard"][0]] ==         ["✅ Approve and post now"]
+    assert "Caption" not in sent["caption"] and [b["text"] for b in sent["reply_markup"]["inline_keyboard"][0]] ==         ["✅ Approve: add to posting queue"]
     assert review.card_state()["run"] == rid
 
 

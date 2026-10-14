@@ -155,7 +155,8 @@ MIGRATIONS = [("runs", "progress", "REAL"), ("runs", "progress_at", "TEXT"),
               ("runs", "replaced", "INTEGER NOT NULL DEFAULT 0"),
               ("runs", "queue_pos", "REAL"), ("runs", "approved_by", "TEXT"),
               ("make_jobs", "source", "TEXT"), ("make_jobs", "batch_id", "INTEGER"),
-              ("make_jobs", "dismissed", "INTEGER NOT NULL DEFAULT 0")]
+              ("make_jobs", "dismissed", "INTEGER NOT NULL DEFAULT 0"),
+              ("runs", "post_pos", "REAL"), ("runs", "approved_at", "TEXT")]
 _ready: set[str] = set()
 
 
@@ -316,9 +317,10 @@ def transition(run_id: str, new_stage: str, message: str = "", *, reset: bool = 
             if new_stage != "failed":
                 sets += ["failed_stage=NULL", "error=NULL"]
             if new_stage == "awaiting_approval":
-                # joins the back of the review queue; any earlier approval no longer counts
+                # joins the back of the review queue; any earlier approval (and its place in the
+                # posting queue) no longer counts
                 sets += ["queue_pos=(SELECT COALESCE(MAX(COALESCE(queue_pos, rowid)), 0) + 1 FROM runs "
-                         "WHERE stage='awaiting_approval')", "approved_by=NULL"]
+                         "WHERE stage='awaiting_approval')", "approved_by=NULL", "approved_at=NULL", "post_pos=NULL"]
             for k, v in fields.items():
                 if k == "countries":
                     v = json.dumps(v)

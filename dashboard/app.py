@@ -18,7 +18,7 @@ from markupsafe import Markup, escape
 
 from dashboard import viewmodels as vm
 from dashboard.media import chart_thumbnail
-from pipeline import actions, db, health
+from pipeline import actions, db, health, posting
 from pipeline import review as review_queue
 from pipeline.accounts import PLATFORMS, account_states, ready_destinations
 from pipeline.config import brand_name, get_config, path, setup_logging
@@ -196,7 +196,10 @@ def video_action(ref, operation):
             chosen = request.form.getlist("platform") if request.form.get("platforms_present") else None
             actions.approve(rid, "dashboard", platforms=chosen)
             ready = ready_destinations(db.get_run(rid))
-            return "Approved — posting to " + ", ".join(PLATFORMS[p] for p in ready) if ready else "Approved — waiting in Library until accounts are connected"
+            if not ready:
+                return "Approved — waiting in Library until accounts are connected"
+            return (f"Approved — in the posting queue: posts {posting.when_for(rid)} to "
+                    + ", ".join(PLATFORMS[p] for p in ready))
         if operation == "telegram":
             return actions.send_to_telegram(rid, "dashboard")
         if operation == "reject":
@@ -214,7 +217,7 @@ def video_action(ref, operation):
                 return actions.retry_platform(rid, request.form["platform"], "dashboard")
             return actions.retry(rid, run["failed_stage"], "dashboard")
         if operation == "publish":
-            return actions.publish(rid, "dashboard")
+            return posting.post_now(rid, "dashboard")
     return result(act)
 
 

@@ -117,9 +117,10 @@ def decide(run_id: str, action: str) -> str:
 
 def approved_answer(run_id: str) -> str:
     from .accounts import ready_destinations
+    from .posting import when_for
     if not ready_destinations(db.get_run(run_id)):
         return "Approved. It posts once an account is connected (Settings)."
-    return "Approved: posting it now."
+    return f"Approved: it posts {when_for(run_id)}."
 
 
 # ------------------------------------------------------------------ wording
@@ -234,7 +235,7 @@ def card_markup(run: dict) -> dict:
     return {"inline_keyboard": rows}
 
 
-APPROVE_LABEL = "✅ Approve and post now"
+APPROVE_LABEL = "✅ Approve: add to posting queue"
 
 
 def fit(base: str, tail: list[str], limit: int = CAPTION_LIMIT) -> str:

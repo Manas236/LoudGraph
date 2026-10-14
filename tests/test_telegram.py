@@ -148,7 +148,7 @@ def test_menu_is_the_only_command_and_start_opens_the_pinned_home_card(env):
     assert {"chat_id": str(OWNER), "message_id": typed} in fake.of("deleteMessage")      # the /start itself goes
     card = fake.of("sendMessage")[-1]
     assert card["text"].startswith("🏠 Graphony") and buttons(card["reply_markup"]) == [
-        "🆕 New reel", "📦 Make a batch", "👀 Review ready reels (0)", "📊 Stats", "👤 Account"]
+        "🆕 New reel", "📦 Make a batch", "👀 Review ready reels (0)", "📅 Posting queue (0)", "📊 Stats", "👤 Account"]
     say(env, "/menu")                                         # a new /menu moves the one home card down
     assert home.home_msg() != first and {"chat_id": str(OWNER), "message_id": first} in fake.of("deleteMessage")
     assert fake.of("pinChatMessage")[-1]["message_id"] == home.home_msg()
@@ -401,12 +401,12 @@ def test_review_shows_one_reel_at_a_time_and_the_same_card_moves_on(env):
     assert all(v["hook"] in text and v["question"] in text for v in opts["variants"])
     assert " ".join(opts["hashtags"]) in text and len(text) <= 1024 and not RUN_ID.search(text)
     assert buttons(card["reply_markup"]) == ["✔️ Caption 1", "Use caption 2", "Use caption 3", "✏️ Edit caption",
-                                             "✅ Approve and post now", "❌ Reject: don't post", "⏭ Skip for now",
+                                             "✅ Approve: add to posting queue", "❌ Reject: don't post", "⏭ Skip for now",
                                              "🏠 Home"]
     mid = review.card_state()["mid"]
     ref = lambda rid: db.get_run(rid)["ref"]  # noqa: E731
-    assert press(env, f"v:ok:{ref(a)}", mid) == "Approved: posting it now."
-    assert db.get_run(a)["stage"] == "approved" and env["spawned"] == [("publish", "--run", a)]
+    assert press(env, f"v:ok:{ref(a)}", mid).startswith("Approved: it posts ")
+    assert db.get_run(a)["stage"] == "approved" and env["spawned"] == []     # it waits in the posting queue
     media = fake.of("editMessageMedia")[-1]
     assert media["message_id"] == mid and media["media"]["caption"].startswith("🎬 Reel 1 of 2 for review: Coal power")
     assert len(fake.of("sendVideo")) == 1                          # the same card, no new message
@@ -637,6 +637,46 @@ def test_run_py_batch_makes_the_queue_here_one_at_a_time(env, monkeypatch):
     assert made[:3] == ["inflation", "coal_share", "internet_users"] and len(made) == 4   # the skipped one is replaced
     assert [s for _, s in reported] == ["ready", "skipped", "ready", "ready"] and env["spawned"] == []
     assert makequeue.jobs("queued", "running") == []
+
+
+# ------------------------------------------------------------------ the posting queue screen
+
+def test_posting_queue_screen_with_dates_and_buttons_per_reel(env):
+    from pipeline import home, posting, review
+    db, fake = env["db"], env["fake"]
+    a, b, c = waiting(db, "inflation"), waiting(db, "coal_share"), waiting(db, "broadband")
+    hm = menu(env)
+    press(env, "h:review", hm)
+    for rid in (a, b, c):
+        press(env, f"v:ok:{db.get_run(rid)['ref']}", review.card_state()["mid"])
+    assert env["spawned"] == [] and [r["id"] for r in posting.queue()] == [a, b, c]
+    sched = posting.schedule()
+    first = posting.when_text(sched[0]["when"])
+    assert f"📅 Approved, waiting to post: 3, next post {first}" in home.home_view()[0]
+    assert press(env, "h:queue", hm) == "Posting queue"
+    shown = fake.of("editMessageText")[-1]
+    lines = shown["text"].splitlines()
+    assert lines[0] == "📅 Posting queue: one reel a day at 21:00 IST"
+    assert lines[2:5] == [f"{i}. {review.topic_name(s['run']['topic_id'])} · {posting.when_text(s['when'])}"
+                          for i, s in enumerate(sched, 1)]
+    assert buttons(shown["reply_markup"]) == [
+        "⬇️ Move 1 down", "📤 Post 1 now", "↩️ Unapprove 1",
+        "⬆️ Move 2 up", "⬇️ Move 2 down", "📤 Post 2 now", "↩️ Unapprove 2",
+        "⬆️ Move 3 up", "📤 Post 3 now", "↩️ Unapprove 3", "🏠 Home"]
+    ref = lambda rid: db.get_run(rid)["ref"]  # noqa: E731
+    assert press(env, f"h:qup:{ref(c)}", hm) == "Moved Home broadband up."
+    assert [r["id"] for r in posting.queue()] == [a, c, b]
+    assert press(env, f"h:qun:{ref(a)}", hm) == "Unapproved: it is back in Ready for review."
+    assert db.get_run(a)["stage"] == "awaiting_approval" and review.queue()[0]["id"] == a
+    assert press(env, f"h:qnow:{ref(b)}", hm) == "Post it now?"
+    confirm = fake.of("editMessageText")[-1]
+    assert confirm["text"].startswith("📤 Post Coal power now?") and "Instagram and Facebook" in confirm["text"]
+    assert buttons(confirm["reply_markup"]) == ["✅ Yes, post it now", "⬅️ Back to the queue", "🏠 Home"]
+    assert env["spawned"] == []                                 # nothing posts before Yes
+    assert press(env, f"h:qyes:{ref(b)}", hm) == "Posting now."
+    assert env["spawned"] == [("publish", "--run", b)] and posting.starting() == b
+    assert "📤 Posting now: Coal power (starting)" in home_text(env)
+    assert press(env, f"h:qyes:{ref(a)}", hm) == "That reel is no longer waiting to post."
 
 
 def test_a_note_on_the_home_card_goes_away_after_ten_minutes(env):

@@ -79,6 +79,14 @@ picker:
 
 topic_cooldown_days: 21         # same topic may come back (with a different set) after this
 
+posting:                        # the posting queue (pipeline/posting.py): run by the bot itself, no OS scheduler
+  time: "21:00"                 # approved reels post ONE PER DAY at this local time. 21:00 IST is a starting
+                                # guess for an international audience (evening in India, morning-to-afternoon
+                                # in the Americas); move it once the stats show when viewers are on
+  timezone: Asia/Kolkata        # IST
+  min_gap_hours: 12             # a slot that comes less than this after the last post is skipped (e.g. right
+                                # after a missed post went out late), so posts never bunch up
+
 cadence:
   videos_per_day: 2
   posting_times: []             # local 24-hour times; Bot.bat makes the daily videos at these times

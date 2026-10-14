@@ -1,11 +1,12 @@
 """The Telegram home card: ONE pinned message that the bot keeps editing, plus the screens it turns into
-(New reel, Make a batch, Stats, Account). Everything here is wording and state; approve_telegram.py does
+(New reel, Make a batch, Posting queue, Stats, Account). Everything here is wording and state; approve_telegram.py does
 the Telegram calls. Every screen has a Home button, every button label says what it does, and no run id
 is ever shown.
 
 The home card says, in plain words: what is being made now (step X of 4), how many topics wait to be
-made, how many reels wait for review, how many approved reels wait to post, what was posted last, and
-the newest problem (a reel that could not be made, a skipped topic, a failed post) with Retry and Drop.
+made, how many reels wait for review, how many approved reels wait to post and when the next one posts,
+what was posted last, and the newest problem (a reel that could not be made, a skipped topic, a failed
+post) with Retry and Drop. The Posting queue screen lists the approved reels with their dates.
 """
 from __future__ import annotations
 
@@ -125,16 +126,24 @@ def batch_line() -> str | None:
     return f"📦 Batch: {b['ready']} of {b['asked']} ready" if b else None
 
 
-def approved_line() -> str:
-    n = len(db.list_runs(stage="approved"))
-    return f"📅 Approved, waiting to post: {n}"
+def approved_line(now: datetime | None = None) -> str:
+    from . import posting
+    from .accounts import ready_destinations
+    q = posting.queue()
+    if not q:
+        return "📅 Approved, waiting to post: 0"
+    if not ready_destinations(q[0]):
+        return f"📅 Approved, waiting to post: {len(q)}, posting when an account is connected (Settings)"
+    return f"📅 Approved, waiting to post: {len(q)}, next post {posting.next_post_text(now)}"
 
 
 def posting_now_line() -> str | None:
+    from . import posting
     runs = db.list_runs(stage="publishing")
-    if not runs:
-        return None
-    return f"📤 Posting now: {review.topic_name(runs[0]['topic_id'])}"
+    if runs:
+        return f"📤 Posting now: {review.topic_name(runs[0]['topic_id'])}"
+    rid = posting.starting()
+    return f"📤 Posting now: {review.topic_name(db.get_run(rid)['topic_id'])} (starting)" if rid else None
 
 
 def last_posted() -> dict | None:
@@ -241,7 +250,7 @@ def home_view(s: dict | None = None, now: datetime | None = None) -> tuple[str, 
     if batch_line():
         lines.append(batch_line())
     ready = len(review.queue())
-    lines += [f"👀 Ready for your review: {ready}", approved_line()]
+    lines += [f"👀 Ready for your review: {ready}", approved_line(now)]
     if posting_now_line():
         lines.append(posting_now_line())
     lines.append(last_posted_line(now))
@@ -255,6 +264,7 @@ def home_view(s: dict | None = None, now: datetime | None = None) -> tuple[str, 
         rows += problem_rows(probs[0])
     rows += [[{"text": "🆕 New reel", "callback_data": "h:new"}, {"text": "📦 Make a batch", "callback_data": "h:batch"}],
              [{"text": f"👀 Review ready reels ({ready})", "callback_data": "h:review"}],
+             [{"text": f"📅 Posting queue ({len(db.list_runs(stage='approved'))})", "callback_data": "h:queue"}],
              [{"text": "📊 Stats", "callback_data": "h:stats"}, {"text": "👤 Account", "callback_data": "h:account"}]]
     return "\n".join(lines), {"inline_keyboard": rows}
 
@@ -371,8 +381,57 @@ def account_view(s: dict) -> tuple[str, dict]:
     return text, {"inline_keyboard": [[{"text": "🔄 Read again", "callback_data": "h:account"}], [HOME]]}
 
 
+QUEUE_SHOWN = 8   # items with their own buttons on the Posting queue screen
+
+
+def queue_view(s: dict) -> tuple[str, dict]:
+    from . import posting
+    sched = posting.schedule()
+    lines = [f"📅 Posting queue: one reel a day at {posting.settings()['time']} "
+             f"{datetime.now(posting.tz()).tzname()}", ""]
+    if note(s):
+        lines += [note(s), ""]
+    if not sched:
+        lines.append("Nothing is approved yet. Approve reels on the review card and they line up here.")
+    for i, item in enumerate(sched, 1):
+        lines.append(f"{i}. {review.topic_name(item['run']['topic_id'])} · {posting.when_text(item['when'])}")
+    rows = []
+    for i, item in enumerate(sched[:QUEUE_SHOWN], 1):
+        ref = item["run"]["ref"]
+        move = []
+        if i > 1:
+            move.append({"text": f"⬆️ Move {i} up", "callback_data": f"h:qup:{ref}"})
+        if i < len(sched):
+            move.append({"text": f"⬇️ Move {i} down", "callback_data": f"h:qdown:{ref}"})
+        if move:
+            rows.append(move)
+        rows.append([{"text": f"📤 Post {i} now", "callback_data": f"h:qnow:{ref}"},
+                     {"text": f"↩️ Unapprove {i}", "callback_data": f"h:qun:{ref}"}])
+    if len(sched) > QUEUE_SHOWN:
+        lines += ["", f"Buttons are shown for the first {QUEUE_SHOWN}."]
+    rows.append([HOME])
+    return "\n".join(lines), {"inline_keyboard": rows}
+
+
+def confirm_post_view(s: dict) -> tuple[str, dict]:
+    from . import posting
+    from .accounts import ready_destinations
+    run = db.run_by_ref(int(s.get("ref", 0)))
+    if not run or run["stage"] != "approved":
+        return ("📤 That reel is no longer waiting to post.",
+                {"inline_keyboard": [[{"text": "📅 Back to the queue", "callback_data": "h:queue"}], [HOME]]})
+    where = " and ".join(PLATFORMS[p] for p in ready_destinations(run)) or "nowhere yet (no account is connected)"
+    text = (f"📤 Post {review.topic_name(run['topic_id'])} now?\n\nIt goes to {where} straight away, instead of "
+            f"{posting.when_for(run['id'])}. The next daily post is skipped if it would come less than "
+            f"{posting.settings()['min_gap_hours']} hours after this one.")
+    rows = [[{"text": "✅ Yes, post it now", "callback_data": f"h:qyes:{run['ref']}"}],
+            [{"text": "⬅️ Back to the queue", "callback_data": "h:queue"}], [HOME]]
+    return text, {"inline_keyboard": rows}
+
+
 SCREENS = {"home": home_view, "new": new_view, "type": type_view, "typed": typed_view, "batch": batch_view,
-           "batch_preview": batch_preview_view, "stats": stats_view, "account": account_view}
+           "batch_preview": batch_preview_view, "stats": stats_view, "account": account_view, "queue": queue_view,
+           "confirm_post": confirm_post_view}
 
 
 # ------------------------------------------------------------------ short messages

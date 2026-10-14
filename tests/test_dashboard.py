@@ -270,9 +270,10 @@ def test_platform_choices_survive_approval_and_only_selected_platform_posts(clie
     run = waiting(db)
     (run_dir(run["id"]) / "meta.json").write_text('{"title":"Test title"}')
     response = post(c, web, run, "approve", platforms_present="1", platform="instagram")
-    assert response.json["message"] == "Approved — posting to Instagram"
+    assert response.json["message"].startswith("Approved — in the posting queue: posts ")
+    assert response.json["message"].endswith(" IST to Instagram")
     assert json.loads(db.get_run(run["id"])["platforms"]) == ["instagram"]
-    assert spawned == [("publish", "--run", run["id"])]
+    assert spawned == []                                        # one a day, from the posting queue
     monkeypatch.setattr(publish_youtube, "publish", lambda *a: pytest.fail("Unselected YouTube must not post"))
     calls = []
     monkeypatch.setattr(publish_instagram, "publish", lambda *a: calls.append("instagram") or "live")

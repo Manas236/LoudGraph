@@ -14,13 +14,15 @@ Account screens. A new /menu moves the card to the bottom (the old one is delete
     asks for a reply and updates the same card.
   * When a reel becomes ready the bot sends at most ONE short note, and only when no other note is
     unread and the review card is not open.
-  * After a reel posts, the home card updates and one short message carries the post link.
+  * Approved reels wait in the posting queue (Posting queue: Move up / Move down / Post now / Unapprove)
+    and post one a day; after a reel posts, the home card updates and one short message carries the link.
   * Errors show on the home card in plain words with Retry and Drop, never as a stack trace.
 Buttons on any older message answer that they are out of date and do nothing. Edits are throttled to one
 per EDIT_GAP_S per message (a tap is answered at once), and a 429 waits for its retry_after.
 
-`run.py bot` also works the make queue, settles a publisher that died, publishes approved runs nobody
-published yet, collects stats and makes the scheduled daily videos (schedule.py).
+`run.py bot` also works the make queue, runs the posting queue (posting.py: one approved reel a day at
+posting.time, a missed slot posted once when the bot is back), settles a publisher that died, collects
+stats and makes the scheduled daily videos (schedule.py).
 """
 from __future__ import annotations
 
@@ -28,7 +30,7 @@ import json
 import logging
 import random
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 import requests
 
@@ -396,7 +398,34 @@ class Bot:
             return "Account"
         if action in ("retry", "drop"):
             return self._problem(action, arg)
+        if action in ("queue", "qup", "qdown", "qnow", "qyes", "qun"):
+            return self._queue_button(action, arg)
         return STALE
+
+    def _queue_button(self, action: str, arg: str) -> str:
+        from . import posting
+        if action == "queue":
+            self.show("queue")
+            return "Posting queue"
+        run = db.run_by_ref(int(arg)) if arg.isdigit() else None
+        if not run or run["stage"] != "approved":
+            self.show("queue")
+            return "That reel is no longer waiting to post."
+        name = review.topic_name(run["topic_id"])
+        if action in ("qup", "qdown"):
+            posting.move(run["id"], -1 if action == "qup" else 1)
+            self.show("queue")
+            return f"Moved {name} {'up' if action == 'qup' else 'down'}."
+        if action == "qnow":
+            self.show("confirm_post", ref=run["ref"])
+            return "Post it now?"
+        if action == "qyes":
+            posting.post_now(run["id"], "telegram")
+            self.show("home", note=f"📤 Posting {name} now. The link follows when it's live.")
+            return "Posting now."
+        answer = posting.unapprove(run["id"], "telegram")
+        self.show("queue", note=f"↩️ {name} is back in Ready for review.")
+        return answer
 
     def _problem(self, action: str, arg: str) -> str:
         ref, _, platform = arg.partition(":")
@@ -755,17 +784,6 @@ def daily_summary_text() -> str:
 
 # ------------------------------------------------------------------ loop
 
-def _publish_stragglers() -> None:
-    """Hand approved runs that nobody published yet (e.g. accounts connected later) to the publisher."""
-    now = datetime.now(timezone.utc)
-    for r in db.list_runs(stage="approved"):
-        idle = (now - db.parse_ts(r["updated_at"])).total_seconds()
-        recent_defer = any("deferred" in (e["message"] or "") and (now - db.parse_ts(e["ts"])).total_seconds() < 3 * 3600
-                           for e in db.get_log(r["id"])[-5:])
-        if idle > 120 and not recent_defer:
-            actions.publish(r["id"], "bot (approved run not yet published)")
-
-
 def poll_once(timeout: int, bot: Bot | None = None) -> int:
     """One getUpdates round using the offset persisted in the DB, so a restart never re-delivers
     button presses. Returns the number of updates handled."""
@@ -829,10 +847,11 @@ def _bot_loop() -> int:
             if time.time() - last_beat >= health.HEARTBEAT_EVERY_S:
                 health.beat("bot", telegram=tg)   # the dashboard turns red when this is > 3 min old
                 last_beat = time.time()
+            from . import posting
+            posting.tick()   # one approved reel a day at posting.time; a missed slot posts once, late
             if time.time() - last_scan > 30:
                 from .orchestrator import settle_stopped
                 settle_stopped()   # a publisher that died mid-post is reported, not left "posting"
-                _publish_stragglers()
                 from . import analytics
                 analytics.tick()   # stats every analytics.every_hours, on a background thread
                 last_scan = time.time()

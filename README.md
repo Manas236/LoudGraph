@@ -42,7 +42,7 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py bot` | long-running: the Telegram home card and review card, the make queue (one reel at a time), scheduled videos, publishes approved runs |
 | `python run.py batch [--count N] [--queue-only]` | the Telegram Make a batch from the command line: queue N distinct topics, then make the queue here one at a time (the bot does it itself when it is running) |
 | `python run.py go-live [--check-only]` | read-only Instagram + Facebook checks; for those that pass, turn posting on and test mode off (old test-mode approvals go back to review first) |
-| `python run.py publish [--run ID]` | publish approved runs now |
+| `python run.py publish [--run ID]` | publish approved runs now, outside the posting queue (the bot's queue posts one a day by itself) |
 | `python run.py stats [--no-summary]` | pull views / avg % watched / skip rate now, recompute topic weights, send the summary (the bot also does this every 6 h by itself) |
 | `python run.py dashboard` | local web UI on http://127.0.0.1:5055 (Review, Library, Settings) |
 | `python run.py verify [--run ID ...]` | ffprobe, loudness, A/V sync, stem balance, pitch-vs-data, pixel centring, contact sheet |
@@ -90,12 +90,12 @@ plain words:
 ⏳ Waiting to make: 2 (Inflation, Home broadband)
 📦 Batch: 3 of 7 ready
 👀 Ready for your review: 3
-📅 Approved, waiting to post: 1
+📅 Approved, waiting to post: 2, next post Thu 15 Oct, 21:00 IST
 📣 Last posted: Meat consumption, yesterday 16:49 IST, 210 views
 ```
 
 The steps are 1 getting data, 2 rendering, 3 writing captions, 4 ready. Its buttons: **New reel**,
-**Make a batch**, **Review ready reels (N)**, **Stats**, **Account**. Every screen it turns into has a
+**Make a batch**, **Review ready reels (N)**, **Posting queue (N)**, **Stats**, **Account**. Every screen it turns into has a
 **Home** button. A newer `/menu` moves the card to the bottom of the chat (the old one is deleted).
 
 - **New reel**: 5 topics that have no reel yet (the data scorer's interesting ones, mixed categories),
@@ -111,10 +111,19 @@ The steps are 1 getting data, 2 rendering, 3 writing captions, 4 ready. Its butt
   if no earlier note is still unread and the review card is not open.
 - **Review ready reels**: the review card is one message that shows **one reel at a time**: the
   video, its hook question, the 3 caption options and the hashtags, with **Use caption 1 / 2 / 3**,
-  **Edit caption**, **Approve and post now**, **Reject: don't post**, **Skip for now** and **Home**.
+  **Edit caption**, **Approve: add to posting queue**, **Reject: don't post**, **Skip for now** and
+  **Home**.
   After each decision the same card moves to the next ready reel; after the last one it closes.
   Skipped reels stay in Ready for review. A decision made in the dashboard moves the card on too, and
   a reel is never posted twice. No internal id is ever shown.
+- **Posting queue**: approved reels post **one a day** at `posting.time` (21:00 IST by default: a
+  starting guess for an international audience, to be moved once the stats show when viewers are on).
+  The screen lists each reel with its date and **Move N up**, **Move N down**, **Post N now** (asks
+  first) and **Unapprove N** (back to Ready for review). The bot runs this itself, not the OS scheduler,
+  so it keeps working on a server. If the bot was off at posting time, the reel that was due posts
+  **once** when it comes back: several missed days never become several posts, and a slot that would
+  come less than `posting.min_gap_hours` (12) after the last post is skipped. Each day's slot is
+  claimed in the database before posting, so a restart or a second bot never posts twice.
 - **After posting**: the home card updates and one short message carries the post link.
 - **Errors** show on the home card in plain words, e.g. "⚠️ Rendering failed for Coal power: the
   internet connection was interrupted.", with **Retry** and **Drop it**; never a stack trace. A post
@@ -171,14 +180,15 @@ the browser). `python run.py dashboard` and `python dashboard/app.py` start the 
 second copy notices the first and exits. Everything is local; no frontend build or internet
 connection is needed for the dashboard.
 
-- **Review** (`/`): one large, playable video, with **Approve & post**, **Send to Telegram for
+- **Review** (`/`): one large, playable video, with **Approve** (adds it to the posting queue: one
+  reel a day at `posting.time`), **Send to Telegram for
   approval** (shown when Telegram is connected: nothing is posted, the bot puts this video on its
   review card and you approve it there), **Remake** and **Reject**.
   Use A / T / M / X, or left/right arrows to move through the thumbnail queue. Click the hook title
   and press Enter to save it to the post title and captions. Platform chips choose where this
   video posts. Disconnected accounts are disabled; you can still approve and the video waits in
-  Library. The bot posts waiting approvals after you connect the accounts, or use **Post now**
-  in the Library drawer. Remake keeps the topic, chooses new countries and marks the old version
+  Library. The bot posts approved reels from the posting queue (after you connect the accounts), or
+  use **Post now** in the Library drawer. The caption and hashtags are editable under the video. Remake keeps the topic, chooses new countries and marks the old version
   replaced. A progress card refreshes every two seconds. Only actual errors need attention.
 - **Library** (`/library`): Posted, Approved, not posted, and Rejected tabs. Thumbnails show the
   middle of the first country's chart. Open a card for the player, platform stats, live links and
@@ -195,9 +205,9 @@ missing posting accounts, then All good. Selection skips are recorded as topic e
 videos. Production tries up to five topics per requested video before asking you to review topics.
 The migration retains old picker-failed runs and logs, but removes them from failure lists.
 
-**Posting times** use `cadence.timezone` (Asia/Kolkata by default). Keep **Bot.bat** running:
-it makes the configured daily number of videos across those times; videos only post after your
-approval. A schedule is optional. Use either these times or a Task Scheduler produce task, to avoid
+**Making times** (`cadence.posting_times`, in `cadence.timezone`) are when the bot makes the daily
+videos; they only post after your approval, one a day at `posting.time` (see Posting queue above).
+Keep **Bot.bat** running. A schedule is optional. Use either these times or a Task Scheduler produce task, to avoid
 two batches. Settings changes are picked up by running processes without restarting them.
 
 - **Scorer** (`score.py`): rejects short, gappy, interpolated/flat, low-swing and negligible series;
@@ -308,7 +318,7 @@ account tests, insights) is sent from `pipeline/meta_api.py`. Before a request g
 when the previous one was sent and waits until that is at least `meta_api.min_gap_seconds` old
 (3 by default; 0 turns it off). The time of the last request is kept in the database, so the gap
 holds across everything running at once: two videos posting, the bot and the dashboard. It spaces
-requests, not posts: three approved videos still go out one after another.
+requests, not posts; posts are spaced by the posting queue (one a day).
 
 ## Scheduling
 
@@ -387,7 +397,10 @@ each decision (skip, reject, approve, dashboard decisions, Send to Telegram), ca
 caption by reply, the one message after posting, stale buttons, chat filtering, edit throttling and
 429, the test-mode reset before going live, the Facebook permission check, and YouTube off skipping
 its upload; caption editing (em dash blocked, Instagram's length and hashtag limits, a warning for a
-number not in the facts, the credit always added); a publisher that
+number not in the facts, the credit always added); the posting queue (approving posts nothing, one
+reel a day at `posting.time`, a missed slot posted once and never several, the gap after a late post or
+Post now, no double posts across restarts or two bots, Move / Unapprove / Post now, the dates shown);
+a publisher that
 died mid-post being settled as failed, with a retry that never uploads a reel that already went live;
 and the Meta request limit (the gap between requests, shared through the database, and that no
 module calls the Graph API around it).
