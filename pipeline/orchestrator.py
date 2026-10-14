@@ -5,7 +5,7 @@ and writes its outputs there, so any stage can be re-run alone:
     pick   -> picked             pick.json
     label  -> labelled           labels.json
     render -> rendered           timeline.json, audio.wav, audio.json, video.mp4, meta.json, thumb.jpg
-    notify -> awaiting_approval  (joins the review queue; the bot sends one review card at a time)
+    notify -> awaiting_approval  (joins the review queue; the bot's review card shows one reel at a time)
 
 The process making a run holds its run lock (lock.run_lock), and the process posting it holds its
 publish lock, so the bot can tell a slow job from a dead one.
@@ -35,15 +35,6 @@ def _read(run_id: str, name: str):
 
 def _write(run_id: str, name: str, obj) -> None:
     (run_dir(run_id) / name).write_text(json.dumps(obj, indent=1, default=str), encoding="utf-8")
-
-
-def alert(text: str) -> None:
-    try:
-        from .approve_telegram import enabled, send_message
-        if enabled():
-            send_message(text)
-    except Exception as e:  # noqa: BLE001 - alerts must never break the pipeline
-        log.warning("telegram alert failed: %s", e)
 
 
 # ------------------------------------------------------------------ steps
@@ -232,13 +223,11 @@ def _run_pipeline(run_id: str, from_step: str) -> bool:
         except Exception as e:  # noqa: BLE001 - record every failure in the state machine
             (run_dir(run_id) / "error.txt").write_text(traceback.format_exc(), encoding="utf-8")
             db.fail(run_id, step, f"{type(e).__name__}: {e}")
-            log.exception("[%s] %s failed", run_id, step)
-            if not _on_a_card(run_id):   # a /new status card already says so
-                alert(f"❌ {run_id} ({topic['id']}) failed at {step}: {type(e).__name__}: {e}"[:900])
+            log.exception("[%s] %s failed", run_id, step)   # the Telegram home card shows it, with Retry
             return False
         db.transition(run_id, AFTER[step], msg, **fields)
         log.info("[%s] %s: %s", run_id, AFTER[step], msg)
-    # no Telegram message here: the bot sends review cards one at a time from the queue
+    # no Telegram message here: the bot's home card counts it and sends at most one "Reel ready" note
     return True
 
 
@@ -263,15 +252,6 @@ def make_test_video(topic_id: str | None = None, source_run: str | None = None) 
     from . import captions
     captions.generate_for_run(run_id)
     return run_id
-
-
-def _on_a_card(run_id: str) -> bool:
-    """True when a Telegram card (a /new status card or a review card) reports this run."""
-    from . import review
-    try:
-        return bool(review.job_for_run(run_id) or review.latest_card_for_run(run_id))
-    except Exception:  # noqa: BLE001 - alerts must never break the pipeline
-        return False
 
 
 def produce(count: int, topic_id: str | None = None) -> list[str]:
@@ -365,9 +345,7 @@ def _publish_run(run_id: str, platform: str | None) -> bool:
         except Exception as e:  # noqa: BLE001
             log.exception("publish %s %s failed", run_id, name)
             db.upsert_post(run_id, name, "failed", message=f"{type(e).__name__}: {e}"[:500])
-            statuses[name] = "failed"
-            if not _on_a_card(run_id):   # the review card shows the failure and a Retry button
-                alert(f"❌ publish {name} failed for {run_id}: {e}"[:900])
+            statuses[name] = "failed"   # the Telegram home card shows it, with Retry
     good = {"uploaded", "live", "private_locked", "dry_run"}
     summary = ", ".join(f"{k}={v}" for k, v in statuses.items())
     if any(v == "pending" for v in statuses.values()) or (not platform and set(destinations(run)) - set(ready)):
@@ -415,9 +393,7 @@ def settle_stopped() -> list[str]:
             db.transition(rid, "published", f"{STOPPED}: {summary}")
         else:
             db.fail(rid, "publish", f"{STOPPED}: {summary}")
-        log.warning("publish %s: %s (%s)", rid, STOPPED, summary)
-        if not _on_a_card(rid):   # the review card shows the failures and a Retry button
-            alert(f"❌ posting stopped unexpectedly for {rid}: {summary}. Open the Library to try again."[:900])
+        log.warning("publish %s: %s (%s)", rid, STOPPED, summary)   # the home card shows it, with Retry
         settled.append(rid)
     return settled
 

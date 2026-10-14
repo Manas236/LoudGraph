@@ -1,57 +1,49 @@
 """Telegram control channel: plain Bot API over HTTPS with long polling (getUpdates), so no public
 URL or webhook is needed. Only the chat TELEGRAM_CHAT_ID is listened to; every other chat is ignored.
 
-Review cards come ONE at a time (pipeline/review.py holds the queue and the card wording):
-  * a card is the video with a short caption (title, metric, countries, length) and Approve /
-    Reject / Later buttons; Later moves the video to the back of the queue;
-  * the card also lists the post caption options (captions.py) with Caption 1-3 buttons to choose one;
-  * after Approve the same message edits itself through the posting stages until Done;
-  * the next card goes out only after a decision and, when approved, once posting is final;
-  * a video sent from the dashboard ("Send to Telegram") becomes the card now: an undecided card
-    for another video is swapped out and its video stays in the queue.
-Buttons on any other message answer "This card is stale" and do nothing.
-Commands (registered with setMyCommands): /new /ready /status /account /pause /resume /help.
-/account reads the connected Instagram and Facebook accounts live from Meta, by id (survives a rename).
-Edits are throttled to one per EDIT_GAP_S per message, and a 429 waits for its retry_after.
+Everything is a button; no command has to be remembered. The command list (setMyCommands) is just
+/menu, and /menu or /start sends the HOME CARD and pins it: one message the bot keeps editing
+(pipeline/home.py). It shows what is being made (step X of 4), what waits to be made, what waits for
+review, what waits to post and what was posted last, and turns into the New reel, Make a batch, Stats and
+Account screens. A new /menu moves the card to the bottom (the old one is deleted).
 
-`run.py bot` is also the publish fallback (approved runs nobody published yet are handed to
-`run.py publish`) and makes the scheduled daily videos (schedule.py).
+  * New reel / Make a batch put topics in the make queue (makequeue.py); reels are made one at a time and
+    their progress shows only on the home card.
+  * Review ready reels opens the REVIEW CARD: one message that shows one reel at a time (video, hook
+    question, caption options, hashtags) and moves to the next reel after each decision. Edit caption
+    asks for a reply and updates the same card.
+  * When a reel becomes ready the bot sends at most ONE short note, and only when no other note is
+    unread and the review card is not open.
+  * After a reel posts, the home card updates and one short message carries the post link.
+  * Errors show on the home card in plain words with Retry and Drop, never as a stack trace.
+Buttons on any older message answer that they are out of date and do nothing. Edits are throttled to one
+per EDIT_GAP_S per message (a tap is answered at once), and a 429 waits for its retry_after.
+
+`run.py bot` also works the make queue, settles a publisher that died, publishes approved runs nobody
+published yet, collects stats and makes the scheduled daily videos (schedule.py).
 """
 from __future__ import annotations
 
 import json
 import logging
+import random
 import time
 from datetime import datetime, timedelta, timezone
 
 import requests
 
-from . import actions, db, health, review
-from .accounts import PLATFORMS, test_mode
+from . import actions, db, health, home, ideas, makequeue, review
 from .config import brand_name, get_config, run_dir, secret
 
 log = logging.getLogger(__name__)
 MAX_VIDEO_BYTES = 50 * 1024 * 1024  # Bot API upload limit
 EDIT_GAP_S = 3.0
 STALE = review.STALE
-COMMANDS = [("new", "Make a new video: pick one of 3 topics"),
-            ("ready", "Finished videos that are not posted yet"),
-            ("status", "What's rendering, the open card and the queue"),
-            ("account", "The connected Instagram + Facebook accounts, live"),
-            ("pause", "Stop sending review cards"),
-            ("resume", "Start sending review cards again"),
-            ("help", "What this bot can do")]
-HELP = ("🤖 {brand} bot\n"
-        "/new — make a new video: pick one of 3 topics, or Random\n"
-        "/ready — finished videos not posted yet; tap one to review it next\n"
-        "/status — what's rendering, the open card, the queue, test mode\n"
-        "/account — the connected Instagram and Facebook accounts, read live from Meta\n"
-        "/pause — stop sending review cards (the open card stays)\n"
-        "/resume — send them again\n"
-        "/help — this message\n\n"
-        "Review cards come one at a time. ✅ Approve posts the video, ❌ Reject drops it, ⏭ Later moves it to the "
-        "back of the queue. Caption 1-3 picks the post caption shown on the card. The next card comes after you "
-        "decide and, if you approved, once posting has finished.")
+COMMANDS = [("menu", "Open the Graphony menu")]
+K_READY_NOTE = "home:ready_note"     # the one unread "Reel ready" note
+K_SEEN_READY = "home:seen_ready"     # reels already known to be waiting for review
+K_ANNOUNCED = "posting:announced"    # runs whose posting result was already sent
+FORCE_REPLY = {"force_reply": True}
 
 
 class TelegramError(RuntimeError):
@@ -101,9 +93,18 @@ def send_message(text: str, **extra) -> dict:
                 link_preview_options={"is_disabled": True}, **extra)
 
 
+def delete_message(message_id) -> bool:
+    try:
+        call("deleteMessage", chat_id=secret("TELEGRAM_CHAT_ID"), message_id=message_id)
+        return True
+    except Exception as e:  # noqa: BLE001 - too old or already gone: the caller decides what to do
+        log.info("telegram: could not delete message %s: %s", message_id, e)
+        return False
+
+
 def send_test_preview(run_id: str, report: dict | None = None) -> dict:
     """A TEST render (orchestrator.make_test_video) to the owner's chat as a plain video message:
-    marked TEST, no buttons, no review card, so it is outside the review queue and never posted."""
+    marked TEST, no buttons, not on the review card, so it is outside the review queue and never posted."""
     meta = json.loads((run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))
     opening = meta.get("opening") or {}
     lines = ["🧪 TEST PREVIEW · NOT POSTED · not in the review queue",
@@ -142,31 +143,19 @@ def _allowed(chat: dict, sender: dict) -> bool:
     return chat.get("type") != "private" or str(sender.get("id")) == allowed
 
 
-def _claim_menu(key: str, message_id) -> bool:
-    """A /new or /ready menu works once, and only the latest one: atomically use it up."""
-    with db.db() as c:
-        cur = c.execute("UPDATE kv SET value='', updated_at=? WHERE key=? AND value=?", (db.now(), key, str(message_id)))
-    return cur.rowcount == 1
-
-
-def _ago(ts: str) -> str:
-    s = max(0.0, (datetime.now(timezone.utc) - db.parse_ts(ts)).total_seconds())
-    for word, size in (("d", 86400), ("h", 3600), ("min", 60)):
-        if s >= size:
-            return f"{int(s // size)} {word} ago"
-    return "just now"
-
-
-def _topic_name(topic_id: str) -> str:
-    t = review._topic(topic_id)
-    return t.get("name") or t.get("title") or topic_id
+def _json_kv(key: str):
+    try:
+        return json.loads(db.kv_get(key) or "null")
+    except ValueError:
+        return None
 
 
 # ------------------------------------------------------------------ throttled edits
 
 class Editor:
     """Message edits, at most one per `gap` seconds per message (the latest text wins). A 429 holds
-    every edit back for its retry_after; "message is not modified" counts as done."""
+    every edit back for its retry_after; "message is not modified" counts as done. now=True (a tap)
+    skips the per-message gap, but never a 429 wait."""
 
     def __init__(self, clock=time.monotonic, gap: float = EDIT_GAP_S):
         self.clock, self.gap = clock, gap
@@ -178,20 +167,23 @@ class Editor:
         """The message was just sent: its first edit waits a full gap too."""
         self.last[message_id] = self.clock()
 
-    def edit(self, message_id: int, kind: str, text: str, markup: dict, on_sent=None) -> bool:
+    def edit(self, message_id: int, kind: str, text: str, markup: dict, on_sent=None, now: bool = False) -> bool:
         self.pending[message_id] = (kind, text, markup, on_sent)
-        return self._send(message_id)
+        return self._send(message_id, now)
 
     def flush(self) -> None:
         for mid in list(self.pending):
             self._send(mid)
 
-    def _send(self, mid: int) -> bool:
-        now = self.clock()
-        if now < self.blocked_until or now - self.last.get(mid, float("-inf")) < self.gap:
+    def forget(self, message_id: int) -> None:
+        self.pending.pop(message_id, None)
+
+    def _send(self, mid: int, now: bool = False) -> bool:
+        t = self.clock()
+        if t < self.blocked_until or (not now and t - self.last.get(mid, float("-inf")) < self.gap):
             return False
         kind, text, markup, on_sent = self.pending.pop(mid)
-        self.last[mid] = now
+        self.last[mid] = t
         params = {"chat_id": secret("TELEGRAM_CHAT_ID"), "message_id": mid, "reply_markup": markup}
         if kind == "video":
             method, params["caption"] = "editMessageCaption", text
@@ -201,7 +193,7 @@ class Editor:
             call(method, **params)
         except TelegramError as e:
             if e.retry_after:   # 429 Too Many Requests: wait as told, keep the edit
-                self.blocked_until = now + float(e.retry_after)
+                self.blocked_until = t + float(e.retry_after)
                 self.pending.setdefault(mid, (kind, text, markup, on_sent))
                 log.info("telegram: rate limited, edits wait %ss", e.retry_after)
                 return False
@@ -219,11 +211,11 @@ class Editor:
 # ------------------------------------------------------------------ the bot
 
 class Bot:
-    def __init__(self, clock=time.monotonic):
+    def __init__(self, clock=time.monotonic, rng: random.Random | None = None):
         self.clock = clock
+        self.rng = rng or random.Random()
         self.editor = Editor(clock)
-        self.send_after = 0.0
-        self.job_text: dict[int, str] = {}
+        self.home_shown: tuple | None = None    # (text, markup) the home card shows (or will after the edit)
 
     # ---------------------------------------------------------- updates
     def handle_update(self, u: dict) -> None:
@@ -239,290 +231,466 @@ class Bot:
             return
         try:
             answer = self._button(cq.get("data") or "", msg.get("message_id"))
-        except Exception as e:  # noqa: BLE001 - always answer the button
+        except Exception:  # noqa: BLE001 - always answer the button, in plain words
             log.exception("telegram button failed")
-            answer = f"Something went wrong: {e}"
+            answer = "That didn't work. Please try again."
         try:
             call("answerCallbackQuery", callback_query_id=cq["id"], text=answer[:190])
         except Exception as e:  # noqa: BLE001 - cosmetic only
             log.info("telegram: could not answer a button: %s", e)
         if answer != STALE:
-            self.dispatch()   # a rejected / later / moved card may free the slot: send the next card now
+            self.refresh_home(now=True)
 
     def _button(self, data: str, mid) -> str:
         kind, _, rest = data.partition(":")
-        if kind == "c":
-            return self._card_button(rest, mid)
-        if kind == "n":
-            return self._new_button(rest, mid)
-        if kind == "f":
-            return self._ready_button(rest, mid)
-        return STALE   # every button from before the review queue, or anything unknown
-
-    def _card_button(self, rest: str, mid) -> str:
-        parts = rest.split(":")
-        try:
-            card_id = int(parts[1])
-        except (IndexError, ValueError):
-            return STALE
-        if parts[0] == "t" and len(parts) == 3:   # Retry on a finished card, while it is that video's latest card
-            card = review.get_card(card_id)
-            latest = card and review.latest_card_for_run(card["run_id"])
-            if not card or card["message_id"] != mid or card["state"] != "done" or latest["id"] != card_id:
-                return STALE
-            answer = review.retry(card, parts[2])
-        elif parts[0] == "v" and len(parts) == 3 and parts[2].isdigit():   # a caption option on the open card
-            card = review.current_card()
-            if not card or card["id"] != card_id or card["message_id"] != mid:
-                return STALE
-            answer = review.choose_caption(card, int(parts[2]))
-        else:
-            action = {"a": "approve", "r": "reject", "l": "later"}.get(parts[0])
-            card = review.current_card()
-            if not action or not card or card["id"] != card_id or card["message_id"] != mid:
-                return STALE
-            answer = review.decide(card, action)
-        self.render(review.get_card(card_id))
-        return answer
-
-    def _new_button(self, choice: str, mid) -> str:
-        if not _claim_menu("telegram:new_msg", mid):
-            return STALE
-        random_pick = choice == "*"
-        topic_id = review.random_topic() if random_pick else choice
-        if not topic_id or not review._topic(topic_id):
-            self.editor.edit(mid, "text", "No topic is free right now: every topic has a video or is resting.",
-                             {"inline_keyboard": []})
-            return "No topic available."
-        waits = review.render_busy() or bool(review.jobs("queued"))
-        job = review.add_job(topic_id, mid, random_pick)
-        self.advance_jobs()
-        self.render_job(review.get_job(job["id"]))
-        return "Queued: another video is rendering." if waits else "Starting."
-
-    def _ready_button(self, ref: str, mid) -> str:
-        if not _claim_menu("telegram:ready_msg", mid):
-            return STALE
-        run = db.run_by_ref(int(ref)) if ref.isdigit() else None
-        if not run:
-            answer, text = "That video is gone.", "That video is gone."
-        else:
-            answer = review.bring_to_front(run["id"], "telegram /ready")
-            text = f"⏫ {review.video_title(run)}\n{answer}"
-        self.editor.edit(mid, "text", text, {"inline_keyboard": []})
-        return answer
+        if kind == "h":
+            return self._home_button(rest) if mid and mid == home.home_msg() else STALE
+        if kind == "v":
+            st = review.card_state()
+            return self._review_button(rest, st) if st and st["mid"] == mid else STALE
+        if kind == "r":
+            return self.open_review() if mid and str(mid) == (db.kv_get(K_READY_NOTE) or "") else STALE
+        return STALE   # every button from before this menu, or anything unknown
 
     def on_message(self, m: dict) -> None:
         if not _allowed(m.get("chat") or {}, m.get("from") or {}):
             return
         text = (m.get("text") or "").strip()
         cmd = text.split()[0][1:].split("@")[0].lower() if text.startswith("/") else ""
-        handler = {"new": self.cmd_new, "ready": self.cmd_ready, "status": self.cmd_status,
-                   "account": self.cmd_account, "pause": self.cmd_pause,
-                   "resume": self.cmd_resume, "help": self.cmd_help, "start": self.cmd_help}.get(cmd, self.cmd_help)
-        handler()
-
-    # ---------------------------------------------------------- commands
-    def cmd_help(self) -> None:
-        send_message(HELP.format(brand=brand_name()))
-
-    def cmd_status(self) -> None:
-        send_message(status_text())
-
-    def cmd_account(self) -> None:
-        send_message(account_text())
-
-    def cmd_pause(self) -> None:
-        review.set_paused(True)
-        send_message("⏸ Paused: no new review cards until /resume. The open card (if any) still works.")
-
-    def cmd_resume(self) -> None:
-        review.set_paused(False)
-        send_message("▶️ Resumed: review cards come one at a time again.")
-        self.dispatch()
-
-    def cmd_new(self) -> None:
-        topics = [t for t in review.suggestions(3) if len(t["id"]) <= 60]
-        rows = [[{"text": t.get("name") or t["title"], "callback_data": f"n:{t['id']}"}] for t in topics]
-        rows.append([{"text": "🎲 Random", "callback_data": "n:*"}])
-        lines = ["Pick a topic for a new video:" if topics else
-                 "Every topic already has a video or is resting. Random may still find one."]
-        if review.render_busy() or review.jobs("queued"):
-            lines.append("A video is rendering now, so your pick will wait its turn.")
-        msg = send_message("\n".join(lines), reply_markup={"inline_keyboard": rows})
-        db.kv_set("telegram:new_msg", str(msg["message_id"]))
-
-    def cmd_ready(self) -> None:
-        videos = review.ready_videos(8)
-        if not videos:
-            send_message("No finished videos are waiting to be posted. Use /new to make one.")
+        if cmd in ("menu", "start"):
+            delete_message(m["message_id"])   # keeps the chat to the home card
+            self.open_menu()
             return
-        rows = [[{"text": f"{review.video_title(r)[:48]} · {_ago(r['created_at'])}", "callback_data": f"f:{r['ref']}"}]
-                for r in videos]
-        msg = send_message("Finished videos not posted yet, newest first. Tap one to review it next:",
-                           reply_markup={"inline_keyboard": rows})
-        db.kv_set("telegram:ready_msg", str(msg["message_id"]))
+        waiting = home.awaiting()
+        if waiting and text and not cmd:
+            if waiting["kind"] == "caption":
+                self.caption_reply(waiting, m, text)
+                return
+            if waiting["kind"] == "topic":
+                self.topic_reply(waiting, m, text)
+                return
+        self.open_menu()   # an old command or a stray message: the menu comes down to the bottom
 
-    # ---------------------------------------------------------- the review queue
-    def tick(self) -> None:
-        """Follow the current card (dashboard decisions, posting), the /new jobs, then send the next card."""
-        card = review.current_card()
-        if card and card["state"] == "sending":   # left over from a crash mid-send: it is offered again
-            review.close_card(card["id"], "sending", "closed", "unsent")
-            card = None
-        if card and card["state"] == "open":
-            card = review.sync_open(card)
-        if card and card["state"] == "open":
-            card = review.give_way(card)   # the dashboard sent another video to Telegram
-        if card and card["state"] == "posting":
-            review.check_posting(card)
-        for c in review.cards_to_render():
-            if c["state"] == "done" and c["watch"]:
-                review.check_watched(c)
-                c = review.get_card(c["id"])
-            self.render(c)
-        self.advance_jobs()
-        self.dispatch()
-        self.editor.flush()
-
-    def render(self, card: dict | None) -> None:
-        """Edit the card's message to match its state (throttled; unchanged text is not resent)."""
-        if not card or not card.get("message_id"):
-            return
-        text, markup = review.card_view(card)
-        if text == card["caption"] and markup == card["buttons"]:
-            return
-        cid = card["id"]
-        self.editor.edit(card["message_id"], card["kind"], text, markup,
-                         on_sent=lambda: review.update_card(cid, caption=text, buttons=markup))
-
-    def dispatch(self) -> None:
-        """Send the next review card, unless one is already out, the queue is paused or empty. A
-        video sent from the dashboard goes first, and goes out even while cards are paused."""
-        wanted = review.requested_run()
-        if self.clock() < self.send_after or review.current_card() or (review.paused() and not wanted):
-            return
-        run = wanted or review.next_for_review()
-        if not run:
-            return
-        from .captions import ensure
-        ensure(run["id"])   # a video made before captions existed gets plain-fill options (no network)
-        cid = review.create_card(run["id"])
-        if cid is None:
-            return
-        text, markup = review.card_view(review.get_card(cid))
-        try:
-            msg, kind = self._send_card(run, text, markup)
-        except Exception as e:  # noqa: BLE001 - try again later; the queue must not jam
-            review.drop_card(cid)
-            wait = float(getattr(e, "retry_after", None) or 30)
-            self.send_after = self.clock() + wait
-            log.warning("telegram: could not send the review card for %s (%s); trying again in %ss", run["id"], e, wait)
-            return
-        review.card_sent(cid, msg["message_id"], kind, text, markup)
-        review.clear_request(run["id"])
+    # ---------------------------------------------------------- the home card
+    def open_menu(self) -> None:
+        """Send the home card at the bottom of the chat and pin it; the old one is deleted."""
+        old = home.home_msg()
+        if old and not delete_message(old):
+            try:   # too old to delete: it stops being a menu
+                call("editMessageText", chat_id=secret("TELEGRAM_CHAT_ID"), message_id=old,
+                     text="⬇️ The menu moved to the newest message.", reply_markup={"inline_keyboard": []})
+                call("unpinChatMessage", chat_id=secret("TELEGRAM_CHAT_ID"), message_id=old)
+            except Exception as e:  # noqa: BLE001
+                log.info("telegram: could not retire the old menu: %s", e)
+        if old:
+            self.editor.forget(old)
+        self._end_prompt(home.awaiting(), keep_caption=True)
+        home.set_screen("home")
+        text, markup = home.view()
+        msg = send_message(text, reply_markup=markup)
+        db.kv_set(home.K_MSG, str(msg["message_id"]))
+        self.home_shown = (text, markup)
         self.editor.touch(msg["message_id"])
-        db.log(run["id"], "awaiting_approval", f"telegram: review card {cid} sent (message {msg['message_id']})")
+        try:
+            call("pinChatMessage", chat_id=secret("TELEGRAM_CHAT_ID"), message_id=msg["message_id"],
+                 disable_notification=True)
+        except Exception as e:  # noqa: BLE001 - an unpinned menu still works
+            log.info("telegram: could not pin the menu: %s", e)
 
-    def _send_card(self, run: dict, text: str, markup: dict) -> tuple[dict, str]:
+    def refresh_home(self, now: bool = False) -> None:
+        """Edit the home card when what it should show has changed (now=True right after a tap)."""
+        mid = home.home_msg()
+        if not mid:
+            return
+        view = home.view()
+        if view == self.home_shown:
+            return
+        self.home_shown = view
+        self.editor.edit(mid, "text", view[0], view[1], now=now)
+
+    def show(self, name: str, **data) -> None:
+        home.set_screen(name, **data)
+
+    def _queue_topic(self, topic_id: str, source: str, how: str) -> str:
+        from .topics import get_topic
+        try:
+            topic = get_topic(topic_id)
+        except KeyError:
+            return "That topic is no longer in the list."
+        if topic_id in ideas.library():
+            self.show("home", note=f"ℹ️ {topic['name']} already has a reel or is in the queue.")
+            return "That topic already has a reel."
+        makequeue.add_job(topic_id, source=source)
+        waits = makequeue.busy() or len(makequeue.jobs("queued")) > 1
+        self.show("home", note=f"✅ {how}: {topic['name']}. " + ("It waits its turn in the make queue."
+                                                                 if waits else "Making it now."))
+        return f"Added: {topic['name']}"
+
+    def _home_button(self, rest: str) -> str:
+        action, _, arg = rest.partition(":")
+        if action != "type":
+            self._end_prompt(home.awaiting(), keep_caption=True)
+        if action == "home":
+            self.show("home")
+            return "Home"
+        if action == "new":
+            self.show("new", page=0)
+            return "Topic ideas"
+        if action == "more":
+            self.show("new", page=int(arg) if arg.isdigit() else 0)
+            return "More ideas"
+        if action == "pick":
+            return self._queue_topic(arg, "pick", "Added to the make queue")
+        if action == "surprise":
+            t = ideas.surprise(self.rng)
+            if not t:
+                return "No topic is free right now."
+            return self._queue_topic(t["id"], "surprise", "Surprise pick added to the make queue")
+        if action == "type":
+            return self.ask_topic()
+        if action == "batch":
+            self.show("batch")
+            return "How many?"
+        if action == "bn" and arg.isdigit():
+            n = int(arg)
+            makequeue.set_pending_batch(None)
+            makequeue.set_pending_batch([t["id"] for t in ideas.pick_batch(n, self.rng)])
+            self.show("batch_preview", n=n)
+            return f"Here are {n} topics."
+        if action == "bshuffle":
+            s = home.screen()
+            n = s.get("n") or len(makequeue.pending_batch()) or 7
+            before = makequeue.pending_batch()
+            makequeue.set_pending_batch(None)
+            picks = ideas.pick_batch(n, self.rng, exclude=before)
+            if len(picks) < n:   # not enough other topics: shuffle among all of them
+                picks = ideas.pick_batch(n, self.rng)
+            makequeue.set_pending_batch([t["id"] for t in picks])
+            self.show("batch_preview", n=n)
+            return "Shuffled."
+        if action == "bgo":
+            ids = makequeue.pending_batch()
+            if not ids:
+                self.show("home")
+                return "That batch is gone. Make a new one."
+            makequeue.start_batch(ids)
+            self.show("home", note=f"📦 Batch of {len(ids)} started. Reels are made one at a time.")
+            return "Started."
+        if action == "bcancel":
+            makequeue.set_pending_batch(None)
+            self.show("home")
+            return "Cancelled."
+        if action == "review":
+            return self.open_review()
+        if action == "stats":
+            self.show("stats")
+            return "Stats"
+        if action == "statsnow":
+            from . import analytics
+            started = analytics.collect_now()
+            self.show("stats", note="🔄 Checking Instagram now; this screen updates in a minute." if started
+                      else "🔄 Already checking; this screen updates in a minute.")
+            return "Checking stats."
+        if action == "account":
+            self.show("account", text=account_text())
+            return "Account"
+        if action in ("retry", "drop"):
+            return self._problem(action, arg)
+        return STALE
+
+    def _problem(self, action: str, arg: str) -> str:
+        ref, _, platform = arg.partition(":")
+        run = db.run_by_ref(int(ref)) if ref.isdigit() else None
+        match = [p for p in home.problems() if run and p["run"]["id"] == run["id"]
+                 and (p.get("platform") or "") == platform]
+        if not match:
+            return "That problem is already gone."
+        p = match[0]
+        home.dismiss(p["key"])
+        if p["kind"] != "post":
+            makequeue.dismiss_run(run["id"])
+        if action == "drop":
+            self.show("home")
+            return "Dropped."
+        name = review.topic_name(run["topic_id"])
+        if p["kind"] == "post":
+            try:
+                if run["stage"] == "failed":
+                    actions.retry(run["id"], "publish", "telegram")
+                else:
+                    actions.retry_platform(run["id"], platform, "telegram")
+            except (ValueError, db.TransitionError) as e:
+                return review.plain(str(e), 180)
+            self.show("home", note=f"🔁 Posting {name} again.")
+            return "Trying again."
+        makequeue.retry(run["topic_id"])
+        self.show("home", note=f"🔁 {name} is back in the make queue.")
+        return "Trying again."
+
+    # ---------------------------------------------------------- typed replies
+    def ask_topic(self) -> str:
+        self._end_prompt(home.awaiting(), keep_caption=True)
+        prompt = send_message("⌨️ Which topic? Reply with a word or two, for example: coal, babies, internet.",
+                              reply_markup={**FORCE_REPLY, "input_field_placeholder": "a topic"})
+        home.set_awaiting({"kind": "topic", "prompt": prompt["message_id"]})
+        self.show("type")
+        return "Reply with your topic."
+
+    def topic_reply(self, waiting: dict, m: dict, text: str) -> None:
+        found = ideas.match(text)
+        self._end_prompt(waiting)
+        delete_message(m["message_id"])
+        if found["clear"]:
+            t = found["free"][0]
+            self._queue_topic(t["id"], "typed", f"Added to the make queue (you typed “{text[:40]}”)")
+        else:
+            self.show("typed", query=text[:60], free=[t["id"] for t in found["free"]],
+                      made=[t["id"] for t in found["made"]])
+        self.refresh_home(now=True)
+
+    def ask_caption(self, run: dict) -> str:
+        self._end_prompt(home.awaiting())
+        name = review.topic_name(run["topic_id"])
+        prompt = send_message(f"✏️ Reply to this message with the new caption for {name}.\n"
+                              "Hashtags on their own last line replace the current ones; leave them out to keep "
+                              "them. The data credit is added when it posts.",
+                              reply_markup={**FORCE_REPLY, "input_field_placeholder": "New caption"})
+        home.set_awaiting({"kind": "caption", "run": run["id"], "prompt": prompt["message_id"], "cleanup": []})
+        return "Reply with the new caption."
+
+    def caption_reply(self, waiting: dict, m: dict, text: str) -> None:
+        from .captions import CaptionRejected
+        cleanup = list(waiting.get("cleanup") or []) + [m["message_id"]]
+        try:
+            actions.edit_caption(waiting["run"], text, None, "telegram")
+        except ValueError as e:
+            reasons = e.errors if isinstance(e, CaptionRejected) else [str(e)]
+            delete_message(waiting["prompt"])
+            prompt = send_message("❌ Not saved: " + " ".join(reasons) + "\n\nReply to this message with the "
+                                  "caption again (your text is just above, to copy).",
+                                  reply_markup={**FORCE_REPLY, "input_field_placeholder": "New caption"})
+            home.set_awaiting({**waiting, "prompt": prompt["message_id"], "cleanup": cleanup})
+            return
+        home.set_awaiting(None)
+        for mid in [waiting["prompt"], *cleanup]:
+            delete_message(mid)
+        st = review.card_state()
+        if st and st["run"] == waiting["run"]:
+            self.render_review(st, now=True)   # the same card now shows the new caption
+
+    def _end_prompt(self, waiting: dict | None, keep_caption: bool = False) -> None:
+        """Forget a question the bot asked (its message is deleted). keep_caption: a caption question stays
+        open while the owner moves around the home card."""
+        if not waiting or (keep_caption and waiting["kind"] == "caption"):
+            return
+        delete_message(waiting["prompt"])
+        home.set_awaiting(None)
+
+    # ---------------------------------------------------------- the review card
+    def open_review(self) -> str:
+        self.clear_ready_note()
+        run = review.requested_run() or review.next_for_review()
+        if not run:
+            return "Nothing is waiting for review."
+        old = review.card_state()
+        if old:
+            self._retire_card(old)
+        self._send_card(run, [])
+        n = len(review.queue())
+        return f"{n} reel{'s' if n != 1 else ''} to review."
+
+    def _send_card(self, run: dict, skipped: list[str]) -> None:
+        text, markup = review.card_text(run, skipped), review.card_markup(run)
         video = run_dir(run["id"]) / "video.mp4"
-        chat = secret("TELEGRAM_CHAT_ID")
+        msg, kind = None, "text"
         if video.exists() and video.stat().st_size <= MAX_VIDEO_BYTES:
             try:
                 with open(video, "rb") as f:
-                    return call("sendVideo", http_timeout=300, files={"video": ("video.mp4", f, "video/mp4")},
-                                chat_id=chat, caption=text, supports_streaming="true", width=1080, height=1920,
-                                reply_markup=markup), "video"
+                    msg = call("sendVideo", http_timeout=300, files={"video": ("video.mp4", f, "video/mp4")},
+                               chat_id=secret("TELEGRAM_CHAT_ID"), caption=text, supports_streaming="true",
+                               width=1080, height=1920, reply_markup=markup)
+                kind = "video"
             except TelegramError as e:
                 if e.code != 400:
                     raise
                 log.warning("telegram: sendVideo refused for %s (%s); sending a text card", run["id"], e)
-        note = "(video over 50 MB: watch it in the dashboard)" if video.exists() else "(no video file: see the dashboard)"
-        return send_message(review.fit(text, [note]), reply_markup=markup), "text"
+        if msg is None:
+            note = "(video over 50 MB: watch it in the dashboard)" if video.exists() else "(no video file: see the dashboard)"
+            msg = send_message(review.fit(text, [note]), reply_markup=markup)
+        review.set_card_state({"mid": msg["message_id"], "run": run["id"], "kind": kind, "skipped": skipped,
+                               "shown": [text, markup]})
+        review.clear_request(run["id"])
+        self.editor.touch(msg["message_id"])
+        db.log(run["id"], "awaiting_approval", "telegram: on the review card")
 
-    # ---------------------------------------------------------- /new jobs
-    def advance_jobs(self) -> None:
-        """One render at a time: follow the running /new job, then start the next queued one."""
-        for job in review.jobs("running"):
-            self._follow_job(job)
-        if not review.jobs("running") and not review.making_now():
-            queued = review.jobs("queued")
-            if queued:
-                self._start_job(queued[0])
-        for job in review.jobs("queued"):
-            self.render_job(job)
+    def show_reel(self, st: dict, run: dict, skipped: list[str]) -> None:
+        """The same review card moves to another reel (editMessageMedia); a text card, or a card Telegram
+        will not edit any more, is replaced by a new one."""
+        text, markup = review.card_text(run, skipped), review.card_markup(run)
+        video = run_dir(run["id"]) / "video.mp4"
+        if st["kind"] == "video" and video.exists() and video.stat().st_size <= MAX_VIDEO_BYTES:
+            try:
+                with open(video, "rb") as f:
+                    call("editMessageMedia", http_timeout=300, files={"video": ("video.mp4", f, "video/mp4")},
+                         chat_id=secret("TELEGRAM_CHAT_ID"), message_id=st["mid"], reply_markup=markup,
+                         media={"type": "video", "media": "attach://video", "caption": text,
+                                "supports_streaming": True, "width": 1080, "height": 1920})
+                self.editor.forget(st["mid"])
+                self.editor.touch(st["mid"])
+                review.set_card_state({**st, "run": run["id"], "skipped": skipped, "shown": [text, markup]})
+                review.clear_request(run["id"])
+                db.log(run["id"], "awaiting_approval", "telegram: on the review card")
+                return
+            except TelegramError as e:
+                log.info("telegram: could not switch the review card (%s); sending a new one", e)
+        self._retire_card(st)
+        self._send_card(run, skipped)
 
-    def _start_job(self, job: dict) -> None:
-        rid = db.create_run(job["topic_id"])
-        review.update_job(job["id"], state="running", run_id=rid)
-        try:
-            actions.spawn("produce", "--run", rid, "--from", "fetch")
-        except Exception as e:  # noqa: BLE001
-            db.fail(rid, "fetch", f"could not start the video maker: {e}")
-            review.update_job(job["id"], state="failed")
-        self.render_job(review.get_job(job["id"]))
-
-    def _follow_job(self, job: dict) -> None:
-        run = db.get_run(job["run_id"]) if job["run_id"] else None
+    def render_review(self, st: dict, now: bool = False) -> None:
+        run = db.get_run(st["run"])
         if not run:
-            review.update_job(job["id"], state="failed")
-        elif run["stage"] in review.MAKING:
-            if not review.making_alive(run, started_at=job["updated_at"]):
-                db.fail(run["id"], run["stage"], "the video maker stopped unexpectedly")
-                review.update_job(job["id"], state="failed")
-        elif run["stage"] == "skipped":
-            review.update_job(job["id"], state="skipped")
-        elif run["stage"] == "failed":
-            review.update_job(job["id"], state="failed")
+            return
+        text, markup = review.card_text(run, st.get("skipped", [])), review.card_markup(run)
+        if [text, markup] == st.get("shown"):
+            return
+        review.set_card_state({**st, "shown": [text, markup]})
+        self.editor.edit(st["mid"], st["kind"], text, markup, now=now)
+
+    def next_reel(self, st: dict, skipped: list[str]) -> str:
+        run = review.next_for_review(skipped)
+        if not run:
+            self.close_review()
+            left = len(review.queue())
+            return (" That was the last one." if not left else
+                    f" {left} skipped reel{'s stay' if left != 1 else ' stays'} in Ready for review.")
+        self.show_reel(st, run, skipped)
+        return ""
+
+    def close_review(self) -> None:
+        st = review.card_state()
+        if st:
+            self._retire_card(st)
+        waiting = home.awaiting()
+        if waiting and waiting["kind"] == "caption":
+            self._end_prompt(waiting)
+
+    def _retire_card(self, st: dict) -> None:
+        self.editor.forget(st["mid"])
+        if not delete_message(st["mid"]):
+            try:
+                self.editor.edit(st["mid"], st["kind"], "Review closed. Use the menu to open it again.",
+                                 {"inline_keyboard": []}, now=True)
+            except Exception as e:  # noqa: BLE001
+                log.info("telegram: could not close the old review card: %s", e)
+        review.set_card_state(None)
+
+    def _review_button(self, rest: str, st: dict) -> str:
+        parts = rest.split(":")
+        if parts[0] == "home":
+            self.close_review()
+            self.show("home")
+            return "Back to Home."
+        if len(parts) < 2 or not parts[1].isdigit():
+            return STALE
+        run = db.run_by_ref(int(parts[1]))
+        if not run or run["id"] != st["run"]:
+            return STALE
+        skipped = list(st.get("skipped") or [])
+        if parts[0] == "cap" and len(parts) == 3 and parts[2].isdigit():
+            try:
+                answer = actions.choose_caption(run["id"], int(parts[2]), "telegram")
+            except ValueError as e:
+                return review.plain(str(e), 180)
+            self.render_review(review.card_state(), now=True)
+            return answer
+        if parts[0] == "edit":
+            return self.ask_caption(run)
+        action = {"ok": "approve", "no": "reject", "skip": "skip"}.get(parts[0])
+        if not action:
+            return STALE
+        waiting = home.awaiting()
+        if waiting and waiting["kind"] == "caption" and waiting["run"] == run["id"]:
+            self._end_prompt(waiting)   # decided without replying: the question goes away
+        answer = review.decide(run["id"], action)
+        if action == "skip":
+            skipped.append(run["id"])
+        return answer + self.next_reel(review.card_state() or st, skipped)
+
+    def follow_review(self) -> None:
+        """The dashboard sent a reel to Telegram, or decided the one on the card: the card follows."""
+        wanted = review.requested_run()
+        st = review.card_state()
+        if wanted:
+            self.clear_ready_note()
+            if st and st["run"] != wanted["id"]:
+                self.show_reel(st, wanted, st.get("skipped", []))
+            elif not st:
+                self._send_card(wanted, [])
+            review.clear_request(wanted["id"])
+            return
+        if not st:
+            return
+        run = db.get_run(st["run"])
+        if not run or run["stage"] != "awaiting_approval":
+            self.next_reel(st, st.get("skipped", []))
         else:
-            review.update_job(job["id"], state="ready")
-        self.render_job(review.get_job(job["id"]))
+            self.render_review(st)
 
-    def render_job(self, job: dict) -> None:
-        if not job or not job["message_id"]:
-            return
-        text = job_text(job)
-        if self.job_text.get(job["id"]) == text:
-            return
-        jid = job["id"]
-        self.editor.edit(job["message_id"], "text", text, {"inline_keyboard": []},
-                         on_sent=lambda: self.job_text.__setitem__(jid, text))
+    # ---------------------------------------------------------- short notes
+    def clear_ready_note(self) -> None:
+        mid = db.kv_get(K_READY_NOTE)
+        if mid:
+            delete_message(int(mid))
+            db.kv_set(K_READY_NOTE, "")
 
-    # ---------------------------------------------------------- loop helpers
+    def notify_ready(self) -> None:
+        """At most ONE "Reel ready" note: only when none is unread and the review card is not open."""
+        ids = [r["id"] for r in review.queue()]
+        seen = _json_kv(K_SEEN_READY)
+        db.kv_set(K_SEEN_READY, json.dumps(ids))
+        if not ids and db.kv_get(K_READY_NOTE):
+            self.clear_ready_note()   # everything was reviewed elsewhere
+        if seen is None:
+            return   # first start: what is already waiting is on the home card
+        new = [i for i in ids if i not in seen]
+        if not new or review.card_state() or db.kv_get(K_READY_NOTE):
+            return
+        text, markup = home.ready_note(db.get_run(new[-1])["topic_id"])
+        msg = send_message(text, reply_markup=markup)
+        db.kv_set(K_READY_NOTE, str(msg["message_id"]))
+
+    def announce_posts(self) -> None:
+        """One short message per reel that finished posting, with its links."""
+        done = db.list_runs(stage="published") + [r for r in db.list_runs(stage="failed") if r["failed_stage"] == "publish"]
+        announced = _json_kv(K_ANNOUNCED)
+        if announced is None:   # first start: earlier posts are not announced again
+            db.kv_set(K_ANNOUNCED, json.dumps([r["id"] for r in done]))
+            return
+        fresh = [r for r in done if r["id"] not in announced and not review._publisher_alive(r["id"])]
+        for run in reversed(fresh):   # oldest first
+            text = home.posted_text(run)
+            if text:
+                send_message(text)
+            announced.append(run["id"])
+        if fresh:
+            db.kv_set(K_ANNOUNCED, json.dumps(announced[-300:]))
+
+    # ---------------------------------------------------------- the loop
+    def tick(self) -> None:
+        """Make the next reel, follow the review card, send the notes, then update the home card."""
+        makequeue.work()
+        self.follow_review()
+        self.notify_ready()
+        self.announce_posts()
+        self.refresh_home()
+        self.editor.flush()
+
     def poll_timeout(self) -> int:
         """Short polls while something on screen is changing, long ones when idle."""
         cfg = get_config()["telegram"]
-        card = review.current_card()
-        busy = bool(self.editor.pending or (card and card["state"] != "open") or review.jobs("queued", "running")
-                    or any(c["watch"] for c in review.cards_to_render()))
+        busy = bool(self.editor.pending or makequeue.jobs("queued", "running") or makequeue.making_now()
+                    or db.list_runs(stage="publishing"))
         return int(cfg.get("busy_poll_timeout", 2) if busy else cfg.get("poll_timeout", 10))
-
-
-def job_text(job: dict) -> str:
-    from .errors import explain_error
-    name = _topic_name(job["topic_id"])
-    head = f"🎲 Random pick: {name}" if job["random"] else f"🛠 New video: {name}"
-    run = db.get_run(job["run_id"]) if job["run_id"] else None
-    state = job["state"]
-    if state == "queued":
-        line = "⏳ Queued: another video is rendering. This one starts when it's done."
-    elif state == "running":
-        stage = run["stage"] if run else "queued"
-        if stage == "queued":
-            line = "📥 Fetching data…"
-        else:
-            pct = f" {round(run['progress'] * 100)}%" if run and run.get("progress") is not None else "…"
-            line = f"🎨 Rendering{pct}"
-    elif state == "ready":
-        line = "✅ Ready: it's in the review queue."
-    elif state == "skipped":
-        line = (f"😴 Skipped: {name} turned out too boring this time ({review.skip_reason(run['id'])}). "
-                "Nothing broke. Try another topic with /new.")
-    else:
-        why = explain_error(run["error"], run["failed_stage"] or "render")["sentence"] if run and run.get("error") else \
-            "the video maker stopped."
-        line = f"⚠️ Couldn't make this video: {why}"
-    return f"{head}\n{line}"
 
 
 _BOT: Bot | None = None
@@ -535,55 +703,7 @@ def get_bot() -> Bot:
     return _BOT
 
 
-def handle_callback(cq: dict) -> None:
-    get_bot().on_callback(cq)
-
-
-def handle_message(m: dict) -> None:
-    get_bot().on_message(m)
-
-
 # ------------------------------------------------------------------ texts
-
-def status_text() -> str:
-    lines = [f"📊 {brand_name()} status"]
-    running = review.jobs("running")
-    making = review.making_now()
-    if running:
-        lines.append(f"🛠 Rendering: {_topic_name(running[0]['topic_id'])} · {job_text(running[0]).split(chr(10), 1)[1]}")
-    elif making:
-        r = making[0]
-        pct = f" {round(r['progress'] * 100)}%" if r.get("progress") is not None else ""
-        lines.append(f"🛠 Rendering: {_topic_name(r['topic_id'])}{pct}")
-    else:
-        lines.append("🛠 Nothing rendering")
-    waiting_jobs = review.jobs("queued")
-    if waiting_jobs:
-        lines.append(f"   + {len(waiting_jobs)} /new pick{'s' if len(waiting_jobs) != 1 else ''} waiting to render")
-    card = review.current_card()
-    if card:
-        run = db.get_run(card["run_id"])
-        doing = "posting" if card["state"] == "posting" else "waiting for your decision"
-        lines.append(f"🃏 Open card: {review.video_title(run) if run else 'a removed video'} ({doing})")
-    else:
-        lines.append("🃏 No open card")
-    q = [r for r in review.queue() if not (card and r["id"] == card["run_id"])]
-    lines.append(f"📥 Review queue: {len(q)} waiting")
-    if review.paused():
-        lines.append("⏸ Review cards are paused: /resume to continue")
-    tm = test_mode()
-    names = lambda keys: ", ".join(PLATFORMS[k] for k in keys)  # noqa: E731
-    if tm["on"]:
-        line = "🧪 Test mode: ON, nothing is actually posted"
-    elif tm["testing"]:
-        line = f"🧪 Test mode: on for {names(tm['testing'])}; live on {names(tm['live'])}"
-    elif tm["live"]:
-        line = f"🧪 Test mode: off, posting live to {names(tm['live'])}"
-    else:
-        line = "🧪 No platform is turned on"
-    lines.append(line + (f" ({names(tm['off'])} off)" if tm["off"] and (tm["live"] or tm["testing"]) else ""))
-    return "\n".join(lines)
-
 
 def _count(n, word: str) -> str:
     return f"? {word}s" if n is None else f"{n} {word}" + ("" if n == 1 else "s")
@@ -627,18 +747,10 @@ def account_text() -> str:
 
 
 def daily_summary_text() -> str:
-    since = datetime.now(timezone.utc) - timedelta(days=1)
-    runs = [r for r in db.list_runs(limit=500) if db.parse_ts(r["created_at"]) >= since]
-    posts = [p for p in db.get_posts() if db.parse_ts(p["created_at"]) >= since]
-    stats = sorted((s for s in db.latest_stats() if s.get("views") is not None), key=lambda s: -s["views"])[:3]
-    lines = [f"📊 {brand_name()} · daily summary ({datetime.now():%Y-%m-%d})",
-             f"Runs in the last 24h: {len(runs)} (" +
-             ", ".join(f"{st}={sum(1 for r in runs if r['stage'] == st)}" for st in sorted({r['stage'] for r in runs})) + ")",
-             f"Posts in the last 24h: {len(posts)} (" + ", ".join(f"{p['platform']}:{p['status']}" for p in posts) + ")"]
-    if stats:
-        lines.append("Top posts: " + "; ".join(f"{s['topic_id']} {s['platform']} {s['views']} views" for s in stats))
-    lines.append(status_text())
-    return "\n".join(lines)
+    """The once-a-day stats message (analytics.send_summary): the Stats screen's numbers."""
+    stats = home.stats_text().splitlines()
+    return "\n".join([f"📊 {brand_name()} · daily summary ({datetime.now():%Y-%m-%d})", *stats[1:], "",
+                      "Open the menu (/menu) for what is being made and what waits for you."])
 
 
 # ------------------------------------------------------------------ loop
@@ -680,29 +792,35 @@ def run_bot() -> int:
         return _bot_loop()
 
 
+def start(bot: Bot) -> None:
+    """Once per bot start: the /menu command list, and the home card (sent and pinned the first time)."""
+    try:
+        register_commands()
+    except Exception as e:  # noqa: BLE001 - /menu still works when typed
+        log.warning("telegram: setMyCommands failed: %s", e)
+    if not home.home_msg():
+        bot.open_menu()
+    else:
+        bot.refresh_home(now=True)
+
+
 def _bot_loop() -> int:
     db.init()
     tg = enabled()
     bot = get_bot()
     if not tg:
         log.warning("Telegram credentials missing: approval works from the dashboard only; "
-                    "bot keeps running as the publish loop")
+                    "bot keeps running as the make queue and publish loop")
     else:
         ok, detail = check()
         log.info("telegram: %s", detail)
         if not ok:
             return 1
         try:
-            register_commands()
-        except Exception as e:  # noqa: BLE001 - the commands still work when typed
-            log.warning("telegram: setMyCommands failed: %s", e)
-        card = review.current_card()
-        if card:
-            log.info("telegram: resuming review card %s (%s) for %s", card["id"], card["state"], card["run_id"])
-        try:
-            review.suggestions(3)   # scores the cached topics once, so the first /new answers at once
+            ideas.pool()   # scores the cached topics once, so the first New reel answers at once
         except Exception as e:  # noqa: BLE001
             log.info("telegram: could not pre-score topics: %s", e)
+        start(bot)
     last_scan = last_beat = 0.0
     while True:
         try:
@@ -719,6 +837,7 @@ def _bot_loop() -> int:
                 analytics.tick()   # stats every analytics.every_hours, on a background thread
                 last_scan = time.time()
             if not tg:
+                makequeue.work()
                 time.sleep(30)
                 continue
             bot.tick()

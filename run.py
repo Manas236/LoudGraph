@@ -16,6 +16,7 @@
     python run.py preview (--topic ID | --from-run RUN_ID) [--no-send]
     python run.py go-live [--check-only]
     python run.py account
+    python run.py batch [--count N] [--queue-only]
 """
 from __future__ import annotations
 
@@ -161,6 +162,44 @@ def cmd_account(a):
     return 0
 
 
+def cmd_batch(a):
+    """The Telegram Make a batch, from the command line: queue N distinct topics (same choice: unmade,
+    varied categories, never the same dataset back to back), then make the queue here one at a time
+    (unless --queue-only, or the bot is running: it makes them itself)."""
+    import json
+    from pipeline import db, ideas, makequeue, review
+    from pipeline.config import run_dir
+    from pipeline.lock import held_elsewhere
+    db.init()
+    if a.count:
+        picks = ideas.pick_batch(a.count)
+        if len(picks) < a.count:
+            log.warning("only %d topics are free right now", len(picks))
+        bid = makequeue.start_batch([t["id"] for t in picks])
+        print(f"Batch {bid} queued: " + ", ".join(f"{t['name']} ({t['category']})" for t in picks))
+    if a.queue_only:
+        return 0
+    if held_elsewhere("bot"):
+        print("The bot is running: it makes the queued reels itself, one at a time.")
+        return 0
+
+    def done(job):
+        name = review.topic_name(job["topic_id"])
+        run = db.get_run(job["run_id"]) if job["run_id"] else None
+        if job["state"] == "ready" and run:
+            try:
+                q = json.loads((run_dir(run["id"]) / "meta.json").read_text(encoding="utf-8"))["opening"]["question"]
+            except (OSError, ValueError, KeyError):
+                q = ""
+            print(f"READY    {name}: {q}", flush=True)
+        elif job["state"] == "skipped" and run:
+            print(f"SKIPPED  {name}: {review.skip_reason(run['id'])}", flush=True)
+        else:
+            print(f"FAILED   {name}: {review.plain(run['error'] if run else 'no run')}", flush=True)
+    makequeue.run_foreground(on_done=done)
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="run.py", description="Graphony: data-sonification Shorts/Reels pipeline")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -213,6 +252,11 @@ def main(argv=None):
     s = sub.add_parser("go-live", help="check Instagram + Facebook (read-only), then leave test mode for those that pass")
     s.add_argument("--check-only", action="store_true", help="only run the checks; change nothing")
     s.set_defaults(fn=cmd_go_live)
+    s = sub.add_parser("batch", help="queue N distinct topics (like Make a batch on Telegram) and make the queue "
+                                     "here, one at a time, unless the bot is running")
+    s.add_argument("--count", type=int, help="topics to add first (none: just make what is queued)")
+    s.add_argument("--queue-only", action="store_true", help="only queue them; the bot makes them")
+    s.set_defaults(fn=cmd_batch)
     sub.add_parser("account", help="show the connected Instagram account and Facebook Page, read live by id "
                                    "(read-only)").set_defaults(fn=cmd_account)
     a = p.parse_args(argv)

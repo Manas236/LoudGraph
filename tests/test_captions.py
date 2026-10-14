@@ -405,28 +405,24 @@ def test_the_card_offers_the_caption_options_and_a_choice(bot, pinned_config):
     from pipeline import captions, review
     pinned_config["captions"]["use_for_posting"] = False   # the card then says it is only a preview
     rid = waiting(bot)
-    bot["bot"].tick()                                       # no captions.json yet: plain fills are made on the spot
+    (bot["run_dir"](rid) / "captions.json").unlink(missing_ok=True)
+    captions.ensure(rid)                                    # no captions.json yet: plain fills, no network
+    bot["bot"].open_review()
     sent = bot["fake"].of("sendVideo")[0]
     c = captions.load(rid)
     assert c and len(c["variants"]) == 3
     text, rows = sent["caption"], sent["reply_markup"]["inline_keyboard"]
-    assert [b["text"] for b in rows[0]] == ["✅ Approve", "❌ Reject", "⏭ Later"]
-    assert [b["text"] for b in rows[1]] == ["✅ Caption 1", "Caption 2", "Caption 3"]
+    assert [b["text"] for b in rows[0]] == ["✔️ Caption 1", "Use caption 2", "Use caption 3"]
     assert all(v["hook"] in text and v["question"] in text for v in c["variants"])
-    assert c["metric_line"] in text and " ".join(c["hashtags"]) in text and "Preview only" in text
-    assert len(text) <= 1024
-    card = review.current_card()
-    assert press(bot, f"c:v:{card['id']}:1", card["message_id"]) == "Caption 2 chosen."
+    assert " ".join(c["hashtags"]) in text and "Preview only" in text and len(text) <= 1024
+    mid, ref = review.card_state()["mid"], bot["db"].get_run(rid)["ref"]
+    assert press(bot, f"v:cap:{ref}:1", mid) == "Caption 2 chosen."
     assert captions.load(rid)["chosen"] == 1
-    bot["clock"][0] += 5                                    # past the per-message edit throttle
-    bot["bot"].editor.flush()
     edit = bot["fake"].of("editMessageCaption")[-1]
-    assert [b["text"] for b in edit["reply_markup"]["inline_keyboard"][1]] == ["Caption 1", "✅ Caption 2", "Caption 3"]
-    assert press(bot, f"c:v:{card['id']}:9", card["message_id"]) == "No such caption option."
-    assert press(bot, f"c:a:{card['id']}", card["message_id"]) == "Approved — posting now."
-    after = review.card_view(review.get_card(card["id"]))[0]
-    assert "✍️ Post caption 2:" in after and c["variants"][1]["hook"] in after and c["variants"][0]["hook"] not in after
-    assert press(bot, f"c:v:{card['id']}:0", card["message_id"]) == "This card is stale"
+    assert [b["text"] for b in edit["reply_markup"]["inline_keyboard"][0]] == ["Use caption 1", "✔️ Caption 2", "Use caption 3"]
+    assert press(bot, f"v:cap:{ref}:9", mid) == "No such caption option."
+    assert press(bot, f"v:ok:{ref}", mid) == "Approved: posting it now. That was the last one."
+    assert press(bot, f"v:cap:{ref}:0", mid) == review.STALE      # the card closed after the last reel
     assert captions.load(rid)["chosen"] == 1
 
 
@@ -434,10 +430,10 @@ def test_a_card_without_data_still_goes_out(bot):
     from pipeline import review
     rid = waiting(bot)
     (bot["run_dir"](rid) / "pick.json").unlink()
-    bot["bot"].tick()
+    bot["bot"].open_review()
     sent = bot["fake"].of("sendVideo")[0]
-    assert len(sent["reply_markup"]["inline_keyboard"]) == 1 and "Post caption" not in sent["caption"]
-    assert review.current_card()["run_id"] == rid
+    assert "Caption" not in sent["caption"] and [b["text"] for b in sent["reply_markup"]["inline_keyboard"][0]] ==         ["✅ Approve and post now"]
+    assert review.card_state()["run"] == rid
 
 
 def test_the_video_opening_question_and_its_answer_come_from_the_facts(ctx):

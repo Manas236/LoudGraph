@@ -153,7 +153,9 @@ def parse_ts(s: str) -> datetime:
 MIGRATIONS = [("runs", "progress", "REAL"), ("runs", "progress_at", "TEXT"),
               ("runs", "title", "TEXT"), ("runs", "platforms", "TEXT"),
               ("runs", "replaced", "INTEGER NOT NULL DEFAULT 0"),
-              ("runs", "queue_pos", "REAL"), ("runs", "approved_by", "TEXT")]
+              ("runs", "queue_pos", "REAL"), ("runs", "approved_by", "TEXT"),
+              ("make_jobs", "source", "TEXT"), ("make_jobs", "batch_id", "INTEGER"),
+              ("make_jobs", "dismissed", "INTEGER NOT NULL DEFAULT 0")]
 _ready: set[str] = set()
 
 

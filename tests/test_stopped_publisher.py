@@ -19,9 +19,7 @@ def env(temp_db, tmp_path, monkeypatch, pinned_config):
     monkeypatch.setenv("IG_USER_ID", "7")
     monkeypatch.setenv("IG_ACCESS_TOKEN", "tok")
     monkeypatch.setattr(accounts, "ready_destinations", lambda run: ["instagram", "facebook"])
-    alerts = []
-    monkeypatch.setattr(orchestrator, "alert", alerts.append)
-    return temp_db, alerts
+    return temp_db, None
 
 
 def publishing(db):
@@ -88,8 +86,11 @@ def test_a_dead_publisher_is_reported_with_a_retry(env):
     assert run["stage"] == "failed" and run["failed_stage"] == "publish" and run["approved_by"] == "dashboard"
     assert explain_error(posts["instagram"]["message"], "publish", "Instagram")["sentence"] == \
         "Instagram upload failed: the upload stopped before it finished."
-    assert len(alerts) == 1 and "posting stopped unexpectedly" in alerts[0]
-    assert orchestrator.settle_stopped() == [] and len(alerts) == 1   # reported once
+    from pipeline import home
+    shown = sorted(p["text"] for p in home.problems())          # on the Telegram home card, with Retry
+    assert shown == ["⚠️ Posting failed for Nuclear power on Facebook: The upload stopped before it finished.",
+                     "⚠️ Posting failed for Nuclear power on Instagram: The upload stopped before it finished."]
+    assert orchestrator.settle_stopped() == [] and sorted(p["text"] for p in home.problems()) == shown   # once
 
 
 def test_a_dead_publisher_keeps_what_went_live(env):

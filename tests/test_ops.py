@@ -168,6 +168,9 @@ def test_a_network_error_never_carries_the_token(monkeypatch):
     assert "SECRET-TOKEN" not in text and "could not read it" in text
 
 
-def test_account_is_a_registered_command():
-    from pipeline import approve_telegram as tg
-    assert "account" in [c for c, _ in tg.COMMANDS] and "/account" in tg.HELP
+def test_account_is_a_button_on_the_home_card(temp_db):
+    from pipeline import home
+    rows = home.home_view()[1]["inline_keyboard"]
+    assert {"text": "👤 Account", "callback_data": "h:account"} in [b for row in rows for b in row]
+    text, markup = home.account_view({"name": "account", "text": "👤 Connected accounts (live from Meta)"})
+    assert text.startswith("👤 Connected accounts") and markup["inline_keyboard"][-1] == [home.HOME]

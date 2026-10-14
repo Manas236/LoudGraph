@@ -39,7 +39,8 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py produce [--count N] [--topic ID]` | choose topics and take each run to `awaiting_approval` (default N = `cadence.videos_per_day`) |
 | `python run.py produce --run ID --from render` | re-run one run from a stage (`fetch`, `pick`, `label`, `render`, `notify`); refused for published runs or runs with a live post |
 | `python run.py produce --run ID --from render --as-new` | copy the run's inputs into a NEW run and produce that (the way to re-render a published run) |
-| `python run.py bot` | long-running: the Telegram review queue and commands, scheduled videos, publishes approved runs |
+| `python run.py bot` | long-running: the Telegram home card and review card, the make queue (one reel at a time), scheduled videos, publishes approved runs |
+| `python run.py batch [--count N] [--queue-only]` | the Telegram Make a batch from the command line: queue N distinct topics, then make the queue here one at a time (the bot does it itself when it is running) |
 | `python run.py go-live [--check-only]` | read-only Instagram + Facebook checks; for those that pass, turn posting on and test mode off (old test-mode approvals go back to review first) |
 | `python run.py publish [--run ID]` | publish approved runs now |
 | `python run.py stats [--no-summary]` | pull views / avg % watched / skip rate now, recompute topic weights, send the summary (the bot also does this every 6 h by itself) |
@@ -65,11 +66,11 @@ queued -> data_ready -> picked -> labelled -> rendered -> awaiting_approval -> a
 | pick | `pipeline/picker.py` | `pick.json` |
 | label | `pipeline/labels.py` (Gemini, optional) | `labels.json` |
 | render | `timeline.py`, `audio.py`, `render.py` | `timeline.json`, `audio.wav`, `pluck.wav`, `pad.wav`, `fx.wav`, `video.mp4`, `meta.json`, `thumb.jpg` |
-| notify | `captions.py`, `review.py` | `captions.json` (post caption options); joins the review queue, the bot sends one card at a time |
+| notify | `captions.py`, `review.py` | `captions.json` (post caption options); joins the review queue (the review card shows one reel at a time) |
 | publish | `publish_youtube.py`, `publish_instagram.py` | `publish_<platform>.json` in dry-run |
 
 All state lives in SQLite (`pipeline.db`, WAL): `runs` (incl. live render `progress` and the review
-`queue_pos`), `review_cards` (the Telegram card on screen), `make_jobs` (`/new` requests), `stage_log`,
+`queue_pos`), `make_jobs` (the make queue: New reel, batches, retries), `stage_log`,
 `posts`, `stats`, `topic_weights`, plus `kv` (the Telegram `getUpdates` offset, so a bot restart never
 re-delivers a button press; the bot heartbeat; cached health checks). The dashboard and the bot only
 read/write that state, and their buttons call the same functions (`pipeline/actions.py`).
@@ -77,52 +78,65 @@ read/write that state, and their buttons call the same functions (`pipeline/acti
 ### Telegram bot
 
 Double-click **Bot.bat** and leave it open. The bot only listens to the chat in `TELEGRAM_CHAT_ID`;
-messages and buttons from anyone else are ignored.
+messages and buttons from anyone else are ignored. **Everything is a button**: the bot's command list
+is just `/menu` (`/start` does the same), and you never need another command.
 
-**The review queue, in plain words.** Every finished video waits in one queue, oldest first. The
-bot shows you **one video at a time**: a review card with the video and four short lines (title,
-what it measures, the countries, the length) and three buttons:
+**The home card.** The first time the bot starts (and whenever you send `/menu`) it sends the home card
+and pins it. It is one message that the bot keeps editing, never a stream of new ones. It says, in
+plain words:
 
-- **✅ Approve**: the same message then updates itself while it posts: Approved, Instagram
-  uploading, Instagram posted (with the link), Facebook uploading, Facebook posted (with the link),
-  Done. If a platform fails, or a step takes longer than 10 minutes, the card says so in a few words
-  and shows a **🔁 Retry** button for that platform.
-- **❌ Reject**: the video is dropped (it stays in the dashboard Library under Rejected).
-- **⏭ Later**: the video goes to the back of the queue. If it is the only one waiting, it rests for
-  15 minutes instead of coming straight back.
+```
+🛠 Making now: Coal power (step 2 of 4: rendering 40%)
+⏳ Waiting to make: 2 (Inflation, Home broadband)
+📦 Batch: 3 of 7 ready
+👀 Ready for your review: 3
+📅 Approved, waiting to post: 1
+📣 Last posted: Meat consumption, yesterday 16:49 IST, 210 views
+```
 
-The next card arrives only after you decide on the current one and, if you approved it, after its
-posting has finished (posted or failed). Approving or rejecting in the dashboard counts too: the card
-says "in the dashboard" and the queue moves on. A video is never posted twice, even if you approve it
-in both places or tap a button twice. Buttons on older messages answer "This card is stale" and do
-nothing. If the bot restarts, it carries on with the same card instead of sending it again.
+The steps are 1 getting data, 2 rendering, 3 writing captions, 4 ready. Its buttons: **New reel**,
+**Make a batch**, **Review ready reels (N)**, **Stats**, **Account**. Every screen it turns into has a
+**Home** button. A newer `/menu` moves the card to the bottom of the chat (the old one is deleted).
 
-**Send to Telegram for approval** in the dashboard picks the card yourself: that video becomes the
-card within about 10 seconds, even while cards are paused. A card that is still waiting for your
-decision is swapped out (its video stays in the queue and comes back later); a card that is posting
-finishes first.
+- **New reel**: 5 topics that have no reel yet (the data scorer's interesting ones, mixed categories),
+  plus **More ideas**, **Surprise me**, **Type my own topic** (reply with a word or two, e.g. "coal";
+  the bot finds the dataset, or shows the matches to tap) and **Back to Home**. A pick joins the make
+  queue and the home card shows it in Waiting to make / Making now.
+- **Make a batch**: **3 / 5 / 7 reels**. The bot picks that many distinct topics you haven't made,
+  from different categories, never two from the same dataset back to back, and shows them on the
+  home card first: **Start making these N**, **Shuffle: pick others**, **Cancel**. A batch topic
+  that turns out too boring (every country moved the same way) is replaced by another one.
+- **Making**: one reel at a time (`pipeline/makequeue.py`); progress shows only on the home card. When
+  a reel is ready the bot sends at most one short note, "Reel ready: <topic>. Tap Review.", and only
+  if no earlier note is still unread and the review card is not open.
+- **Review ready reels**: the review card is one message that shows **one reel at a time**: the
+  video, its hook question, the 3 caption options and the hashtags, with **Use caption 1 / 2 / 3**,
+  **Edit caption**, **Approve and post now**, **Reject: don't post**, **Skip for now** and **Home**.
+  After each decision the same card moves to the next ready reel; after the last one it closes.
+  Skipped reels stay in Ready for review. A decision made in the dashboard moves the card on too, and
+  a reel is never posted twice. No internal id is ever shown.
+- **After posting**: the home card updates and one short message carries the post link.
+- **Errors** show on the home card in plain words, e.g. "⚠️ Rendering failed for Coal power: the
+  internet connection was interrupted.", with **Retry** and **Drop it**; never a stack trace. A post
+  that failed on one platform shows the same way, and Retry posts only that platform again.
+- **Stats**: the last Instagram reels with views, % watched, the 3-second skip rate, likes, shares
+  and saves, and **Check stats now**. **Account**: the Instagram account and Facebook Page read live
+  from Meta by id, so a renamed account shows its new name at once.
+
+**Send to Telegram for approval** in the dashboard puts that reel on the review card within about 10
+seconds.
 
 **If an upload stops half-way** (the posting process crashed, or the PC restarted), the bot notices
-within about two minutes: the unfinished platforms are marked failed with a Retry, instead of
-showing "posting…" for ever. A retry first asks Instagram / Facebook whether the earlier upload went
-live after all, and records it instead of posting a second copy.
+within about two minutes: the unfinished platforms are marked failed with a Retry on the home card,
+instead of showing "posting…" for ever. A retry first asks Instagram / Facebook whether the earlier
+upload went live after all, and records it instead of posting a second copy.
 
-**Commands** (also in the bot's menu):
+Message edits are limited to one every 3 seconds per message (a tap is answered at once), and the bot
+waits whenever Telegram asks it to slow down (HTTP 429). Buttons on older messages answer that they
+are out of date and do nothing. A restarted bot keeps the same home card.
 
-| command | what it does |
-|---|---|
-| `/new` | offers 3 topics that have no video yet (the most interesting by the data scorer) and a Random button. Tap one and a status message follows it: Fetching data, Rendering, Ready. A ready video joins the review queue. Only one video renders at a time: a pick made while another renders waits its turn, and the message says so. If the topic turns out too boring (every country moved the same way), the message says that plainly. |
-| `/ready` | lists up to 8 finished videos that are not posted yet, newest first. Tap one to make it the next card. |
-| `/status` | one message: what is rendering, the open card, how many videos wait, and whether test mode is on. |
-| `/account` | the connected Instagram account (username, name, followers, posts) and Facebook Page (name, followers), read live from Meta by id, so a renamed account shows its new name at once. |
-| `/pause`, `/resume` | stop or restart sending review cards. The open card keeps working, and the pause survives a restart. |
-| `/help` | the list of commands. |
-
-Message edits are limited to one every 3 seconds per message, and the bot waits whenever Telegram
-asks it to slow down (HTTP 429).
-
-**Post captions.** A review card also lists 3 caption options for the post and a **Caption 1 / 2 / 3**
-row to choose one (the dashboard's Review page shows the chosen one). Each option is three lines: a
+**Post captions.** The review card also lists 3 caption options for the post and a **Use caption 1 / 2 /
+3** row to choose one (the dashboard's Review page can choose and edit too). Each option is three lines: a
 hook, one plain sentence naming the metric, the countries and the years, and a question that invites
 comments. The data credit and 5 hashtags follow.
 - **Where the facts come from:** `pipeline/captions.py` computes them from the data (the most
@@ -361,12 +375,19 @@ per-platform analytics, the `.env.example` audit, that the old channel name appe
 dashboard review queue, title and platform choices, skip recovery and migration, YAML backups,
 CSRF, video Range requests, status priority, the connect steps naming every `.env` variable,
 `python dashboard/app.py` run directly, the single-instance bot, and the bot heartbeat,
-YouTube token-refresh detection and the Pacific-time quota day; and the Telegram review queue: one
-open card at a time, the next card waiting for the decision and the posting, stale buttons, a double
-approval posting once, Later and /ready ordering, /new topics and one render at a time, restart resume,
-the 10-minute stage limit, edit throttling and 429, chat filtering, the test-mode reset before going
-live, the Facebook permission check, and YouTube off skipping its upload; the dashboard's Send to
-Telegram (swapping an open card, waiting for a posting one, ignoring the pause); a publisher that
+YouTube token-refresh detection and the Pacific-time quota day; and the Telegram bot: /menu as the
+only command and the pinned home card (one card, moved down by a new /menu, kept across a restart),
+the home card's plain-word lines (making now with its step, waiting, ready, approved, last posted)
+and its problems with Retry / Drop and no ids or stack traces, New reel ideas (unmade, mixed
+categories, More ideas, Surprise me, a typed topic), batch topic selection (distinct, not already
+made or queued, never the same dataset or category back to back, shown before Start, Shuffle), a
+skipped batch topic being replaced, one render at a time with progress only on the home card and at
+most one unread "Reel ready" note, the review card showing one reel at a time and moving on after
+each decision (skip, reject, approve, dashboard decisions, Send to Telegram), caption choice and Edit
+caption by reply, the one message after posting, stale buttons, chat filtering, edit throttling and
+429, the test-mode reset before going live, the Facebook permission check, and YouTube off skipping
+its upload; caption editing (em dash blocked, Instagram's length and hashtag limits, a warning for a
+number not in the facts, the credit always added); a publisher that
 died mid-post being settled as failed, with a retry that never uploads a reel that already went live;
 and the Meta request limit (the gap between requests, shared through the database, and that no
 module calls the Graph API around it).

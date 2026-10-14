@@ -1,10 +1,19 @@
-"""The Telegram control channel and its one-at-a-time review queue, with the Bot API faked (no network)."""
+"""The button-driven Telegram bot: the pinned home card, New reel, Make a batch, the one-at-a-time review
+card, notes and errors. The Bot API is faked (no network); topic scores are pinned."""
 import json
+import random
+import re
 
 import pytest
 
 OWNER = 555
 FLOW = ["data_ready", "picked", "labelled", "rendered", "awaiting_approval"]
+RUN_ID = re.compile(r"r\d{8}-\d{6}-[0-9a-f]{4}")
+YEARS = list(range(2000, 2011))
+SERIES = {"IND": [[y, 1 + 3 * i] for i, y in enumerate(YEARS)],
+          "USA": [[y, 20 - i * 0.2] for i, y in enumerate(YEARS)],
+          "FRA": [[y, v] for y, v in zip(YEARS, [10, 13, 16, 19, 22, 25, 20, 15, 10, 7, 5])],
+          "JPN": [[y, 15 - i * 0.3] for i, y in enumerate(YEARS)]}
 
 
 class FakeTelegram:
@@ -32,6 +41,9 @@ class FakeTelegram:
     def answers(self):
         return [kw["text"] for kw in self.of("answerCallbackQuery")]
 
+    def sent(self):
+        return [m for m, _ in self.calls if m in ("sendMessage", "sendVideo")]
+
 
 class Clock:
     def __init__(self):
@@ -41,9 +53,15 @@ class Clock:
         return self.t
 
 
+SCORES = {"inflation": 95, "unemployment": 90, "coal_share": 88, "renewables_share": 87, "solar_share": 86,
+          "hydro_share": 85, "internet_users": 84, "broadband": 83, "mobile_subscriptions": 82, "co2_per_capita": 81,
+          "cereal_yield": 80, "child_mortality": 79, "health_spending": 78, "net_migration": 77,
+          "population_growth": 76, "gdp_growth": 75}
+
+
 @pytest.fixture
 def env(temp_db, tmp_path, monkeypatch, pinned_config):
-    from pipeline import accounts, actions, approve_telegram as tg
+    from pipeline import accounts, actions, approve_telegram as tg, review
     pinned_config["paths"].update(out=str(tmp_path / "out"), cache=str(tmp_path / "cache"),
                                   tokens=str(tmp_path / "tokens"))
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
@@ -53,265 +71,500 @@ def env(temp_db, tmp_path, monkeypatch, pinned_config):
     spawned = []
     monkeypatch.setattr(actions, "spawn", lambda *a: spawned.append(a) or 0)
     monkeypatch.setattr(accounts, "ready_destinations", lambda run: ["instagram", "facebook"])
+    monkeypatch.setattr(review, "topic_score", lambda t: SCORES.get(t["id"], 0.0))
     clock = Clock()
-    bot = tg.Bot(clock=clock)
+    bot = tg.Bot(clock=clock, rng=random.Random(3))
     return {"tg": tg, "db": temp_db, "fake": fake, "spawned": spawned, "bot": bot, "clock": clock}
 
 
-def waiting(db, topic="inflation", title=None):
+def waiting(db, topic="inflation", question="Who overtakes who?"):
+    """A reel waiting for review, with its video, metadata and caption options."""
+    from pipeline import captions
     from pipeline.config import run_dir
     rid = db.create_run(topic)
     for st in FLOW:
-        db.transition(rid, st, **({"countries": ["IND", "USA"]} if st == "picked" else {}))
+        db.transition(rid, st, **({"countries": ["IND", "USA", "FRA", "JPN"]} if st == "picked" else {}))
     d = run_dir(rid)
     (d / "video.mp4").write_bytes(b"\0" * 64)
-    (d / "meta.json").write_text(json.dumps({"title": title or f"Video about {topic}", "duration_seconds": 41.6}))
+    (d / "meta.json").write_text(json.dumps({"title": f"Video about {topic}", "duration_seconds": 22.4,
+                                             "opening": {"question": question}}))
+    (d / "data.json").write_text(json.dumps({"topic_id": topic, "series": SERIES}))
+    (d / "pick.json").write_text(json.dumps({"countries": ["IND", "USA", "FRA", "JPN"], "x_start": 2000, "x_end": 2010}))
+    captions.generate_for_run(rid, llm=False)
     return rid
 
 
-def press(e, data, message_id, chat=OWNER, user=OWNER, chat_type="private"):
+def say(e, text, chat=OWNER, user=OWNER, reply_to=None):
+    e["fake"].next_id += 1
+    m = {"message_id": e["fake"].next_id, "chat": {"id": chat, "type": "private"}, "from": {"id": user}, "text": text}
+    if reply_to:
+        m["reply_to_message"] = {"message_id": reply_to}
+    e["bot"].on_message(m)
+    return m["message_id"]
+
+
+def press(e, data, message_id, chat=OWNER, user=OWNER):
+    before = len(e["fake"].of("answerCallbackQuery"))
     e["bot"].on_callback({"id": "cb", "data": data, "from": {"id": user},
-                          "message": {"message_id": message_id, "chat": {"id": chat, "type": chat_type}}})
-    return e["fake"].answers()[-1] if e["fake"].of("answerCallbackQuery") else None
+                          "message": {"message_id": message_id, "chat": {"id": chat, "type": "private"}}})
+    answers = e["fake"].answers()
+    return answers[-1] if len(answers) > before else None
 
 
-def card_button(card, action):
-    return f"c:{action}:{card['id']}"
+def menu(e):
+    from pipeline import home
+    say(e, "/menu")
+    return home.home_msg()
 
 
-def publisher_finishes(db, rid, **status):
-    for platform, st in status.items():
-        db.upsert_post(rid, platform, st, url=f"https://example.com/{platform}" if st == "live" else None,
-                       message="boom" if st == "failed" else None)
-    db.transition(rid, "publishing")
-    db.transition(rid, "published")
+def home_text(e):
+    """What the home card shows now (its last edit or the message that sent it)."""
+    from pipeline import home
+    mid = home.home_msg()
+    texts = [kw["text"] for m, kw in e["fake"].calls if m == "editMessageText" and kw["message_id"] == mid]
+    return texts[-1] if texts else [kw["text"] for kw in e["fake"].of("sendMessage")
+                                    if kw.get("reply_markup", {}).get("inline_keyboard") and "🏠" in kw["text"]][-1]
 
 
-# ------------------------------------------------------------------ one card at a time
-
-def test_only_one_open_card_at_a_time(env):
-    from pipeline import review
-    db, bot, fake = env["db"], env["bot"], env["fake"]
-    first, second, third = waiting(db, "inflation"), waiting(db, "gdp_growth"), waiting(db, "unemployment")
-    bot.tick()
-    bot.tick()
-    bot.dispatch()
-    assert len(fake.of("sendVideo")) == 1
-    card = review.current_card()
-    assert card["run_id"] == first and card["state"] == "open"
-    assert review.create_card(second) is None            # the DB refuses a second open card
-    sent = fake.of("sendVideo")[0]
-    assert [b["text"] for b in sent["reply_markup"]["inline_keyboard"][0]] == ["✅ Approve", "❌ Reject", "⏭ Later"]
-    caption = sent["caption"]
-    assert caption.splitlines()[0] == "🎬 Video about inflation" and "⏱ 42 s" in caption
-    assert "India, United States" in caption and "score" not in caption.lower()
+def buttons(markup):
+    return [b["text"] for row in markup["inline_keyboard"] for b in row]
 
 
-def test_next_card_waits_for_decision_and_posting(env):
-    from pipeline import review
-    db, bot, fake, clock = env["db"], env["bot"], env["fake"], env["clock"]
-    first, second = waiting(db, "inflation"), waiting(db, "gdp_growth")
-    bot.tick()
-    card = review.current_card()
-    assert press(env, card_button(card, "a"), card["message_id"]) == "Approved — posting now."
-    assert env["spawned"] == [("publish", "--run", first)]
-    db.upsert_post(first, "instagram", "uploading")
-    for _ in range(3):
-        clock.t += 5
-        bot.tick()
-    assert len(fake.of("sendVideo")) == 1                 # still posting: no next card
-    caption = fake.of("editMessageCaption")[-1]["caption"]
-    assert "✅ Approved" in caption and "📸 Instagram: uploading…" in caption and "📘 Facebook: waiting" in caption
-    publisher_finishes(db, first, instagram="live", facebook="live")
-    clock.t += 5
-    bot.tick()
-    done = review.get_card(card["id"])
-    assert done["state"] == "done" and done["slot"] is None
-    assert len(fake.of("sendVideo")) == 2 and review.current_card()["run_id"] == second
-    clock.t += 5
-    bot.tick()
-    final = [e["caption"] for e in fake.of("editMessageCaption") if e["message_id"] == card["message_id"]][-1]
-    assert "Instagram: posted — https://example.com/instagram" in final and final.endswith("🏁 Done")
-    assert len(final) <= 1024
+def tick(e, seconds=5):
+    e["clock"].t += seconds
+    e["bot"].tick()
 
 
-def test_reject_and_later_move_the_queue(env):
-    from pipeline import review
-    db, bot, fake, clock = env["db"], env["bot"], env["fake"], env["clock"]
-    first, second = waiting(db, "inflation"), waiting(db, "gdp_growth")
-    bot.tick()
-    card = review.current_card()
-    assert press(env, card_button(card, "l"), card["message_id"]) == "Moved to the back of the queue."
-    assert [r["id"] for r in review.queue()] == [second, first]
-    card2 = review.current_card()
-    assert card2["run_id"] == second and len(fake.of("sendVideo")) == 2
-    assert press(env, card_button(card2, "r"), card2["message_id"]) == "Rejected."
-    assert db.get_run(second)["stage"] == "rejected"
-    assert review.current_card()["run_id"] == first        # the Later one comes back after the others
-    card3 = review.current_card()
-    press(env, card_button(card3, "l"), card3["message_id"])
-    clock.t += 5
-    bot.tick()
-    assert review.current_card() is None                   # the only one left rests instead of bouncing back
+# ------------------------------------------------------------------ the menu and the home card
+
+def test_menu_is_the_only_command_and_start_opens_the_pinned_home_card(env):
+    from pipeline import home
+    tg, fake = env["tg"], env["fake"]
+    tg.register_commands()
+    assert [c["command"] for c in fake.of("setMyCommands")[0]["commands"]] == ["menu"]
+    typed = say(env, "/start")
+    first = home.home_msg()
+    assert fake.of("pinChatMessage")[-1]["message_id"] == first
+    assert {"chat_id": str(OWNER), "message_id": typed} in fake.of("deleteMessage")      # the /start itself goes
+    card = fake.of("sendMessage")[-1]
+    assert card["text"].startswith("🏠 Graphony") and buttons(card["reply_markup"]) == [
+        "🆕 New reel", "📦 Make a batch", "👀 Review ready reels (0)", "📊 Stats", "👤 Account"]
+    say(env, "/menu")                                         # a new /menu moves the one home card down
+    assert home.home_msg() != first and {"chat_id": str(OWNER), "message_id": first} in fake.of("deleteMessage")
+    assert fake.of("pinChatMessage")[-1]["message_id"] == home.home_msg()
+    say(env, "/new")                                          # an old command just brings the menu
+    assert len([k for k in fake.of("sendMessage") if k["text"].startswith("🏠")]) == 3
 
 
-# ------------------------------------------------------------------ stale buttons, double approvals
-
-def test_stale_buttons_do_nothing(env):
-    from pipeline import review
-    db, bot = env["db"], env["bot"]
-    first, second = waiting(db, "inflation"), waiting(db, "gdp_growth")
-    bot.tick()
-    card = review.current_card()
-    assert press(env, f"a:{first}", 9) == "This card is stale"                          # a pre-queue message
-    assert press(env, f"r:{second}", 8) == "This card is stale"
-    assert press(env, card_button(card, "a"), card["message_id"] + 50) == "This card is stale"  # wrong message
-    assert press(env, f"c:a:{card['id'] + 7}", card["message_id"]) == "This card is stale"    # wrong card
-    assert press(env, "g:whatever", 3) == "This card is stale"
-    assert db.get_run(first)["stage"] == "awaiting_approval" and env["spawned"] == []
-    press(env, card_button(card, "r"), card["message_id"])
-    assert press(env, card_button(card, "a"), card["message_id"]) == "This card is stale"   # closed card
-    assert db.get_run(first)["stage"] == "rejected" and env["spawned"] == []
+def test_the_first_bot_start_sends_the_home_card_and_a_restart_only_edits_it(env):
+    from pipeline import home
+    tg, fake = env["tg"], env["fake"]
+    tg.start(env["bot"])
+    assert len(fake.sent()) == 1 and home.home_msg() and fake.of("setMyCommands")
+    waiting(env["db"])
+    restarted = tg.Bot(clock=env["clock"])
+    tg.start(restarted)
+    assert len(fake.sent()) == 1                                # no second home card
+    assert "Ready for your review: 1" in fake.of("editMessageText")[-1]["text"]
 
 
-def test_double_approval_posts_once(env, monkeypatch, pinned_config):
-    from pipeline import accounts, actions, orchestrator, publish_instagram, review
-    from pipeline.lock import publish_lock, single_instance
-    db, bot = env["db"], env["bot"]
-    rid = waiting(db)
-    bot.tick()
-    card = review.current_card()
-    press(env, card_button(card, "a"), card["message_id"])
-    assert press(env, card_button(card, "a"), card["message_id"]) == "Already approved — it is posting."
-    with pytest.raises(db.TransitionError):
-        actions.approve(rid, "dashboard")                  # the dashboard button after Telegram
-    assert env["spawned"] == [("publish", "--run", rid)]
-    # the publisher itself: a second run of it, or one running in parallel, uploads nothing again
-    calls = []
-    pinned_config["youtube"]["enabled"] = False               # Instagram is this run's only destination
-    monkeypatch.setattr(accounts, "ready_destinations", lambda run: ["instagram"])
-    monkeypatch.setattr(publish_instagram, "publish", lambda *a: calls.append(a) or "dry_run")
-    (env["tg"].run_dir(rid) / "meta.json").write_text(json.dumps({"title": "t"}))
-    with single_instance(publish_lock(rid)):
-        assert orchestrator.publish_run(rid) is False      # another publisher holds this run
-    assert orchestrator.publish_run(rid) is True
-    assert orchestrator.publish_run(rid) is False
-    assert len(calls) == 1
+def test_home_card_says_what_is_happening_in_plain_words(env):
+    """Making now with its step, waiting to make, ready for review, approved, last posted, and a problem."""
+    from pipeline import home, makequeue
+    db = env["db"]
+    for topic in ("unemployment", "coal_share"):
+        waiting(db, topic)
+    approved = waiting(db, "broadband")
+    db.transition(approved, "approved")
+    posted = waiting(db, "internet_users")
+    db.transition(posted, "approved")
+    db.transition(posted, "publishing")
+    db.upsert_post(posted, "instagram", "live", remote_id="m1", url="https://instagram.com/reel/x")
+    db.transition(posted, "published")
+    post = db.get_posts(posted)[0]
+    db.add_stats(post["id"], views=1234)
+    making = makequeue.add_job("inflation")
+    for tid in ("solar_share", "hydro_share"):
+        makequeue.add_job(tid)
+    rid = makequeue.claim(making)
+    lines = home.home_view()[0].splitlines()
+    assert "🛠 Making now: Inflation (step 1 of 4: getting data)" in lines
+    db.transition(rid, "data_ready")
+    db.set_progress(rid, 0.47)
+    text, markup = home.home_view()
+    assert "🛠 Making now: Inflation (step 2 of 4: rendering 40%)" in text
+    assert "⏳ Waiting to make: 2 (Solar power, Hydropower)" in text
+    assert "👀 Ready for your review: 2" in text and "📅 Approved, waiting to post: 1" in text
+    assert f"📣 Last posted: Internet access, {home.when(post['created_at'])}, 1,234 views" in text
+    assert "👀 Review ready reels (2)" in buttons(markup)
+    for st in ("picked", "labelled", "rendered"):
+        db.transition(rid, st)
+    assert "(step 3 of 4: writing captions)" in home.home_view()[0]
+    db.fail(rid, "render", f"RuntimeError: timeline is 26.1s for {rid}, outside 20-25s; re-pick")
+    text, markup = home.home_view()
+    assert "⚠️ Rendering failed for Inflation: timeline is 26.1s for this video, outside 20-25s; re-pick." in text
+    assert buttons(markup)[:2] == ["🔁 Retry Inflation", "🗑 Drop it"]
+    assert not RUN_ID.search(text + json.dumps(markup)) and "RuntimeError" not in text and "Traceback" not in text
+    assert "🛠 Making now: nothing" in text
 
 
-def test_dashboard_decision_updates_the_card_and_advances(env):
-    from pipeline import actions, review
-    db, bot, fake, clock = env["db"], env["bot"], env["fake"], env["clock"]
-    first, second, third = waiting(db, "inflation"), waiting(db, "gdp_growth"), waiting(db, "unemployment")
-    bot.tick()
-    card = review.current_card()
-    actions.reject(first, "dashboard")
-    clock.t += 5
-    bot.tick()
-    assert review.get_card(card["id"])["outcome"] == "rejected"
-    edit = [e for e in fake.of("editMessageCaption") if e["message_id"] == card["message_id"]][-1]
-    assert edit["caption"].endswith("❌ Rejected in the dashboard") and edit["reply_markup"] == {"inline_keyboard": []}
-    card2 = review.current_card()
-    assert card2["run_id"] == second
-    actions.approve(second, "dashboard")
-    assert press(env, card_button(card2, "a"), card2["message_id"]) == "Already handled in the dashboard."
-    assert env["spawned"] == [("publish", "--run", second)]           # posted once
-    clock.t += 5
-    bot.tick()
-    assert review.get_card(card2["id"])["state"] == "posting"
-    assert "✅ Approved in the dashboard" in fake.of("editMessageCaption")[-1]["caption"]
-    assert len(fake.of("sendVideo")) == 2                             # waits for posting
+def test_retry_and_drop_on_a_problem(env):
+    from pipeline import home, makequeue
+    db = env["db"]
+    hm = menu(env)
+    job = makequeue.add_job("inflation")
+    rid = makequeue.claim(job)
+    db.fail(rid, "fetch", "ConnectionError: network unreachable")
+    ref = db.get_run(rid)["ref"]
+    assert "Rendering failed for Inflation: The internet connection was interrupted." in home.home_view()[0]
+    assert press(env, f"h:retry:{ref}", hm) == "Trying again."
+    assert [j["topic_id"] for j in makequeue.jobs("queued")] == ["inflation"] and not home.problems()
+    rid2 = makequeue.claim(makequeue.jobs("queued")[0])
+    db.fail(rid2, "render", "ffmpeg: broken pipe")
+    assert press(env, f"h:drop:{db.get_run(rid2)['ref']}", hm) == "Dropped."
+    assert not home.problems() and press(env, f"h:drop:{db.get_run(rid2)['ref']}", hm) == "That problem is already gone."
 
 
-def test_restart_resumes_the_same_card(env):
-    from pipeline import approve_telegram, review
+# ------------------------------------------------------------------ New reel
+
+def test_new_reel_offers_five_unmade_ideas_from_mixed_categories(env):
+    from pipeline import home, ideas, makequeue
     db, fake = env["db"], env["fake"]
-    rid = waiting(db)
-    env["bot"].tick()
-    card = review.current_card()
-    restarted = approve_telegram.Bot(clock=env["clock"])
-    restarted.tick()
-    restarted.tick()
-    assert len(fake.of("sendVideo")) == 1 and review.current_card()["id"] == card["id"]
-    env["bot"] = restarted
-    assert press(env, card_button(card, "a"), card["message_id"]) == "Approved — posting now."
-    assert db.get_run(rid)["stage"] == "approved"
+    waiting(db, "inflation")                                   # already made: never suggested again
+    hm = menu(env)
+    assert press(env, "h:new", hm) == "Topic ideas"
+    edit = fake.of("editMessageText")[-1]
+    picks = [b["callback_data"][7:] for row in edit["reply_markup"]["inline_keyboard"] for b in row
+             if b["callback_data"].startswith("h:pick:")]
+    assert len(picks) == 5 and "inflation" not in picks
+    cats = [ideas.pool()[[t["id"] for t in ideas.pool()].index(p)]["category"] for p in picks]
+    assert len(set(cats)) == 5                                  # five categories in five ideas
+    assert buttons(edit["reply_markup"])[-4:] == ["🔄 More ideas", "🎲 Surprise me", "⌨️ Type my own topic",
+                                                  "🏠 Back to Home"]
+    press(env, "h:more:1", hm)
+    more = [b["callback_data"][7:] for row in fake.of("editMessageText")[-1]["reply_markup"]["inline_keyboard"]
+            for b in row if b["callback_data"].startswith("h:pick:")]
+    assert not set(more) & set(picks)
+    assert press(env, f"h:pick:{picks[0]}", hm).startswith("Added: ")
+    assert [j["topic_id"] for j in makequeue.jobs("queued")] == [picks[0]]
+    assert home.screen()["name"] == "home" and "✅ Added to the make queue" in home_text(env)
+    assert press(env, f"h:pick:{picks[0]}", hm) == "That topic already has a reel."
+    tick(env)
+    assert f"Making now: {home.review.topic_name(picks[0])} (step 1 of 4: getting data)" in home_text(env)
+    assert env["spawned"][-1][:2] == ("produce", "--run")
 
 
-def test_a_card_left_half_sent_by_a_crash_is_sent_again(env):
+def test_surprise_me_and_typing_my_own_topic(env):
+    from pipeline import home, makequeue
+    fake = env["fake"]
+    hm = menu(env)
+    assert press(env, "h:surprise", hm).startswith("Added: ")
+    assert makequeue.jobs("queued")[0]["source"] == "surprise"
+    assert press(env, "h:type", hm) == "Reply with your topic."
+    prompt = fake.of("sendMessage")[-1]
+    assert prompt["reply_markup"]["force_reply"] is True and home.awaiting()["kind"] == "topic"
+    reply = say(env, "coal power please", reply_to=fake.next_id)
+    assert makequeue.jobs("queued")[-1]["topic_id"] == "coal_share" and home.awaiting() is None
+    deleted = [d["message_id"] for d in fake.of("deleteMessage")]
+    assert fake.next_id - 1 in deleted and reply in deleted     # the question and the answer are tidied away
+    press(env, "h:type", hm)
+    say(env, "zebra crossings")
+    assert home.screen()["name"] == "typed" and "I don't have a dataset for that" in home_text(env)
+    press(env, "h:type", hm)
+    say(env, "electricity")                                     # several matches: tap the one meant
+    shown = fake.of("editMessageText")[-1]
+    assert "Tap the one you meant" in shown["text"] and buttons(shown["reply_markup"])[:2] == ["Solar power · energy", "Hydropower · energy"]
+
+
+# ------------------------------------------------------------------ Make a batch
+
+@pytest.mark.parametrize("seed", range(6))
+def test_batch_topics_are_distinct_varied_and_deduplicated(env, seed):
+    from pipeline import ideas, makequeue
+    from pipeline.topics import get_topic
+    db = env["db"]
+    for made in ("inflation", "coal_share"):
+        waiting(db, made)
+    makequeue.add_job("unemployment")                           # queued counts as made
+    batch = ideas.pick_batch(7, random.Random(seed))
+    ids = [t["id"] for t in batch]
+    assert len(ids) == 7 and len(set(ids)) == 7
+    assert not {"inflation", "coal_share", "unemployment"} & set(ids)
+    for a, b in zip(batch, batch[1:]):
+        assert ideas.dataset_key(a) != ideas.dataset_key(b)     # never the same dataset back to back
+        assert a["category"] != b["category"]
+    assert len({t["category"] for t in batch}) >= 5
+    assert ideas.dataset_key(get_topic("coal_share")) == ideas.dataset_key(get_topic("solar_share")) == "owid:energy-data"
+    assert ideas.dataset_key(get_topic("internet_users")) == ideas.dataset_key(get_topic("broadband")) == "wb:IT.NET"
+
+
+def test_make_a_batch_shows_the_topics_first_then_starts_them(env):
+    from pipeline import home, makequeue
+    fake = env["fake"]
+    hm = menu(env)
+    press(env, "h:batch", hm)
+    assert buttons(fake.of("editMessageText")[-1]["reply_markup"]) == ["3 reels", "5 reels", "7 reels", "🏠 Home"]
+    press(env, "h:bn:7", hm)
+    first = makequeue.pending_batch()
+    shown = fake.of("editMessageText")[-1]
+    assert len(first) == 7 and shown["text"].startswith("📦 Batch of 7, not started yet:")
+    assert buttons(shown["reply_markup"]) == ["▶️ Start making these 7", "🔀 Shuffle: pick others", "✖️ Cancel", "🏠 Home"]
+    assert makequeue.jobs("queued") == [] and env["spawned"] == []          # nothing starts before Start
+    press(env, "h:bshuffle", hm)
+    second = makequeue.pending_batch()
+    assert len(second) == 7 and not set(first) & set(second)
+    press(env, "h:bcancel", hm)
+    assert makequeue.pending_batch() == [] and home.screen()["name"] == "home"
+    press(env, "h:bn:3", hm)
+    chosen = makequeue.pending_batch()
+    assert press(env, "h:bgo", hm) == "Started."
+    jobs = makequeue.jobs("queued")
+    assert [j["topic_id"] for j in jobs] == chosen and len({j["batch_id"] for j in jobs}) == 1
+    tick(env)
+    assert len(env["spawned"]) == 1                               # one at a time
+    assert "📦 Batch: 0 of 3 ready" in home_text(env) and "⏳ Waiting to make: 2" in home_text(env)
+
+
+def test_a_skipped_batch_topic_is_replaced_and_a_failed_one_is_shown(env):
+    from pipeline import home, ideas, makequeue
+    from pipeline.topics import get_topic
+    db = env["db"]
+    bid = makequeue.start_batch(["inflation", "coal_share", "internet_users"])
+    tick(env)
+    first = makequeue.jobs("running")[0]
+    db.transition(first["run_id"], "data_ready")
+    db.skip(first["run_id"], "low variety: no falling country (net < -0.5)")
+    tick(env)
+    batch = makequeue.batch_jobs(bid)
+    assert [j["source"] for j in batch] == ["batch", "batch", "batch", "replacement"]
+    new = get_topic(batch[-1]["topic_id"])
+    assert new["id"] not in ("inflation", "coal_share", "internet_users")
+    assert ideas.dataset_key(new) != "wb:IT.NET" and new["category"] != "tech"   # it follows internet users
+    assert new["category"] not in ("energy", "tech")              # a category the batch does not have yet
+    assert not [p for p in home.problems() if p["run"]["id"] == first["run_id"]]   # replaced, not a problem
+    second = makequeue.jobs("running")[0]
+    db.fail(second["run_id"], "render", "ffmpeg: broken pipe")
+    tick(env)
+    assert len(makequeue.batch_jobs(bid)) == 4                    # a failure is not replaced ...
+    assert "⚠️ Rendering failed for Coal power" in home.home_view()[0]   # ... it waits on the home card
+
+
+# ------------------------------------------------------------------ making, one at a time
+
+def test_rendering_is_one_at_a_time_with_progress_only_on_the_home_card_and_one_ready_note(env):
+    from pipeline import makequeue
+    db, fake = env["db"], env["fake"]
+    hm = menu(env)
+    for tid in ("inflation", "coal_share", "internet_users"):
+        makequeue.add_job(tid)
+    tick(env)
+    assert len(env["spawned"]) == 1
+    job = makequeue.jobs("running")[0]
+    sent_before = len(fake.sent())
+    for st in FLOW[:3]:
+        db.transition(job["run_id"], st)
+    db.set_progress(job["run_id"], 0.61)
+    tick(env)
+    assert "rendering 60%" in home_text(env) and len(fake.sent()) == sent_before   # progress: edits only
+    assert all(e["message_id"] == hm for e in fake.of("editMessageText"))
+    db.transition(job["run_id"], "rendered")
+    db.transition(job["run_id"], "awaiting_approval")
+    tick(env)
+    notes = [kw for kw in fake.of("sendMessage") if kw["text"].startswith("🔔")]
+    assert [n["text"] for n in notes] == ["🔔 Reel ready: Inflation. Tap Review."]
+    assert buttons(notes[0]["reply_markup"]) == ["👀 Review it now"]
+    assert len(env["spawned"]) == 2                               # the next one starts
+    job2 = makequeue.jobs("running")[0]
+    for st in FLOW:
+        db.transition(job2["run_id"], st)
+    tick(env)
+    assert len([kw for kw in fake.of("sendMessage") if kw["text"].startswith("🔔")]) == 1   # the first is unread
+    assert "Ready for your review: 2" in home_text(env)
+    note_id = int(env["db"].kv_get("home:ready_note"))
+    assert press(env, "r:open", note_id) == "2 reels to review."
+    assert {"chat_id": str(OWNER), "message_id": note_id} in fake.of("deleteMessage") and not env["db"].kv_get("home:ready_note")
+
+
+# ------------------------------------------------------------------ the review card
+
+def test_review_shows_one_reel_at_a_time_and_the_same_card_moves_on(env):
+    from pipeline import captions, review
+    db, fake = env["db"], env["fake"]
+    a, b, c = waiting(db, "inflation"), waiting(db, "coal_share", "Which country ends last?"), waiting(db, "broadband")
+    hm = menu(env)
+    assert press(env, "h:review", hm) == "3 reels to review."
+    assert len(fake.of("sendVideo")) == 1
+    card = fake.of("sendVideo")[0]
+    text = card["caption"]
+    assert text.startswith("🎬 Reel 1 of 3 for review: Inflation") and "❓ Hook question: Who overtakes who?" in text
+    opts = captions.load(a)
+    assert all(v["hook"] in text and v["question"] in text for v in opts["variants"])
+    assert " ".join(opts["hashtags"]) in text and len(text) <= 1024 and not RUN_ID.search(text)
+    assert buttons(card["reply_markup"]) == ["✔️ Caption 1", "Use caption 2", "Use caption 3", "✏️ Edit caption",
+                                             "✅ Approve and post now", "❌ Reject: don't post", "⏭ Skip for now",
+                                             "🏠 Home"]
+    mid = review.card_state()["mid"]
+    ref = lambda rid: db.get_run(rid)["ref"]  # noqa: E731
+    assert press(env, f"v:ok:{ref(a)}", mid) == "Approved: posting it now."
+    assert db.get_run(a)["stage"] == "approved" and env["spawned"] == [("publish", "--run", a)]
+    media = fake.of("editMessageMedia")[-1]
+    assert media["message_id"] == mid and media["media"]["caption"].startswith("🎬 Reel 1 of 2 for review: Coal power")
+    assert len(fake.of("sendVideo")) == 1                          # the same card, no new message
+    assert press(env, f"v:ok:{ref(a)}", mid) == review.STALE       # the reel already moved on
+    assert press(env, f"v:skip:{ref(b)}", mid) == "Skipped for now: it stays in Ready for review."
+    assert fake.of("editMessageMedia")[-1]["media"]["caption"].startswith("🎬 Reel 1 of 1 for review: Home broadband")
+    answer = press(env, f"v:no:{ref(c)}", mid)
+    assert answer == "Rejected: it won't be posted. 1 skipped reel stays in Ready for review."
+    assert db.get_run(c)["stage"] == "rejected" and db.get_run(b)["stage"] == "awaiting_approval"
+    assert review.card_state() is None and {"chat_id": str(OWNER), "message_id": mid} in fake.of("deleteMessage")
+    assert press(env, f"v:ok:{ref(b)}", mid) == review.STALE       # a closed card does nothing
+    assert len(fake.of("sendVideo")) == 1 and not [k for k in fake.of("sendMessage") if k["text"].startswith("🔔")]
+
+
+def test_home_on_the_review_card_closes_it_and_reopening_starts_at_the_front(env):
     from pipeline import review
-    rid = waiting(env["db"])
-    cid = review.create_card(rid)                        # the bot died during sendVideo
-    env["bot"].tick()
-    assert review.get_card(cid)["outcome"] == "unsent"
-    assert review.current_card()["run_id"] == rid and len(env["fake"].of("sendVideo")) == 1
+    db = env["db"]
+    a, b = waiting(db, "inflation"), waiting(db, "coal_share")
+    hm = menu(env)
+    press(env, "h:review", hm)
+    mid = review.card_state()["mid"]
+    press(env, f"v:skip:{db.get_run(a)['ref']}", mid)
+    assert press(env, "v:home", mid) == "Back to Home."
+    assert review.card_state() is None
+    press(env, "h:review", hm)
+    assert review.card_state()["run"] == b                          # a skipped reel went to the back
 
 
-# ------------------------------------------------------------------ posting problems
-
-def test_a_stage_over_ten_minutes_fails_on_the_card_and_the_queue_advances(env):
-    from pipeline import review
-    from pipeline.lock import publish_lock, single_instance
-    db, bot, fake, clock = env["db"], env["bot"], env["fake"], env["clock"]
-    first, second = waiting(db, "inflation"), waiting(db, "gdp_growth")
-    bot.tick()
-    card = review.current_card()
-    press(env, card_button(card, "a"), card["message_id"])
-    db.transition(first, "publishing")
-    db.upsert_post(first, "instagram", "uploading")
-    old = "2020-01-01T00:00:00Z"
-    with db.db() as c:
-        c.execute("UPDATE posts SET updated_at=?", (old,))
-        c.execute("UPDATE review_cards SET approved_at=?", (old,))
-    with single_instance(publish_lock(first)):             # the publisher is still running, stuck on Instagram
-        clock.t += 5
-        bot.tick()
-        done = review.get_card(card["id"])
-        assert done["state"] == "done" and done["watch"] == 1   # finished, but still following the upload
-        assert review.current_card()["run_id"] == second
-        assert "still posting" in press(env, f"c:t:{card['id']}:instagram", card["message_id"])  # never doubled
-    text, markup = review.card_view(done)
-    db.upsert_post(first, "instagram", "live", url="https://example.com/late")   # it finishes after all
-    db.transition(first, "published")
-    clock.t += 5
-    bot.tick()
-    late = review.get_card(card["id"])
-    assert late["watch"] == 0 and "Instagram: posted — https://example.com/late" in review.card_view(late)[0]
-    assert "Instagram: failed — took longer than 10 minutes" in text
-    assert "Facebook: failed — didn't start within 10 minutes" in text
-    assert [b[0]["callback_data"] for b in markup["inline_keyboard"]] == [f"c:t:{card['id']}:instagram",
-                                                                            f"c:t:{card['id']}:facebook"]
+def test_caption_options_and_edit_caption_on_the_review_card(env):
+    from pipeline import captions, home, review
+    db, fake = env["db"], env["fake"]
+    rid = waiting(db, "inflation")
+    hm = menu(env)
+    press(env, "h:review", hm)
+    mid, ref = review.card_state()["mid"], db.get_run(rid)["ref"]
+    assert press(env, f"v:cap:{ref}:1", mid) == "Caption 2 chosen."
+    edit = fake.of("editMessageCaption")[-1]
+    assert edit["message_id"] == mid and buttons(edit["reply_markup"])[:3] == ["Use caption 1", "✔️ Caption 2", "Use caption 3"]
+    assert press(env, f"v:edit:{ref}", mid) == "Reply with the new caption."
+    prompt_id = fake.next_id
+    assert fake.of("sendMessage")[-1]["reply_markup"]["force_reply"] is True
+    bad = say(env, "India rises — fast", reply_to=prompt_id)
+    refused = fake.of("sendMessage")[-1]
+    assert refused["text"].startswith("❌ Not saved: Remove the em dash") and "edit" not in captions.load(rid)
+    say(env, "India went from 1.0 to 31.0 by 2010.\nWho saw 1999 coming?\n#india #inflation", reply_to=fake.next_id)
+    c = captions.load(rid)
+    assert c["edit"]["text"] == "India went from 1.0 to 31.0 by 2010.\nWho saw 1999 coming?"
+    assert c["edit"]["hashtags"] == ["#india", "#inflation"] and home.awaiting() is None
+    deleted = {d["message_id"] for d in fake.of("deleteMessage")}
+    assert {prompt_id, bad, fake.next_id} <= deleted                 # the prompts and replies are tidied away
+    shown = fake.of("editMessageCaption")[-1]
+    assert shown["message_id"] == mid and "✍️ Caption: your own text" in shown["caption"]
+    assert "⚠️ Check 1999" in shown["caption"] and "#india #inflation" in shown["caption"]
+    assert len(fake.of("sendVideo")) == 1                            # the same card was updated
+    assert captions.compose(c).endswith("Data: World Bank WDI (CC BY 4.0).\n\n#india #inflation")
 
 
-def test_failed_platform_gets_retry_on_the_card(env):
-    from pipeline import review
-    db, bot, clock = env["db"], env["bot"], env["clock"]
-    rid = waiting(db)
-    bot.tick()
-    card = review.current_card()
-    press(env, card_button(card, "a"), card["message_id"])
-    publisher_finishes(db, rid, instagram="live", facebook="failed")
-    clock.t += 5
-    bot.tick()
-    done = review.get_card(card["id"])
-    text, markup = review.card_view(done)
-    assert "📘 Facebook: failed — boom" in text and text.endswith("🏁 Done")
-    assert markup["inline_keyboard"] == [[{"text": "🔁 Retry Facebook", "callback_data": f"c:t:{card['id']}:facebook"}]]
-    assert press(env, f"c:t:{card['id']}:instagram", card["message_id"]) == "This card is stale"
-    assert press(env, f"c:t:{card['id']}:facebook", card["message_id"]) == "Trying Facebook again."
+def test_the_dashboard_moves_the_card_on_and_can_send_a_reel_to_it(env):
+    from pipeline import actions, health, review
+    db, fake = env["db"], env["fake"]
+    a, b, c = waiting(db, "inflation"), waiting(db, "coal_share"), waiting(db, "broadband")
+    hm = menu(env)
+    press(env, "h:review", hm)
+    actions.reject(a, "dashboard")
+    tick(env)
+    assert review.card_state()["run"] == b and len(fake.of("editMessageMedia")) == 1
+    health.beat("bot")
+    assert actions.send_to_telegram(c, "dashboard") == "Sent to Telegram — approve it there."
+    assert review.telegram_state(c) == "next" and env["spawned"] == []
+    tick(env)
+    assert review.card_state()["run"] == c and review.telegram_state(c) == "card"
+    assert len(fake.of("sendVideo")) == 1                            # still the one card
+
+
+# ------------------------------------------------------------------ after posting
+
+def test_one_short_message_with_the_link_after_a_reel_posts(env):
+    from pipeline import home, review
+    db, fake = env["db"], env["fake"]
+    rid = waiting(db, "inflation")
+    hm = menu(env)
+    tick(env)                                                         # first tick: earlier posts are known
+    press(env, "h:review", hm)
+    press(env, f"v:ok:{db.get_run(rid)['ref']}", review.card_state()["mid"])
+    db.transition(rid, "publishing")
+    tick(env)
+    assert "📤 Posting now: Inflation" in home_text(env)
+    db.upsert_post(rid, "instagram", "live", url="https://www.instagram.com/reel/abc/")
+    db.upsert_post(rid, "facebook", "failed", message="ConnectionError: network down")
+    db.transition(rid, "published")
+    tick(env)
+    tick(env)
+    posted = [k["text"] for k in fake.of("sendMessage") if k["text"].startswith("✅ Posted")]
+    assert posted == ["✅ Posted: Inflation\n📸 Instagram: https://www.instagram.com/reel/abc/\n"
+                      "📘 Facebook: failed (The internet connection was interrupted)"]
+    text = home_text(env)
+    assert "📣 Last posted: Inflation, today" in text
+    assert "⚠️ Posting failed for Inflation on Facebook: The internet connection was interrupted." in text
+    assert press(env, f"h:retry:{db.get_run(rid)['ref']}:facebook", hm) == "Trying again."
     assert env["spawned"][-1] == ("publish", "--run", rid, "--platform", "facebook")
-    assert "Facebook: retrying…" in review.card_view(review.get_card(card["id"]))[0]
 
 
-def test_caption_stays_under_the_telegram_limit(env):
-    from pipeline import review
-    long = review.fit("🎬 " + "x" * 3000, ["✅ Approved", "📸 Instagram: posted — https://e.com/" + "y" * 200])
-    assert len(long) <= 1024 and long.endswith("y" * 50)
+# ------------------------------------------------------------------ safety
+
+def test_only_the_owner_chat_is_listened_to(env):
+    from pipeline import home
+    db, fake = env["db"], env["fake"]
+    hm = menu(env)
+    before = len(fake.calls)
+    say(env, "/menu", chat=999, user=999)
+    say(env, "/menu", chat=OWNER, user=999)
+    press(env, "h:new", hm, chat=999, user=999)
+    press(env, "h:batch", hm, chat=OWNER, user=999)
+    assert len(fake.calls) == before and home.screen()["name"] == "home"
+
+
+def test_old_and_stale_buttons_do_nothing(env):
+    from pipeline import makequeue, review
+    db = env["db"]
+    rid = waiting(db)
+    hm = menu(env)
+    for data in ("c:a:1", "n:inflation", "f:3", "g:x", "a:" + rid):     # buttons from the old bot
+        assert press(env, data, hm) == review.STALE
+    assert press(env, "h:pick:coal_share", hm + 40) == review.STALE    # a home button on another message
+    assert press(env, f"v:ok:{db.get_run(rid)['ref']}", hm) == review.STALE   # no review card is open
+    assert press(env, "r:open", hm) == review.STALE
+    assert makequeue.jobs("queued") == [] and db.get_run(rid)["stage"] == "awaiting_approval"
+
+
+def test_offset_survives_a_restart(env):
+    """The getUpdates offset lives in the DB, so a restarted bot never handles a button press twice."""
+    from pipeline import makequeue
+    db, bot, fake = env["db"], env["bot"], env["fake"]
+    hm = menu(env)
+    fake.updates = [{"update_id": 41, "callback_query": {
+        "id": "cb", "data": "h:pick:coal_share", "from": {"id": OWNER},
+        "message": {"message_id": hm, "chat": {"id": OWNER, "type": "private"}}}}]
+    assert env["tg"].poll_once(1, bot) == 1
+    assert [j["topic_id"] for j in makequeue.jobs("queued")] == ["coal_share"] and db.kv_get("telegram_offset") == "42"
+    assert env["tg"].poll_once(1, bot) == 0
+    assert [kw.get("offset") for kw in fake.of("getUpdates")] == [None, 42]
+
+
+def test_a_second_bot_exits_at_once(temp_db, tmp_path, monkeypatch, capsys):
+    from pipeline import approve_telegram as bot, lock
+    monkeypatch.setattr(lock, "path", lambda key: tmp_path)
+    monkeypatch.setattr(bot, "_bot_loop", lambda: pytest.fail("a second bot must not start"))
+    with lock.single_instance("bot") as mine:
+        assert mine
+        assert bot.run_bot() == 0
+    assert "already running" in capsys.readouterr().out
+    monkeypatch.setattr(bot, "_bot_loop", lambda: 7)
+    assert bot.run_bot() == 7  # the lock was released, so the next bot starts
 
 
 # ------------------------------------------------------------------ throttling and 429
 
-def test_edits_are_throttled_per_message(env):
+def test_edits_are_throttled_per_message_but_a_tap_is_answered_at_once(env):
     tg, fake, clock = env["tg"], env["fake"], env["clock"]
     ed = tg.Editor(clock=clock)
     assert ed.edit(7, "video", "one", {}) is True
@@ -327,6 +580,7 @@ def test_edits_are_throttled_per_message(env):
     assert [e["caption"] for e in fake.of("editMessageCaption")] == ["one", "other message", "three"]
     ed.touch(9)                                            # just sent: its first edit waits too
     assert ed.edit(9, "text", "hi", {}) is False
+    assert ed.edit(9, "text", "tapped", {}, now=True) is True
 
 
 def test_429_waits_for_retry_after(env):
@@ -336,6 +590,7 @@ def test_429_waits_for_retry_after(env):
     assert ed.edit(7, "video", "one", {}) is False
     clock.t += 3
     ed.flush()
+    assert ed.edit(7, "video", "one", {}, now=True) is False   # not even a tap jumps a 429 wait
     clock.t += 3.9
     ed.flush()
     assert len(fake.of("editMessageCaption")) == 1        # only the refused attempt
@@ -359,221 +614,35 @@ def test_call_raises_retry_after_from_the_api(monkeypatch):
     assert e.value.retry_after == 5 and e.value.code == 429
 
 
-# ------------------------------------------------------------------ chat filtering and commands
+def test_run_py_batch_makes_the_queue_here_one_at_a_time(env, monkeypatch):
+    """Without the bot, `run.py batch` works the same make queue in the foreground."""
+    from pipeline import makequeue, orchestrator
+    db = env["db"]
+    made = []
 
-def test_only_the_owner_chat_is_listened_to(env):
-    from pipeline import review
-    db, bot, fake = env["db"], env["bot"], env["fake"]
-    rid = waiting(db)
-    bot.tick()
-    card = review.current_card()
-    before = len(fake.calls)
-    bot.on_message({"chat": {"id": 999, "type": "private"}, "from": {"id": 999}, "text": "/status"})
-    bot.on_message({"chat": {"id": -100, "type": "group"}, "from": {"id": OWNER}, "text": "/new"})
-    bot.on_message({"chat": {"id": OWNER, "type": "private"}, "from": {"id": 999}, "text": "/pause"})
-    press(env, card_button(card, "a"), card["message_id"], chat=999, user=999)
-    press(env, card_button(card, "a"), card["message_id"], chat=OWNER, user=999)
-    assert len(fake.calls) == before                       # not even an answer
-    assert db.get_run(rid)["stage"] == "awaiting_approval" and not review.paused()
-    bot.on_message({"chat": {"id": OWNER, "type": "private"}, "from": {"id": OWNER}, "text": "/help"})
-    assert "/new" in fake.of("sendMessage")[-1]["text"]
-
-
-def test_commands_are_registered(env):
-    tg, fake = env["tg"], env["fake"]
-    tg.register_commands()
-    names = [c["command"] for c in fake.of("setMyCommands")[0]["commands"]]
-    assert names == ["new", "ready", "status", "account", "pause", "resume", "help"]
+    def run_pipeline(rid, from_step="fetch"):
+        assert not [j for j in makequeue.jobs("running") if j["run_id"] != rid]   # never two at once
+        made.append(db.get_run(rid)["topic_id"])
+        if len(made) == 2:
+            db.transition(rid, "data_ready")
+            db.skip(rid, "low variety: no falling country")
+            return False
+        for st in FLOW:
+            db.transition(rid, st)
+        return True
+    monkeypatch.setattr(orchestrator, "run_pipeline", run_pipeline)
+    makequeue.start_batch(["inflation", "coal_share", "internet_users"])
+    reported = []
+    makequeue.run_foreground(on_done=lambda j: reported.append((j["topic_id"], j["state"])))
+    assert made[:3] == ["inflation", "coal_share", "internet_users"] and len(made) == 4   # the skipped one is replaced
+    assert [s for _, s in reported] == ["ready", "skipped", "ready", "ready"] and env["spawned"] == []
+    assert makequeue.jobs("queued", "running") == []
 
 
-def test_pause_and_resume_persist(env):
-    from pipeline import approve_telegram, review
-    db, bot, fake = env["db"], env["bot"], env["fake"]
-    waiting(db)
-    msg = {"chat": {"id": OWNER, "type": "private"}, "from": {"id": OWNER}}
-    bot.on_message({**msg, "text": "/pause"})
-    approve_telegram.Bot(clock=env["clock"]).tick()        # a restarted bot stays paused
-    assert review.paused() and fake.of("sendVideo") == []
-    bot.on_message({**msg, "text": "/resume"})
-    assert not review.paused() and len(fake.of("sendVideo")) == 1
-
-
-def test_status_shows_render_card_queue_and_test_mode(env, pinned_config):
-    from pipeline import approve_telegram as tg
-    db, bot = env["db"], env["bot"]
-    waiting(db, "inflation", "Prices, played as music")
-    waiting(db, "gdp_growth")
-    bot.tick()
-    text = tg.status_text()
-    assert text.startswith("📊 Graphony status")
-    assert "🛠 Nothing rendering" in text and "Open card: Prices, played as music (waiting for your decision)" in text
-    assert "📥 Review queue: 1 waiting" in text and "Test mode: ON" in text
-    pinned_config["dry_run"]["instagram"] = False
-    assert "Test mode: on for YouTube; live on Instagram" in tg.status_text()
-    assert tg.daily_summary_text().startswith("📊 Graphony · daily summary")
-
-
-def test_new_offers_three_unmade_topics_and_renders_one_at_a_time(env, monkeypatch):
-    from pipeline import review
-    db, bot, fake, clock = env["db"], env["bot"], env["fake"], env["clock"]
-    scores = {"inflation": 90, "gdp_growth": 80, "unemployment": 70, "cereal_yield": 60, "broadband": 50}
-    monkeypatch.setattr(review, "topic_score", lambda t: scores.get(t["id"], 1))
-    waiting(db, "inflation")                                  # already has a video: never suggested again
-    msg = {"chat": {"id": OWNER, "type": "private"}, "from": {"id": OWNER}}
-    bot.on_message({**msg, "text": "/new"})
-    menu = fake.of("sendMessage")[-1]
-    picks = [row[0]["callback_data"] for row in menu["reply_markup"]["inline_keyboard"]]
-    assert picks == ["n:gdp_growth", "n:unemployment", "n:cereal_yield", "n:*"]
-    menu_id = fake.next_id
-    assert press(env, "n:gdp_growth", menu_id) == "Starting."
-    assert press(env, "n:unemployment", menu_id) == "This card is stale"    # a menu works once
-    job = review.jobs("running")[0]
-    assert env["spawned"] == [("produce", "--run", job["run_id"], "--from", "fetch")]
-    assert fake.of("editMessageText")[-1]["text"].endswith("📥 Fetching data…")
-    bot.on_message({**msg, "text": "/new"})                    # while that one renders
-    assert "your pick will wait its turn" in fake.of("sendMessage")[-1]["text"]
-    assert press(env, "n:unemployment", fake.next_id) == "Queued: another video is rendering."
-    assert len(env["spawned"]) == 1
-    second_menu = fake.next_id
-    # the first one turns out too boring: said plainly, then the queued one starts
-    db.transition(job["run_id"], "data_ready")
-    db.skip(job["run_id"], "low variety: no falling country (net < -0.5)")
-    clock.t += 5
-    bot.tick()
-    clock.t += 5
-    bot.tick()
-    first_text = [e["text"] for e in fake.of("editMessageText") if e["message_id"] == menu_id][-1]
-    assert "😴 Skipped" in first_text and "every country moved the same way" in first_text
-    assert "⚠️" not in first_text and "error" not in first_text.lower()
-    assert len(env["spawned"]) == 2 and review.jobs("running")[0]["message_id"] == second_menu
-
-
-def test_new_render_reaches_the_review_queue(env):
-    from pipeline import review
-    db, bot, fake, clock = env["db"], env["bot"], env["fake"], env["clock"]
-    job = review.add_job("gdp_growth", 42)
-    bot.advance_jobs()
-    rid = review.get_job(job["id"])["run_id"]
-    for st in FLOW[:3]:
-        db.transition(rid, st)
-    db.set_progress(rid, .45)
-    clock.t += 5
-    bot.tick()
-    assert fake.of("editMessageText")[-1]["text"].endswith("🎨 Rendering 45%")
-    for st in FLOW[3:]:
-        db.transition(rid, st)
-    clock.t += 5
-    bot.tick()
-    assert [e["text"] for e in fake.of("editMessageText") if e["message_id"] == 42][-1].endswith("✅ Ready: it's in the review queue.")
-    assert review.current_card()["run_id"] == rid
-
-
-def test_ready_lists_unposted_videos_and_moves_one_to_the_front(env):
-    from pipeline import review
-    db, bot, fake = env["db"], env["bot"], env["fake"]
-    first, second, third = waiting(db, "inflation"), waiting(db, "gdp_growth"), waiting(db, "unemployment")
-    posted = waiting(db, "broadband")
-    db.transition(posted, "approved")
-    db.upsert_post(posted, "instagram", "live")
-    bot.tick()                                                 # first is on the open card
-    bot.on_message({"chat": {"id": OWNER, "type": "private"}, "from": {"id": OWNER}, "text": "/ready"})
-    rows = fake.of("sendMessage")[-1]["reply_markup"]["inline_keyboard"]
-    refs = [int(r[0]["callback_data"][2:]) for r in rows]
-    assert refs == [db.get_run(third)["ref"], db.get_run(second)["ref"]]   # newest first, no open/posted ones
-    assert press(env, f"f:{db.get_run(third)['ref']}", fake.next_id) == "Next in the review queue."
-    assert [r["id"] for r in review.queue()][:2] == [third, first]
-
-
-# ------------------------------------------------------------------ Send to Telegram (dashboard)
-
-def test_dashboard_sends_a_chosen_video_to_telegram(env):
-    from pipeline import actions, health, review
-    db, bot, fake, clock = env["db"], env["bot"], env["fake"], env["clock"]
-    first, second, third = waiting(db, "inflation"), waiting(db, "gdp_growth"), waiting(db, "unemployment")
-    bot.tick()
-    old = review.current_card()                                # first is on the open card
-    assert "the bot is stopped" in actions.send_to_telegram(third, "dashboard")   # no heartbeat: said plainly
-    health.beat("bot")
-    assert actions.send_to_telegram(third, "dashboard") == \
-        "Sent to Telegram — it takes the place of the card that is open there now."
-    assert review.telegram_state(third) == "next" and env["spawned"] == []   # nothing is approved or posted
-    clock.t += 5
-    bot.tick()
-    card = review.current_card()
-    assert card["run_id"] == third and len(fake.of("sendVideo")) == 2 and review.telegram_state(third) == "card"
-    assert review.get_card(old["id"])["outcome"] == "swapped" and db.get_run(first)["stage"] == "awaiting_approval"
-    edit = [e for e in fake.of("editMessageCaption") if e["message_id"] == old["message_id"]][-1]
-    assert edit["caption"].endswith("this one is still in the queue") and edit["reply_markup"] == {"inline_keyboard": []}
-    assert press(env, card_button(old, "a"), old["message_id"]) == "This card is stale"
-    assert actions.send_to_telegram(third, "dashboard") == "This video is already on Telegram."
-    assert press(env, card_button(card, "l"), card["message_id"]) == "Moved to the back of the queue."
-    assert review.current_card()["run_id"] == first            # sent once: Later does not bring it straight back
-
-
-def test_a_video_sent_from_the_dashboard_waits_for_posting_and_ignores_pause(env):
-    from pipeline import actions, health, review
-    db, bot, fake, clock = env["db"], env["bot"], env["fake"], env["clock"]
-    health.beat("bot")
-    first, second, third = waiting(db, "inflation"), waiting(db, "gdp_growth"), waiting(db, "unemployment")
-    bot.tick()
-    card = review.current_card()
-    press(env, card_button(card, "a"), card["message_id"])     # first is posting
-    assert actions.send_to_telegram(third, "dashboard").endswith("when the video posting there now has finished.")
-    clock.t += 5
-    bot.tick()
-    assert review.current_card()["id"] == card["id"] and len(fake.of("sendVideo")) == 1   # a posting card stays
-    review.set_paused(True)
-    publisher_finishes(db, first, instagram="live", facebook="live")
-    clock.t += 5
-    bot.tick()
-    sent = review.current_card()
-    assert sent["run_id"] == third                             # before second, and although cards are paused
-    press(env, card_button(sent, "r"), sent["message_id"])
-    assert review.current_card() is None and len(fake.of("sendVideo")) == 2   # the pause still holds the rest
-
-
-def test_send_to_telegram_needs_a_waiting_video_and_a_connected_bot(env, monkeypatch):
-    from pipeline import actions, review
-    db, bot = env["db"], env["bot"]
-    first, second = waiting(db, "inflation"), waiting(db, "gdp_growth")
-    bot.tick()
-    actions.send_to_telegram(second, "dashboard")
-    actions.reject(second, "dashboard")                        # decided before its card went out
-    env["clock"].t += 5
-    bot.tick()
-    assert review.current_card()["run_id"] == first and review.requested_run() is None   # the open card is kept
-    with pytest.raises(ValueError, match="waiting for review"):
-        actions.send_to_telegram(second, "dashboard")
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN")
-    with pytest.raises(ValueError, match="not connected"):
-        actions.send_to_telegram(first, "dashboard")
-
-
-# ------------------------------------------------------------------ polling
-
-def test_offset_survives_a_restart(env):
-    """B3: the getUpdates offset lives in the DB, so a restarted bot never re-delivers a button press."""
-    from pipeline import review
-    db, bot, fake = env["db"], env["bot"], env["fake"]
-    rid = waiting(db)
-    bot.tick()
-    card = review.current_card()
-    fake.updates = [{"update_id": 41, "callback_query": {
-        "id": "cb", "data": card_button(card, "a"), "from": {"id": OWNER},
-        "message": {"message_id": card["message_id"], "chat": {"id": OWNER, "type": "private"}}}}]
-    assert env["tg"].poll_once(1, bot) == 1
-    assert db.get_run(rid)["stage"] == "approved" and db.kv_get("telegram_offset") == "42"
-    assert env["tg"].poll_once(1, bot) == 0                # "restart": nothing is delivered twice
-    assert [kw.get("offset") for kw in fake.of("getUpdates")] == [None, 42]
-
-
-def test_a_second_bot_exits_at_once(temp_db, tmp_path, monkeypatch, capsys):
-    from pipeline import approve_telegram as bot, lock
-    monkeypatch.setattr(lock, "path", lambda key: tmp_path)
-    monkeypatch.setattr(bot, "_bot_loop", lambda: pytest.fail("a second bot must not start"))
-    with lock.single_instance("bot") as mine:
-        assert mine
-        assert bot.run_bot() == 0
-    assert "already running" in capsys.readouterr().out
-    monkeypatch.setattr(bot, "_bot_loop", lambda: 7)
-    assert bot.run_bot() == 7  # the lock was released, so the next bot starts
+def test_a_note_on_the_home_card_goes_away_after_ten_minutes(env):
+    from datetime import timedelta
+    from pipeline import home
+    s = home.set_screen("home", note="✅ Added to the make queue: Coal power. Making it now.")
+    assert "Added to the make queue" in home.home_view(s)[0]
+    later = home._now() + timedelta(minutes=11)
+    assert "Added to the make queue" not in home.home_view(s, later)[0]

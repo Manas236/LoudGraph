@@ -230,3 +230,21 @@ def tick(now: datetime | None = None, background: bool = True) -> bool:
     _thread = threading.Thread(target=job, name="stats", daemon=True)
     _thread.start()
     return True
+
+
+def collect_now() -> bool:
+    """The Stats screen's Check stats now: collect on a background thread unless a collection is running.
+    Returns True when one was started. Read-only Meta calls; no summary message."""
+    global _thread
+    if _thread and _thread.is_alive():
+        return False
+
+    def job():
+        try:
+            log.info("stats (asked for on Telegram): %s", collect())
+        except Exception:  # noqa: BLE001 - the bot must keep running
+            log.exception("stats in the bot failed")
+
+    _thread = threading.Thread(target=job, name="stats", daemon=True)
+    _thread.start()
+    return True

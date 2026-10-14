@@ -29,6 +29,8 @@ def test_bot_loop_writes_a_heartbeat(temp_db, monkeypatch):
     def stop(_seconds):
         raise KeyboardInterrupt   # end the loop at its first sleep
     monkeypatch.setattr(bot.time, "sleep", stop)
+    from pipeline import analytics
+    monkeypatch.setattr(analytics, "tick", lambda *a, **k: False)   # no stats thread outliving this test's DB
     assert bot.run_bot() == 0
     st = health.heartbeat_state(temp_db.kv_get("heartbeat:bot"))
     assert st["state"] == "ok" and st["info"]["telegram"] is False

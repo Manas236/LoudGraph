@@ -1,51 +1,33 @@
-"""The one-at-a-time review queue, shared by the Telegram bot and the dashboard.
+"""The review queue and the Telegram review card, shared by the bot and the dashboard.
 
 The queue is every run waiting for review (stage awaiting_approval) in `runs.queue_pos` order; a run
-joins the back when it reaches review. The bot shows at most ONE review card at a time: a card holds
-`slot = 1` while it is sending, open or posting, and the UNIQUE slot column makes a second one
-impossible. An approved card follows the posting until every platform is posted or failed (or a
-stage takes longer than STAGE_TIMEOUT_S); only then is the slot freed and the next card sent.
+joins the back when it reaches review. The bot shows ONE review card: a single message that shows one
+reel at a time (the video, its opening question, the 3 caption options and the hashtags) and moves on to
+the next ready reel after each decision, by editing itself. Skip for now sends a reel to the back of the
+queue and leaves it alone until the card is opened again. Decisions go through actions.approve /
+reject, so the dashboard and Telegram act on the same queue and a reel is never approved twice.
 
-Decisions go through the run's state machine (actions.approve / reject), so the dashboard and
-Telegram act on the same queue, and a second approval of the same run is refused: it posts once.
-The dashboard can also send one chosen video to Telegram (send_to_telegram): it becomes the card
-now, and an undecided card for another video gives way to it.
-
-/new production requests are make_jobs; one runs at a time and the rest wait their turn.
-This module holds the state and the card wording; approve_telegram.py does the Telegram calls.
+The dashboard can send one chosen reel to Telegram (send_to_telegram): the bot puts it on the review
+card now. This module holds the state and the wording; approve_telegram.py does the Telegram calls.
+No run id ever appears in a card.
 """
 from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+import re
 
 from . import db
-from .accounts import PLATFORMS
 from .config import country_by_iso3, get_config, path
 
 log = logging.getLogger(__name__)
 
-ACTIVE = ("sending", "open", "posting")
 LIVE = {"live", "uploaded", "private_locked"}
-FINAL = LIVE | {"dry_run", "failed"}
-MAKING = ("queued", "data_ready", "picked", "labelled", "rendered")
-STAGE_TIMEOUT_S = 10 * 60      # a posting stage with no progress for this long is marked failed on the card
-LATER_REST_S = 15 * 60         # "Later" on the only waiting video does not bring it straight back
-WATCH_FOR_S = 2 * 3600         # a finished card keeps following a slow or retried upload this long
-RECENT_S = 10 * 60             # closed cards are re-rendered this long (a deferred edit still lands)
-START_GRACE_S = 120            # a just-spawned maker gets this long to take its run lock
 CAPTION_LIMIT = 1024           # Telegram's caption limit
-ICON = {"youtube": "▶️", "instagram": "📸", "facebook": "📘"}
-STALE = "This card is stale"
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _age(ts: str | None, now: datetime | None = None) -> float:
-    return ((now or _now()) - db.parse_ts(ts)).total_seconds() if ts else float("inf")
+STALE = "This button is out of date. Use the menu."
+K_CARD = "review:card"         # {"mid", "run", "kind", "skipped": [run ids skipped while the card was open]}
+K_REQUESTED = "review:requested"   # the run the dashboard sent to Telegram, until the card shows it
+RUN_ID = re.compile(r"r\d{8}-\d{6}-[0-9a-f]{4}")
 
 
 # ------------------------------------------------------------------ queue order
@@ -83,298 +65,81 @@ def move_to_front(run_id: str) -> float:
     return _move(run_id, "front")
 
 
-def next_for_review() -> dict | None:
-    """The next run to show. A run just sent to the back with Later rests a while if it is the
-    only one waiting, so it does not come straight back."""
-    last = last_closed_card()
-    for run in queue():
-        if (last and last["outcome"] == "later" and last["run_id"] == run["id"]
-                and run["queue_pos"] == last["later_pos"] and _age(last["closed_at"]) < LATER_REST_S):
-            continue
-        return run
-    return None
+def next_for_review(skipped=()) -> dict | None:
+    """The next reel to show: the first in the queue that was not skipped while the card is open."""
+    return next((r for r in queue() if r["id"] not in skipped), None)
 
 
-def paused() -> bool:
-    return db.kv_get("review_paused") == "1"
+# ------------------------------------------------------------------ the card's state
 
-
-def set_paused(flag: bool) -> None:
-    db.kv_set("review_paused", "1" if flag else "0")
-
-
-# ------------------------------------------------------------------ cards
-
-JSON_FIELDS = ("buttons", "platforms", "overrides")
-
-
-def _card(row) -> dict | None:
-    if row is None:
-        return None
-    d = dict(row)
-    for k in JSON_FIELDS:
-        d[k] = json.loads(d[k]) if d.get(k) else ({} if k == "overrides" else None)
-    return d
-
-
-def current_card() -> dict | None:
-    """The one card that is sending, open or posting, if any."""
-    with db.db() as c:
-        return _card(c.execute("SELECT * FROM review_cards WHERE slot=1").fetchone())
-
-
-def get_card(card_id: int) -> dict | None:
-    with db.db() as c:
-        return _card(c.execute("SELECT * FROM review_cards WHERE id=?", (card_id,)).fetchone())
-
-
-def latest_card_for_run(run_id: str) -> dict | None:
-    with db.db() as c:
-        return _card(c.execute("SELECT * FROM review_cards WHERE run_id=? ORDER BY id DESC LIMIT 1",
-                               (run_id,)).fetchone())
-
-
-def last_closed_card() -> dict | None:
-    with db.db() as c:
-        return _card(c.execute("SELECT * FROM review_cards WHERE state IN ('done','closed') AND closed_at IS NOT NULL "
-                               "ORDER BY closed_at DESC, id DESC LIMIT 1").fetchone())
-
-
-def cards_to_render(now: datetime | None = None) -> list[dict]:
-    """Cards whose Telegram message may need an edit: the current one, finished cards still
-    following an upload, and cards closed in the last few minutes."""
-    since = ((now or _now()).timestamp() - RECENT_S)
-    since_ts = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with db.db() as c:
-        rows = c.execute("SELECT * FROM review_cards WHERE message_id IS NOT NULL AND (slot=1 OR watch=1 OR updated_at>=?) "
-                         "ORDER BY id", (since_ts,)).fetchall()
-    return [_card(r) for r in rows]
-
-
-def create_card(run_id: str) -> int | None:
-    """Take the single slot for a new card. None if another card already holds it."""
-    ts = db.now()
+def card_state() -> dict | None:
     try:
-        with db.db() as c:
-            return c.execute("INSERT INTO review_cards(run_id, slot, state, created_at, updated_at) VALUES (?,1,'sending',?,?)",
-                             (run_id, ts, ts)).lastrowid
-    except db.sqlite3.IntegrityError:
+        st = json.loads(db.kv_get(K_CARD) or "null")
+    except ValueError:
         return None
+    return st if isinstance(st, dict) and st.get("mid") else None
 
 
-def update_card(card_id: int, **fields) -> None:
-    for k in JSON_FIELDS:
-        if k in fields and fields[k] is not None:
-            fields[k] = json.dumps(fields[k])
-    fields["updated_at"] = db.now()
-    with db.db() as c:
-        c.execute(f"UPDATE review_cards SET {', '.join(k + '=?' for k in fields)} WHERE id=?", [*fields.values(), card_id])
+def set_card_state(state: dict | None) -> None:
+    db.kv_set(K_CARD, json.dumps(state) if state else "")
 
 
-def claim_card(card_id: int, from_state: str, **fields) -> bool:
-    """Atomically change a card that is still in `from_state` (a repeated button press loses)."""
-    for k in JSON_FIELDS:
-        if k in fields and fields[k] is not None:
-            fields[k] = json.dumps(fields[k])
-    fields["updated_at"] = db.now()
-    with db.db() as c:
-        cur = c.execute(f"UPDATE review_cards SET {', '.join(k + '=?' for k in fields)} WHERE id=? AND state=?",
-                        [*fields.values(), card_id, from_state])
-    return cur.rowcount == 1
-
-
-def close_card(card_id: int, from_state: str, state: str, outcome: str, **fields) -> bool:
-    """Finish a card (state done or closed) and free the slot so the queue advances."""
-    return claim_card(card_id, from_state, state=state, outcome=outcome, slot=None, closed_at=db.now(), **fields)
-
-
-def drop_card(card_id: int) -> None:
-    """The card could not be sent: forget it so the run is offered again."""
-    with db.db() as c:
-        c.execute("DELETE FROM review_cards WHERE id=? AND message_id IS NULL", (card_id,))
-
-
-def card_sent(card_id: int, message_id: int, kind: str, caption: str, buttons: dict) -> None:
-    update_card(card_id, message_id=message_id, kind=kind, state="open", caption=caption, buttons=buttons)
+def shown_run() -> str | None:
+    st = card_state()
+    return st["run"] if st else None
 
 
 # ------------------------------------------------------------------ decisions
 
-def _approved_at(run_id: str) -> str:
-    with db.db() as c:
-        r = c.execute("SELECT ts FROM stage_log WHERE run_id=? AND stage='approved' ORDER BY id DESC LIMIT 1",
-                      (run_id,)).fetchone()
-    return r["ts"] if r else db.now()
-
-
-def start_posting(card: dict, via: str) -> bool:
-    from .accounts import ready_destinations
-    run = db.get_run(card["run_id"])
-    return claim_card(card["id"], "open", state="posting", decided_via=via, outcome="approved",
-                      platforms=ready_destinations(run), approved_at=_approved_at(run["id"]))
-
-
-def sync_open(card: dict) -> dict:
-    """An open card whose run was decided elsewhere (the dashboard) follows that decision."""
-    run = db.get_run(card["run_id"])
-    stage = run["stage"] if run else None
-    if stage == "awaiting_approval":
-        return card
-    if stage in ("approved", "publishing", "published") or (stage == "failed" and run["failed_stage"] == "publish"):
-        start_posting(card, "dashboard")
-    elif stage == "rejected":
-        close_card(card["id"], "open", "closed", "remade" if run.get("replaced") else "rejected", decided_via="dashboard")
-    else:
-        close_card(card["id"], "open", "closed", "gone", decided_via="dashboard")
-    return get_card(card["id"])
-
-
-def decide(card: dict, action: str) -> str:
-    """A Telegram Approve / Reject / Later on the current card. Returns the answer to show."""
+def decide(run_id: str, action: str) -> str:
+    """Approve / Reject / Skip for now on the review card. Returns the short answer to show."""
     from . import actions
-    if card["state"] == "posting":
-        return "Already approved — it is posting."
-    if card["state"] != "open":
-        return STALE
-    run_id = card["run_id"]
     run = db.get_run(run_id)
     if not run or run["stage"] != "awaiting_approval":
-        sync_open(card)
-        return "Already handled in the dashboard."
+        return "Already decided in the dashboard."
     try:
         if action == "approve":
             actions.approve(run_id, "telegram")
-            start_posting(card, "telegram")
-            return "Approved — posting now."
+            return approved_answer(run_id)
         if action == "reject":
             actions.reject(run_id, "telegram")
-            close_card(card["id"], "open", "closed", "rejected", decided_via="telegram")
-            return "Rejected."
-        if action == "later":
-            pos = move_to_back(run_id)
-            db.log(run_id, "awaiting_approval", "later via telegram: moved to the back of the review queue")
-            close_card(card["id"], "open", "closed", "later", decided_via="telegram", later_pos=pos)
-            return "Moved to the back of the queue."
+            return "Rejected: it won't be posted."
+        if action == "skip":
+            move_to_back(run_id)
+            db.log(run_id, "awaiting_approval", "skipped for now via telegram: back of the review queue")
+            return "Skipped for now: it stays in Ready for review."
     except db.TransitionError:   # decided in the dashboard a moment ago
-        sync_open(card)
-        return "Already handled in the dashboard."
+        return "Already decided in the dashboard."
     except ValueError as e:
-        return str(e)[:190]
+        return plain(str(e), 180)
     return STALE
 
 
-def retry(card: dict, platform: str) -> str:
-    """Retry one failed platform from a finished card."""
-    from . import actions
-    view = posting_view(card)
-    if platform not in view["failed"]:
-        return STALE
-    try:
-        actions.retry_platform(card["run_id"], platform, "telegram")
-    except (ValueError, db.TransitionError) as e:
-        return str(e)[:190]
-    overrides = dict(card["overrides"] or {})
-    overrides[platform] = {"text": "retrying…", "at": db.now(), "retrying": True}
-    update_card(card["id"], overrides=overrides, watch=1)
-    return f"Trying {PLATFORMS[platform]} again."
+def approved_answer(run_id: str) -> str:
+    from .accounts import ready_destinations
+    if not ready_destinations(db.get_run(run_id)):
+        return "Approved. It posts once an account is connected (Settings)."
+    return "Approved: posting it now."
 
 
-# ------------------------------------------------------------------ posting progress
+# ------------------------------------------------------------------ wording
 
 def short_error(message: str | None) -> str:
     from .errors import explain_error
     sentence = explain_error(message, "publish")["sentence"]
     if sentence.startswith("Something went wrong"):
-        text = " ".join((message or "unknown error").split())
-        return text[:150] + ("…" if len(text) > 150 else "")
+        return plain(message)
     return sentence.rstrip(".")
 
 
-def _publisher_alive(run_id: str) -> bool:
-    from .lock import held_elsewhere, publish_lock
-    return held_elsewhere(publish_lock(run_id))
+def plain(message: str | None, limit: int = 120) -> str:
+    """An error in one short line for the owner: no run ids, no exception class, no file paths."""
+    text = " ".join((message or "unknown error").split())
+    text = RUN_ID.sub("this video", text)
+    text = re.sub(r"^(?:[A-Za-z_.]+(?:Error|Exception|Exhausted|Rejected)):\s*", "", text)
+    text = re.sub(r"[A-Za-z]:\\\S+|/\S+/\S+", "a file", text)
+    return text[:limit].rstrip() + ("…" if len(text) > limit else "")
 
-
-def posting_view(card: dict, now: datetime | None = None) -> dict:
-    """Per-platform lines of an approved card. final: every platform is posted or failed and no
-    publisher is still running; failed: platforms that get a Retry button; stuck: platforms whose
-    stage has made no progress for STAGE_TIMEOUT_S."""
-    now = now or _now()
-    run = db.get_run(card["run_id"]) or {}
-    posts = {p["platform"]: p for p in db.get_posts(card["run_id"])}
-    overrides = card["overrides"] or {}
-    lines, failed, pending, last = [], [], [], card["approved_at"]
-    for p in card["platforms"] or []:
-        post, ov = posts.get(p), overrides.get(p)
-        for ts in (post["updated_at"] if post else None, ov["at"] if ov else None):
-            if ts and (not last or ts > last):
-                last = ts   # the last sign of progress: a post update or a card note (e.g. a retry)
-        status = post["status"] if post else None
-        # the card's own note (a timeout or a retry) stands until the DB has newer news: a later update,
-        # a live post, or (after a timeout, when the post was still unfinished) any final status
-        newer = bool(post) and (post["updated_at"] > ov["at"] or status in LIVE or
-                                (not ov.get("retrying") and status in FINAL)) if ov else True
-        if not newer:
-            text = ov["text"]
-            if ov.get("retrying"):
-                pending.append(p)
-            else:
-                failed.append(p)
-        elif status in ("live", "uploaded"):
-            text = "posted" + (f" — {post['url']}" if post.get("url") else "")
-        elif status == "private_locked":
-            text = "posted as private (needs YouTube's approval)" + (f" — {post['url']}" if post.get("url") else "")
-        elif status == "dry_run":
-            text = "test mode, not posted"
-        elif status == "failed":
-            text = f"failed — {short_error(post.get('message'))}"
-            failed.append(p)
-        elif status in ("uploading", "pending"):
-            text = "uploading…" if status == "uploading" else "waiting (daily limit)"
-            pending.append(p)
-        else:
-            text = "waiting"
-            pending.append(p)
-        lines.append(f"{ICON[p]} {PLATFORMS[p]}: {text}")
-    alive = run.get("stage") == "publishing" and _publisher_alive(card["run_id"])
-    stuck = pending if pending and _age(last, now) > STAGE_TIMEOUT_S else []
-    return {"lines": lines, "failed": failed, "pending": pending, "stuck": stuck, "alive": alive,
-            "final": not pending and not alive, "posts": posts}
-
-
-def check_posting(card: dict, now: datetime | None = None) -> dict:
-    """Finish an approved card once posting is final, or mark stuck platforms failed on the card
-    (it keeps following them) after STAGE_TIMEOUT_S without progress. Either way the queue advances."""
-    view = posting_view(card, now)
-    if view["stuck"]:
-        overrides = dict(card["overrides"] or {})
-        for p in view["stuck"]:
-            started = p in view["posts"]
-            overrides[p] = {"text": "failed — " + ("took longer than 10 minutes" if started else
-                                                   "didn't start within 10 minutes"), "at": db.now()}
-        close_card(card["id"], "posting", "done", "approved", overrides=overrides, watch=1)
-        db.log(card["run_id"], "publishing", "telegram card: " + ", ".join(view["stuck"]) + " timed out after 10 minutes")
-    elif view["final"]:
-        close_card(card["id"], "posting", "done", "approved", watch=0)
-    return get_card(card["id"])
-
-
-def check_watched(card: dict, now: datetime | None = None) -> None:
-    """A finished card follows a slow or retried upload until it settles (or WATCH_FOR_S)."""
-    view = posting_view(card, now)
-    overrides = dict(card["overrides"] or {})
-    changed = False
-    for p in view["stuck"]:
-        if overrides.get(p, {}).get("retrying"):
-            overrides[p] = {"text": "failed — the retry took longer than 10 minutes", "at": db.now()}
-            changed = True
-    still_retrying = any(ov.get("retrying") for p, ov in overrides.items() if p in view["pending"])
-    done = (not view["alive"] and not still_retrying) or _age(card["closed_at"], now) > WATCH_FOR_S
-    if changed or done:
-        update_card(card["id"], overrides=overrides, watch=0 if done and not changed else 1)
-
-
-# ------------------------------------------------------------------ card wording
 
 def _meta(run_id: str) -> dict:
     try:
@@ -391,24 +156,13 @@ def _topic(topic_id: str) -> dict:
         return {}
 
 
+def topic_name(topic_id: str) -> str:
+    t = _topic(topic_id)
+    return t.get("name") or t.get("title") or "a topic that was removed"
+
+
 def video_title(run: dict) -> str:
     return run.get("title") or _meta(run["id"]).get("title") or _topic(run["topic_id"]).get("title") or "New video"
-
-
-def card_base(run: dict) -> str:
-    """Title, metric, countries, length. No scores, no data."""
-    meta, topic = _meta(run["id"]), _topic(run["topic_id"])
-    names = country_by_iso3()
-    countries = [names[c]["name"] for c in run["countries"] if c in names] or \
-                [c.get("name", c.get("iso3", "")) for c in meta.get("countries", [])]
-    lines = [f"🎬 {video_title(run)}"]
-    if topic.get("subtitle"):
-        lines.append(f"📈 {topic['subtitle']}")
-    if countries:
-        lines.append("🌍 " + ", ".join(countries))
-    if meta.get("duration_seconds"):
-        lines.append(f"⏱ {round(meta['duration_seconds'])} s")
-    return "\n".join(lines)
 
 
 def _captions(run_id: str) -> dict | None:
@@ -419,88 +173,76 @@ def _captions(run_id: str) -> dict | None:
         return None
 
 
-def caption_block(c: dict | None, choosing: bool) -> str:
-    """The post caption options (captions.json): all of them while the card is open, then the chosen one."""
-    if not c:
-        return ""
-    from .captions import settings
-    chosen = c.get("chosen", 0)
-    if choosing:
-        lines = [f"✍️ Post caption: tap 1-{len(c['variants'])} below to choose"]
-        for i, v in enumerate(c["variants"]):
-            lines += [f"{'✅' if i == chosen else '▫️'} {i + 1}. {v['hook']}", f"      {v['question']}"]
+def card_text(run: dict, skipped=()) -> str:
+    """The review card's caption: which reel, its opening question, metric, countries, length, then the
+    caption options (or the owner's own caption) and hashtags. No ids, no scores."""
+    meta, topic = _meta(run["id"]), _topic(run["topic_id"])
+    waiting = [r["id"] for r in queue() if r["id"] not in skipped]
+    pos = waiting.index(run["id"]) + 1 if run["id"] in waiting else 1
+    names = country_by_iso3()
+    countries = [names[c]["name"] for c in run["countries"] if c in names] or \
+                [c.get("name", c.get("iso3", "")) for c in meta.get("countries", [])]
+    lines = [f"🎬 Reel {pos} of {max(len(waiting), pos)} for review: {topic.get('name') or video_title(run)}"]
+    question = (meta.get("opening") or {}).get("question")
+    lines.append(f"❓ Hook question: {question}" if question else f"❓ Title: {video_title(run)}")
+    if topic.get("subtitle"):
+        lines.append(f"📈 {topic['subtitle']}")
+    facts = []
+    if countries:
+        facts.append("🌍 " + ", ".join(countries))
+    if meta.get("duration_seconds"):
+        facts.append(f"⏱ {round(meta['duration_seconds'])} s")
+    if facts:
+        lines.append(" · ".join(facts))
+    base = "\n".join(lines)
+    c = _captions(run["id"])
+    tail = caption_lines(c) if c else []
+    return fit(base, tail)
+
+
+def caption_lines(c: dict) -> list[str]:
+    from .captions import current, settings
+    cur = current(c)
+    if cur["edited"]:
+        lines = ["✍️ Caption: your own text (Use caption 1-3 below goes back to an option)", cur["text"]]
     else:
-        v = c["variants"][min(chosen, len(c["variants"]) - 1)]
-        lines = [f"✍️ Post caption {chosen + 1}:", v["hook"], v["question"]]
-    lines.append(f"📝 {c['metric_line']}")
-    if c.get("hashtags"):
-        lines.append(" ".join(c["hashtags"]))
+        lines = ["✍️ Caption options (the ✔️ one gets posted):"]
+        for i, v in enumerate(c["variants"]):
+            lines += [f"{'✔️' if i == cur['index'] else '▫️'} {i + 1}. {v['hook']}", f"      {v['question']}"]
+    if cur["hashtags"]:
+        lines.append("🏷 " + " ".join(cur["hashtags"]))
+    lines += [f"⚠️ {w}" for w in cur["warnings"]]
     if not settings()["use_for_posting"]:
         lines.append("ℹ️ Preview only: posts keep the old caption until captions.use_for_posting is on")
-    return "\n".join(lines)
+    return lines
 
 
-def choose_caption(card: dict, index: int) -> str:
-    """A caption option chosen on the open card."""
-    from . import captions
-    if card["state"] != "open":
-        return STALE
-    try:
-        captions.choose(card["run_id"], index)
-    except ValueError as e:
-        return str(e)[:190]
-    return f"Caption {index + 1} chosen."
+def card_markup(run: dict) -> dict:
+    ref = run["ref"]
+    rows = []
+    c = _captions(run["id"])
+    if c:
+        from .captions import current
+        cur = current(c)
+        rows.append([{"text": f"✔️ Caption {i + 1}" if (i == cur["index"] and not cur["edited"]) else f"Use caption {i + 1}",
+                      "callback_data": f"v:cap:{ref}:{i}"} for i in range(len(c["variants"]))])
+        rows.append([{"text": "✏️ Edit caption", "callback_data": f"v:edit:{ref}"}])
+    rows += [[{"text": APPROVE_LABEL, "callback_data": f"v:ok:{ref}"}],
+             [{"text": "❌ Reject: don't post", "callback_data": f"v:no:{ref}"},
+              {"text": "⏭ Skip for now", "callback_data": f"v:skip:{ref}"}],
+             [{"text": "🏠 Home", "callback_data": "v:home"}]]
+    return {"inline_keyboard": rows}
 
 
-def card_view(card: dict) -> tuple[str, dict]:
-    """(caption, reply_markup) the card's Telegram message should show now."""
-    run = db.get_run(card["run_id"])
-    base = card_base(run) if run else "🎬 This video was removed"
-    choosing = card["state"] in ("sending", "open")
-    caps = _captions(card["run_id"]) if run else None
-    if caps:
-        base += "\n\n" + caption_block(caps, choosing)
-    tail, rows = [], []
-    via = " in the dashboard" if card.get("decided_via") == "dashboard" else ""
-    cid = card["id"]
-    if choosing:
-        rows = [[{"text": "✅ Approve", "callback_data": f"c:a:{cid}"},
-                 {"text": "❌ Reject", "callback_data": f"c:r:{cid}"},
-                 {"text": "⏭ Later", "callback_data": f"c:l:{cid}"}]]
-        if caps and len(caps["variants"]) > 1:
-            chosen = caps.get("chosen", 0)
-            rows.append([{"text": f"{'✅ ' if i == chosen else ''}Caption {i + 1}", "callback_data": f"c:v:{cid}:{i}"}
-                         for i in range(len(caps["variants"]))])
-    elif card["outcome"] == "approved":
-        tail.append(f"✅ Approved{via}")
-        if not card["platforms"]:
-            tail.append("Not posted: no connected platform is turned on (Settings → Posting).")
-        view = posting_view(card)
-        tail += view["lines"]
-        if card["state"] == "done":
-            tail.append("🏁 Done")
-            rows = [[{"text": f"🔁 Retry {PLATFORMS[p]}", "callback_data": f"c:t:{cid}:{p}"}] for p in view["failed"]]
-    elif card["outcome"] == "rejected":
-        tail.append(f"❌ Rejected{via}")
-    elif card["outcome"] == "remade":
-        tail.append("🔁 Remade in the dashboard — a new version is on its way")
-    elif card["outcome"] == "later":
-        tail.append("⏭ Later — moved to the back of the queue")
-    elif card["outcome"] == "gone":
-        tail.append("↩️ Taken back in the dashboard — no longer waiting for review")
-    elif card["outcome"] == "swapped":
-        tail.append("↩️ Swapped for another video from the dashboard — this one is still in the queue")
-    return fit(base, tail), {"inline_keyboard": rows}
+APPROVE_LABEL = "✅ Approve and post now"
 
 
 def fit(base: str, tail: list[str], limit: int = CAPTION_LIMIT) -> str:
-    """base + tail within Telegram's caption limit; the base (countries line) gives way first."""
+    """base + tail within Telegram's caption limit; the tail (caption options) gives way first."""
     end = ("\n\n" + "\n".join(tail)) if tail else ""
-    if len(end) > limit:
-        end = end[:limit - 1] + "…"
-    room = limit - len(end)
-    if len(base) > room:
-        base = base[:max(room - 1, 0)] + "…"
+    room = limit - len(base)
+    if len(end) > room:
+        end = end[:max(room - 1, 0)] + "…"
     return (base + end)[:limit]
 
 
@@ -521,6 +263,11 @@ def _posted(run_id: str) -> bool:
     return any(p["status"] in LIVE for p in db.get_posts(run_id))
 
 
+def _publisher_alive(run_id: str) -> bool:
+    from .lock import held_elsewhere, publish_lock
+    return held_elsewhere(publish_lock(run_id))
+
+
 def reset_test_approvals(by: str) -> list[dict]:
     """Before test mode goes off: every run that was approved or queued for posting while in test
     mode (approved / publishing / published / publish-failed, with no live post) goes back to
@@ -538,52 +285,10 @@ def reset_test_approvals(by: str) -> list[dict]:
     return out
 
 
-# ------------------------------------------------------------------ /ready
-
-def ready_videos(limit: int = 8) -> list[dict]:
-    """Finished, unposted videos, newest first: waiting for review, or approved / publish-failed
-    with nothing live. The run on the open card and runs that are posting right now are left out."""
-    card = current_card()
-    out = []
-    for run in db.list_runs(limit=100000):
-        if card and run["id"] == card["run_id"]:
-            continue
-        ok = run["stage"] in ("awaiting_approval", "approved") or \
-            (run["stage"] == "failed" and run["failed_stage"] == "publish")
-        if not ok or _posted(run["id"]) or not (path("out") / run["id"] / "video.mp4").exists():
-            continue
-        if run["stage"] != "awaiting_approval" and _publisher_alive(run["id"]):
-            continue
-        out.append(run)
-        if len(out) == limit:
-            break
-    return out
-
-
-def bring_to_front(run_id: str, by: str) -> str:
-    card = current_card()
-    if card and card["run_id"] == run_id:
-        return "That video is on the card above now."
-    run = db.get_run(run_id)
-    if not run or _posted(run_id):
-        return "That video is already posted."
-    if run["stage"] != "awaiting_approval":
-        if not (run["stage"] == "approved" or (run["stage"] == "failed" and run["failed_stage"] == "publish")) \
-                or _publisher_alive(run_id):
-            return "That video can't be reviewed right now."
-        back_to_review(run_id, f"back to review via {by}")
-    move_to_front(run_id)
-    db.log(run_id, "awaiting_approval", f"moved to the front of the review queue via {by}")
-    return "Next in the review queue."
-
-
 # ------------------------------------------------------------------ Send to Telegram (dashboard)
 
-K_REQUESTED = "review:requested"   # the run the dashboard sent to Telegram, until its card is out
-
-
 def requested_run() -> dict | None:
-    """The video the dashboard sent to Telegram, while it still waits for review and for its card."""
+    """The reel the dashboard sent to Telegram, while it still waits for review and for the card."""
     run_id = db.kv_get(K_REQUESTED)
     run = db.get_run(run_id) if run_id else None
     if run and run["stage"] == "awaiting_approval":
@@ -599,106 +304,28 @@ def clear_request(run_id: str) -> None:
 
 
 def send_to_telegram(run_id: str, by: str) -> str:
-    """Ask the bot to put this video on the review card now: it moves to the front of the queue and
-    is sent even while cards are paused. An undecided card for another video gives way to it
-    (give_way); a card that is posting finishes first. Nothing is approved or posted by this."""
+    """Ask the bot to show this reel on its review card now (it moves to the front of the queue).
+    Nothing is approved or posted by this."""
     run = db.get_run(run_id)
     if not run or run["stage"] != "awaiting_approval":
         raise ValueError("Only a video waiting for review can be sent to Telegram.")
-    card = current_card()
-    if card and card["run_id"] == run_id:
+    if shown_run() == run_id:
         return "This video is already on Telegram."
     move_to_front(run_id)
     db.kv_set(K_REQUESTED, run_id)
     db.log(run_id, "awaiting_approval", f"sent to Telegram for approval via {by}")
-    if card and card["state"] == "posting":
-        return "Sent to Telegram — the card arrives when the video posting there now has finished."
-    if card:
-        return "Sent to Telegram — it takes the place of the card that is open there now."
     return "Sent to Telegram — approve it there."
 
 
-def give_way(card: dict) -> dict:
-    """An undecided card steps aside for the video the dashboard sent to Telegram. Its own video
-    keeps its place in the queue and comes back on a later card."""
-    wanted = requested_run()
-    if card["state"] != "open" or not wanted or wanted["id"] == card["run_id"]:
-        return card
-    close_card(card["id"], "open", "closed", "swapped", decided_via="dashboard")
-    return get_card(card["id"])
-
-
 def telegram_state(run_id: str) -> str | None:
-    """Where a waiting video stands on Telegram, for the dashboard: "card" (its review card is out),
+    """Where a waiting reel stands on Telegram, for the dashboard: "card" (the review card shows it),
     "next" (sent from the dashboard, the card is on its way) or None."""
-    card = current_card()
-    if card and card["run_id"] == run_id:
+    if shown_run() == run_id:
         return "card"
     return "next" if db.kv_get(K_REQUESTED) == run_id else None
 
 
-# ------------------------------------------------------------------ /new: topics and make jobs
-
-DONE_JOB = ("ready", "skipped", "failed")
-
-
-def _job(row) -> dict | None:
-    return dict(row) if row else None
-
-
-def add_job(topic_id: str, message_id: int | None, random_pick: bool = False) -> dict:
-    ts = db.now()
-    with db.db() as c:
-        jid = c.execute("INSERT INTO make_jobs(topic_id, message_id, state, random, created_at, updated_at) "
-                        "VALUES (?,?,'queued',?,?,?)", (topic_id, message_id, int(random_pick), ts, ts)).lastrowid
-    return get_job(jid)
-
-
-def get_job(job_id: int) -> dict | None:
-    with db.db() as c:
-        return _job(c.execute("SELECT * FROM make_jobs WHERE id=?", (job_id,)).fetchone())
-
-
-def update_job(job_id: int, **fields) -> None:
-    fields["updated_at"] = db.now()
-    with db.db() as c:
-        c.execute(f"UPDATE make_jobs SET {', '.join(k + '=?' for k in fields)} WHERE id=?", [*fields.values(), job_id])
-
-
-def jobs(*states: str) -> list[dict]:
-    with db.db() as c:
-        rows = c.execute(f"SELECT * FROM make_jobs WHERE state IN ({','.join('?' * len(states))}) ORDER BY id",
-                         states).fetchall()
-    return [dict(r) for r in rows]
-
-
-def job_for_run(run_id: str) -> dict | None:
-    with db.db() as c:
-        return _job(c.execute("SELECT * FROM make_jobs WHERE run_id=? ORDER BY id DESC LIMIT 1", (run_id,)).fetchone())
-
-
-def making_alive(run: dict, started_at: str | None = None) -> bool:
-    from .lock import held_elsewhere, run_lock
-    return held_elsewhere(run_lock(run["id"])) or _age(started_at or run["updated_at"]) < START_GRACE_S
-
-
-def making_now() -> list[dict]:
-    """Runs being made right now (their maker process holds the run lock)."""
-    from .lock import held_elsewhere, run_lock
-    return [r for stage in MAKING for r in db.list_runs(stage=stage) if held_elsewhere(run_lock(r["id"]))]
-
-
-def render_busy() -> bool:
-    return bool(jobs("running") or making_now())
-
-
-def topics_with_videos() -> set[str]:
-    """Topics that already have a video (made, waiting, posted or rejected), are being made, or
-    are waiting in the /new queue."""
-    made = {r["topic_id"] for r in db.list_runs(limit=100000)
-            if r["stage"] not in ("skipped", "failed") or (r["stage"] == "failed" and r["failed_stage"] == "publish")}
-    return made | {j["topic_id"] for j in jobs("queued", "running")}
-
+# ------------------------------------------------------------------ topics
 
 _SCORES: dict[tuple, float] = {}
 
@@ -716,20 +343,6 @@ def topic_score(topic: dict) -> float:
         best = [s["score"] for s in score_topic(data, topic) if s["ok"]][:get_config()["picker"]["max_countries"]]
         _SCORES[key] = round(sum(best) / len(best), 2) if len(best) >= get_config()["picker"]["min_countries"] else 0.0
     return _SCORES[key]
-
-
-def suggestions(n: int = 3) -> list[dict]:
-    """The highest-scoring topics that have no video yet (enabled, not retired, not resting)."""
-    from .selector import eligible_topics
-    candidates = eligible_topics(exclude=topics_with_videos())
-    scored = [(topic_score(t), t) for t in candidates]
-    scored.sort(key=lambda st: -st[0])
-    return [t for s, t in scored if s > 0][:n]
-
-
-def random_topic() -> str | None:
-    from .selector import choose_topic
-    return choose_topic(exclude=topics_with_videos())
 
 
 def skip_reason(run_id: str) -> str:
