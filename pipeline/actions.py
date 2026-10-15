@@ -55,9 +55,11 @@ def send_to_telegram(run_id: str, by: str) -> str:
     """The dashboard's "Send to Telegram for approval": the bot shows this video on its review card
     now, and it is approved (or not) there. Nothing is posted by this."""
     from . import health, review
-    from .accounts import account_states
+    from .accounts import account_states, telegram_switch
     if not account_states()["telegram"]["configured"]:
         raise ValueError("Telegram is not connected. Set it up in Settings first.")
+    if not telegram_switch():
+        raise ValueError("Telegram is switched off. Turn it on in the sidebar first.")
     message = review.send_to_telegram(run_id, by)
     if health.heartbeat_state(db.kv_get("heartbeat:bot"))["state"] != "ok":
         return "Sent to Telegram — the bot is stopped, so double-click Bot.bat and the card will arrive."
@@ -89,6 +91,59 @@ def make_video(by: str) -> str:
     pid = spawn("produce", "--count", "1")
     log.info("make video requested via %s (pid %s)", by, pid)
     return "Making a video — it will appear in Review shortly."
+
+
+BATCH_SIZES = (3, 5, 7)
+
+
+def make_batch(count: int, by: str) -> str:
+    """The dashboard's Make a batch: the same topics Telegram's Make a batch would choose, queued in the
+    make queue and made one at a time, by the bot when it runs, else by `run.py batch` in the background."""
+    from . import ideas, makequeue
+    from .lock import held_elsewhere
+    if count not in BATCH_SIZES:
+        raise ValueError("Choose 3, 5 or 7 videos.")
+    picks = ideas.pick_batch(count)
+    if not picks:
+        raise ValueError("No topic is free right now. Turn more topics on in Settings.")
+    makequeue.start_batch([t["id"] for t in picks])
+    log.info("batch of %d requested via %s", len(picks), by)
+    names = ", ".join(t["name"] for t in picks)
+    if held_elsewhere("bot"):
+        return f"Batch of {len(picks)} queued ({names}). The bot makes them one at a time."
+    spawn("batch")   # a second `run.py batch` exits at once and the running one takes these too
+    return f"Making {len(picks)} videos one at a time: {names}."
+
+
+STATS_GUARD_S = 120
+
+
+def refresh_stats(by: str) -> str:
+    """Check stats now: `run.py stats --no-summary` in the background (read-only calls to the platforms)."""
+    last = db.kv_get("stats_refresh_at")
+    if last and (datetime.now(timezone.utc) - db.parse_ts(last)).total_seconds() < STATS_GUARD_S:
+        raise ValueError("Stats are already being checked. Views update in a minute or two.")
+    db.kv_set("stats_refresh_at", db.now())
+    pid = spawn("stats", "--no-summary")
+    log.info("stats refresh requested via %s (pid %s)", by, pid)
+    return "Checking stats — views in Library update in a minute or two."
+
+
+def set_telegram(enabled: bool, by: str) -> str:
+    """The dashboard's Telegram switch. Off: the bot stops listening and clears its buttons from the chat,
+    but still makes and posts reels. On: it picks up again (taps made while off are dropped)."""
+    from . import health
+    from .accounts import account_states
+    from .settings import set_telegram as save
+    if enabled and not account_states()["telegram"]["configured"]:
+        raise ValueError("Telegram is not set up yet. Follow “How to connect” for Telegram in Settings.")
+    save(enabled)
+    log.info("telegram switched %s via %s", "on" if enabled else "off", by)
+    running = health.heartbeat_state(db.kv_get("heartbeat:bot"))["state"] == "ok"
+    if not enabled:
+        return "Telegram is off — the bot leaves your chat alone. Reels are still made and posted."
+    return "Telegram is on — review cards and notes go to your phone again." + (
+        "" if running else " Double-click Bot.bat to start the bot.")
 
 
 def retry(run_id: str, from_step: str, by: str) -> str:

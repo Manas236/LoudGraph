@@ -116,6 +116,18 @@ def test_yaml_writes_backup_validate_and_preserve_comments(tmp_path, monkeypatch
     assert configfile.read_bytes() == before
 
 
+def test_telegram_switch_is_saved_in_config_keeping_comments(tmp_path, monkeypatch):
+    from pipeline import config, settings
+    configfile = tmp_path / "config.yaml"
+    configfile.write_text("# keep this owner comment\ntelegram:\n  poll_timeout: 10   # seconds\n")
+    monkeypatch.setattr(config, "ROOT", tmp_path)
+    settings.set_telegram(False)
+    assert yaml.safe_load(configfile.read_text())["telegram"] == {"poll_timeout": 10, "enabled": False}
+    assert "# keep this owner comment" in configfile.read_text() and "# seconds" in configfile.read_text()
+    settings.set_telegram(True)
+    assert yaml.safe_load(configfile.read_text())["telegram"]["enabled"] is True
+
+
 def test_posting_schedule_is_daily_and_restart_safe(temp_db, monkeypatch):
     from pipeline import actions, schedule
     from zoneinfo import ZoneInfo

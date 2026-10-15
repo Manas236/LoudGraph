@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from pipeline import db, health
-from pipeline.accounts import PLATFORMS, account_states, destinations, enabled_platforms
+from pipeline.accounts import PLATFORMS, account_states, destinations, enabled_platforms, telegram_switch
 from pipeline.config import country_by_iso3, get_config, path
 from pipeline.errors import explain_error
 from pipeline.topics import load_topics
@@ -60,6 +60,49 @@ def status():
     failed = {p["run_id"] for p in db.get_posts() if p["status"] == "failed"}
     return status_line(states["telegram"]["configured"], health.heartbeat_state(db.kv_get("heartbeat:bot")),
                        len(failed), enabled_platforms(), get_config()["dry_run"], states)
+
+
+def nav():
+    """The sidebar: how many reels wait in Review and in the posting queue, the Telegram switch and the bot."""
+    from pipeline import posting, review
+    telegram = account_states()["telegram"]
+    running = health.heartbeat_state(db.kv_get("heartbeat:bot"))["state"] == "ok"
+    on = telegram["configured"] and telegram_switch()
+    if not telegram["configured"]:
+        line = "Not set up yet"
+    elif not on:
+        line = "Off — approve here only"
+    elif not running:
+        line = "On — starts with Bot.bat"
+    else:
+        line = "On — cards go to your phone"
+    return {"review": len(review.queue()), "queue": len(posting.queue()), "bot": running,
+            "telegram": {"configured": telegram["configured"], "on": on, "line": line}}
+
+
+def queue_rows():
+    """The posting queue page: reels being posted now, then the approved ones in posting order, each with
+    when it posts (the same schedule the bot follows)."""
+    from pipeline import posting
+    busy = db.list_runs(stage="publishing")
+    starting = posting.starting()
+    if starting:
+        busy.append(db.get_run(starting))
+    stats = db.latest_stats()
+    rows = [{**video(r, stats=stats), "when": "Posting now…", "posting": True} for r in busy if r]
+    planned = posting.schedule()
+    for i, item in enumerate(planned):
+        rows.append({**video(item["run"], stats=stats), "posting": False, "first": i == 0, "last": i == len(planned) - 1,
+                     "when": "Posts next, as soon as the bot runs" if item["when"] is None else
+                             "Posts " + posting.when_text(item["when"])})
+    return rows
+
+
+def posting_rule():
+    from datetime import date
+    from pipeline import posting
+    slot = posting.slot_on(date.today())
+    return f"One reel a day at {slot:%H:%M} {slot.tzname()}"
 
 
 def short_views(value):

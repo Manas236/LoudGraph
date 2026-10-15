@@ -229,12 +229,12 @@ def test_failed_platform_counts_video_once_and_drawer_retry(client, monkeypatch)
     assert calls == [("publish", "--run", run["id"], "--platform", "instagram")]
 
 
-@pytest.mark.parametrize("url", ["/", "/library", "/library?tab=approved", "/library?tab=rejected", "/settings", "/api/review"])
+@pytest.mark.parametrize("url", ["/", "/queue", "/fragment/queue", "/library", "/library?tab=approved", "/library?tab=rejected", "/settings", "/api/review"])
 def test_pages_render(client, url):
     assert client[1].get(url).status_code == 200
 
 
-@pytest.mark.parametrize("url", ["/make", "/settings/posting", "/settings/topics/inflation", "/settings/accounts/youtube/test", "/attention/dismiss", "/video/1/approve", "/video/1/telegram", "/video/1/title"])
+@pytest.mark.parametrize("url", ["/make", "/make/batch", "/stats/refresh", "/settings/telegram", "/settings/posting", "/settings/topics/inflation", "/settings/accounts/youtube/test", "/attention/dismiss", "/video/1/approve", "/video/1/telegram", "/video/1/title", "/video/1/up", "/video/1/unapprove"])
 def test_every_post_requires_csrf(client, url):
     assert client[1].post(url).status_code == 403
 
@@ -360,3 +360,74 @@ def test_a_making_card_with_no_progress_for_30_minutes_says_so(client):
         conn.execute("UPDATE runs SET updated_at=?, progress_at=? WHERE id=?", (old, old, run["id"]))
     html = c.get("/").text
     assert "rendering 43%" in html and "no progress since 2 hours ago" in html
+
+
+def test_telegram_switch_turns_telegram_off_and_on_from_the_dashboard(client, monkeypatch):
+    web, c = client
+    from pipeline import approve_telegram, db, settings
+    cfg = web.get_config()
+    saved = []
+    monkeypatch.setattr(settings, "set_telegram", lambda on: saved.append(on) or cfg["telegram"].__setitem__("enabled", on))
+    run = waiting(db)
+    switch = lambda **on: c.post("/settings/telegram", data={"csrf": web.CSRF, **on}, headers={"Accept": "application/json"})
+    refused = switch(enabled="on")                                    # no keys in .env yet
+    assert refused.status_code == 409 and "not set up yet" in refused.json["message"] and saved == []
+    assert "Not set up yet" in c.get("/").text
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "555")
+    assert 'data-action="telegram"' in c.get("/").text and approve_telegram.enabled()
+    off = switch()
+    assert off.status_code == 200 and off.json["message"].startswith("Telegram is off") and saved == [False]
+    assert not approve_telegram.enabled()
+    html = c.get("/").text
+    assert 'data-action="telegram"' not in html and "Off — approve here only" in html and "Telegram is off: switch it on" in html
+    assert 'data-action="approve"' in html                            # approving here still works
+    sent = post(c, web, run, "telegram")
+    assert sent.status_code == 409 and "switched off" in sent.json["message"]
+    on = switch(enabled="on")
+    assert on.status_code == 200 and on.json["message"].startswith("Telegram is on") and saved == [False, True]
+    assert approve_telegram.enabled() and 'data-action="telegram"' in c.get("/").text
+
+
+def test_posting_queue_page_moves_and_unapproves_reels(client):
+    web, c = client
+    from pipeline import db, posting
+    first, second = waiting(db, stage="approved"), waiting(db, "homicide_rate", "approved")
+    html = c.get("/queue").text
+    assert "ONE REEL A DAY AT 21:00 IST" in html and html.count('class="queue-row') == 2 and "Posts " in html
+    assert html.index(f'data-drawer="{first["ref"]}"') < html.index(f'data-drawer="{second["ref"]}"')
+    assert not re.search(r"r\d{8}-\d{6}-[0-9a-f]{4}|air_passengers|homicide_rate", html)
+    assert post(c, web, second, "up").json["message"] == "Moved up"
+    assert [r["id"] for r in posting.queue()] == [second["id"], first["id"]]
+    assert post(c, web, second, "up").json["message"] == "Already first in the queue"
+    fragment = c.get("/fragment/queue").text
+    assert fragment.index(f'data-drawer="{second["ref"]}"') < fragment.index(f'data-drawer="{first["ref"]}"')
+    assert post(c, web, first, "unapprove").status_code == 200
+    assert db.get_run(first["id"])["stage"] == "awaiting_approval"
+    assert post(c, web, first, "down").status_code == 409             # no longer waiting to post
+    assert c.get("/api/review").json["counts"] == {"review": 1, "queue": 1}
+
+
+def test_make_a_batch_and_check_stats_now(client, monkeypatch):
+    web, c = client
+    from pipeline import actions, ideas, makequeue
+    spawned = []
+    monkeypatch.setattr(actions, "spawn", lambda *a: spawned.append(a) or 0)
+    topics = ["inflation", "coal_share", "internet_users"]
+    monkeypatch.setattr(ideas, "pick_batch", lambda n, rng=None, **k: [{"id": t, "name": t.title()} for t in topics[:n]])
+    ask = lambda url, **values: c.post(url, data={"csrf": web.CSRF, **values}, headers={"Accept": "application/json"})
+    made = ask("/make/batch", count="3")
+    assert made.status_code == 200 and made.json["message"].startswith("Making 3 videos one at a time")
+    assert [j["topic_id"] for j in makequeue.jobs("queued")] == topics and spawned == [("batch",)]
+    assert ask("/make/batch", count="40").status_code == 409 and len(makequeue.jobs("queued")) == 3
+    assert ask("/stats/refresh").status_code == 200 and spawned[-1] == ("stats", "--no-summary")
+    assert ask("/stats/refresh").status_code == 409 and len(spawned) == 2   # one check at a time
+
+
+def test_theme_is_light_until_dark_is_picked(client):
+    web, c = client
+    assert '<html lang="en" data-theme="light">' in c.get("/").text
+    c.set_cookie("theme", "dark")
+    assert '<html lang="en" data-theme="dark">' in c.get("/settings").text
+    c.set_cookie("theme", "<b>")
+    assert '<html lang="en" data-theme="light">' in c.get("/library").text

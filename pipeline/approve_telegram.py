@@ -23,6 +23,10 @@ per EDIT_GAP_S per message (a tap is answered at once), and a 429 waits for its 
 `run.py bot` also works the make queue, runs the posting queue (posting.py: one approved reel a day at
 posting.time, a missed slot posted once when the bot is back), settles a publisher that died, collects
 stats and makes the scheduled daily videos (schedule.py).
+
+The dashboard's Telegram switch (config telegram.enabled) turns all of the Telegram side off and on while
+the bot keeps running: off clears the buttons from the chat (pause), on drops the taps made meanwhile and
+brings a fresh home card (resume).
 """
 from __future__ import annotations
 
@@ -45,7 +49,11 @@ COMMANDS = [("menu", "Open the Graphony menu")]
 K_READY_NOTE = "home:ready_note"     # the one unread "Reel ready" note
 K_SEEN_READY = "home:seen_ready"     # reels already known to be waiting for review
 K_ANNOUNCED = "posting:announced"    # runs whose posting result was already sent
+K_PAUSED = "telegram:paused"         # "1" once the chat was told Telegram is switched off
 FORCE_REPLY = {"force_reply": True}
+PAUSED_TEXT = ("⏸ Telegram is switched off in the dashboard, so these buttons do nothing for now.\n"
+               "Reels are still made and posted. Switch Telegram back on in the dashboard sidebar to use this menu.")
+RETRY_ON_S = 60                      # switched on but the token check failed: try again this often
 
 
 class TelegramError(RuntimeError):
@@ -56,8 +64,14 @@ class TelegramError(RuntimeError):
         self.code, self.description, self.retry_after = code, description or "", retry_after
 
 
-def enabled() -> bool:
+def configured() -> bool:
     return bool(secret("TELEGRAM_BOT_TOKEN") and secret("TELEGRAM_CHAT_ID"))
+
+
+def enabled() -> bool:
+    """Set up in .env and switched on in the dashboard (config telegram.enabled)."""
+    from .accounts import telegram_switch
+    return configured() and telegram_switch()
 
 
 def _url(method: str) -> str:
@@ -810,38 +824,100 @@ def run_bot() -> int:
         return _bot_loop()
 
 
-def start(bot: Bot) -> None:
-    """Once per bot start: the /menu command list, and the home card (sent and pinned the first time)."""
+def start(bot: Bot, fresh: bool = False) -> None:
+    """Once per bot start: the /menu command list, and the home card (sent and pinned the first time, or
+    when fresh: after Telegram was switched off, so the menu comes back at the bottom of the chat)."""
     try:
         register_commands()
     except Exception as e:  # noqa: BLE001 - /menu still works when typed
         log.warning("telegram: setMyCommands failed: %s", e)
-    if not home.home_msg():
+    if fresh or not home.home_msg():
         bot.open_menu()
     else:
         bot.refresh_home(now=True)
 
 
+def pause(bot: Bot) -> None:
+    """Telegram was switched off in the dashboard: the review card goes and the home card says so, with no
+    buttons, so nothing in the chat looks like it works while the bot is not listening."""
+    try:
+        bot.close_review()
+    except Exception as e:  # noqa: BLE001 - the switch must not stop the bot
+        log.info("telegram: could not close the review card: %s", e)
+    mid = home.home_msg()
+    if mid:
+        bot.editor.forget(mid)
+        try:
+            call("editMessageText", chat_id=secret("TELEGRAM_CHAT_ID"), message_id=mid, text=PAUSED_TEXT,
+                 reply_markup={"inline_keyboard": []})
+        except Exception as e:  # noqa: BLE001
+            log.info("telegram: could not mark the home card as paused: %s", e)
+    bot.home_shown = None
+    db.kv_set(K_PAUSED, "1")
+    log.info("telegram: switched off in the dashboard; the bot keeps making and posting reels")
+
+
+def resume(bot: Bot) -> None:
+    """Switched back on: taps made while it was off are dropped (never acted on late), and a fresh home
+    card replaces the paused one."""
+    paused = db.kv_get(K_PAUSED) == "1"
+    if paused:
+        try:
+            last = call("getUpdates", offset=-1, timeout=0)   # confirms (forgets) every earlier update
+            if last:
+                db.kv_set("telegram_offset", str(last[-1]["update_id"] + 1))
+        except Exception as e:  # noqa: BLE001
+            log.info("telegram: could not drop the taps made while off: %s", e)
+        db.kv_set(K_PAUSED, "")
+    start(bot, fresh=paused)
+
+
+def turn_on(bot: Bot) -> bool:
+    """Telegram is switched on (at start or from the dashboard): check the token, then resume."""
+    ok, detail = check()
+    log.info("telegram: %s", detail)
+    if not ok:
+        return False
+    try:
+        ideas.pool()   # scores the cached topics once, so the first New reel answers at once
+    except Exception as e:  # noqa: BLE001
+        log.info("telegram: could not pre-score topics: %s", e)
+    resume(bot)
+    return True
+
+
+def _idle(seconds: float) -> None:
+    """The loop's wait while Telegram is off: wakes early when it is switched on in the dashboard."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end and not enabled():
+        time.sleep(1)
+
+
 def _bot_loop() -> int:
     db.init()
-    tg = enabled()
     bot = get_bot()
-    if not tg:
+    tg = False
+    if enabled():
+        if not turn_on(bot):
+            return 1
+        tg = True
+    elif configured():
+        log.info("Telegram is switched off in the dashboard: approval works from the dashboard only; "
+                 "bot keeps running as the make queue and publish loop")
+    else:
         log.warning("Telegram credentials missing: approval works from the dashboard only; "
                     "bot keeps running as the make queue and publish loop")
-    else:
-        ok, detail = check()
-        log.info("telegram: %s", detail)
-        if not ok:
-            return 1
-        try:
-            ideas.pool()   # scores the cached topics once, so the first New reel answers at once
-        except Exception as e:  # noqa: BLE001
-            log.info("telegram: could not pre-score topics: %s", e)
-        start(bot)
-    last_scan = last_beat = 0.0
+    last_scan = last_beat = next_try = 0.0
     while True:
         try:
+            want = enabled()
+            if want and not tg and time.time() >= next_try:
+                tg = turn_on(bot)
+                next_try = 0.0 if tg else time.time() + RETRY_ON_S
+            elif not want and tg:
+                tg = False
+            if not want and configured() and db.kv_get(K_PAUSED) != "1":
+                pause(bot)   # also after a restart while it was off
             from .schedule import tick
             tick()
             if time.time() - last_beat >= health.HEARTBEAT_EVERY_S:
@@ -857,7 +933,7 @@ def _bot_loop() -> int:
                 last_scan = time.time()
             if not tg:
                 makequeue.work()
-                time.sleep(30)
+                _idle(30)
                 continue
             bot.tick()
             poll_once(bot.poll_timeout(), bot)

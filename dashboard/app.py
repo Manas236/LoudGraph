@@ -1,4 +1,4 @@
-"""Local, server-rendered Review / Library / Settings dashboard.
+"""Local, server-rendered Review / Posting queue / Library / Settings dashboard.
 
 Start it with Dashboard.bat, `python run.py dashboard`, or directly with `python dashboard/app.py`.
 """
@@ -20,7 +20,7 @@ from dashboard import viewmodels as vm
 from dashboard.media import chart_thumbnail
 from pipeline import actions, db, health, posting
 from pipeline import review as review_queue
-from pipeline.accounts import PLATFORMS, account_states, ready_destinations
+from pipeline.accounts import PLATFORMS, account_states, ready_destinations, telegram_switch
 from pipeline.config import brand_name, get_config, path, setup_logging
 from pipeline.errors import explain_error
 
@@ -52,9 +52,14 @@ def security_headers(response):
     return response
 
 
+THEMES = ("light", "dark")
+
+
 @app.context_processor
 def inject():
-    return {"csrf": CSRF, "brand": brand_name(), "status": vm.status()}
+    theme = request.cookies.get("theme")   # set by the theme button (dashboard.js); light until changed
+    return {"csrf": CSRF, "brand": brand_name(), "status": vm.status(), "nav": vm.nav(),
+            "theme": theme if theme in THEMES else "light"}
 
 
 app.jinja_env.filters["views"] = vm.short_views
@@ -79,7 +84,7 @@ def review_context():
     selected = request.args.get("selected", type=int)
     current = next((v for v in videos if v["ref"] == selected), videos[0] if videos else None)
     run = next((r for r in waiting if current and r["ref"] == current["ref"]), None)
-    telegram = {"on": account_states()["telegram"]["configured"],
+    telegram = {"on": account_states()["telegram"]["configured"] and telegram_switch(),
                 "state": review_queue.telegram_state(run["id"]) if run else None}
     return {"videos": videos, "video": current, "position": videos.index(current) + 1 if current else 0,
             "next_video": vm.next_video(), "telegram": telegram}
@@ -102,9 +107,22 @@ def review_fragment():
 
 @app.get("/api/review")
 def review_state():
+    nav = vm.nav()
     return jsonify(waiting=[r["ref"] for r in review_queue.queue()],
                    activity=render_template("_activity.html", making=vm.activity(), attention=vm.attention()),
-                   status=render_template("_status.html"))
+                   status=render_template("_status.html"),
+                   counts={"review": nav["review"], "queue": nav["queue"]}, bot=nav["bot"],
+                   telegram=nav["telegram"]["line"])
+
+
+@app.get("/queue")
+def queue_page():
+    return render_template("queue.html", rows=vm.queue_rows(), rule=vm.posting_rule())
+
+
+@app.get("/fragment/queue")
+def queue_fragment():
+    return render_template("_queue.html", rows=vm.queue_rows())
 
 
 @app.get("/library")
@@ -154,6 +172,12 @@ def flag(iso):
     return send_file(path("flags") / (iso + ".svg"), conditional=True)
 
 
+@app.get("/font/inter.ttf")
+def font():
+    """Inter, the typeface of the videos and the brand, from assets/fonts (no web font service)."""
+    return send_file(path("fonts") / "Inter-Variable.ttf", mimetype="font/ttf", conditional=True, max_age=86400)
+
+
 @app.get("/settings")
 def settings():
     from dashboard import setup_steps
@@ -188,7 +212,8 @@ def result(fn, back="review"):
 def video_action(ref, operation):
     run = get_run(ref)
     rid = run["id"]
-    if operation not in {"approve", "telegram", "reject", "remake", "title", "retry", "publish"}:
+    if operation not in {"approve", "telegram", "reject", "remake", "title", "retry", "publish", "up", "down",
+                         "unapprove"}:
         abort(404)
 
     def act():
@@ -218,7 +243,13 @@ def video_action(ref, operation):
             return actions.retry(rid, run["failed_stage"], "dashboard")
         if operation == "publish":
             return posting.post_now(rid, "dashboard")
-    return result(act)
+        if operation in ("up", "down"):
+            if not posting.move(rid, -1 if operation == "up" else 1):
+                return "Already " + ("first" if operation == "up" else "last") + " in the queue"
+            return "Moved " + operation
+        if operation == "unapprove":
+            return posting.unapprove(rid, "dashboard")
+    return result(act, "queue_page" if operation in ("up", "down", "unapprove") else "review")
 
 
 @app.post("/video/<int:ref>/caption")
@@ -237,6 +268,21 @@ def caption_action(ref):
 @app.post("/make")
 def make_video():
     return result(lambda: actions.make_video("dashboard"))
+
+
+@app.post("/make/batch")
+def make_batch():
+    return result(lambda: actions.make_batch(request.form.get("count", type=int, default=0), "dashboard"))
+
+
+@app.post("/stats/refresh")
+def refresh_stats():
+    return result(lambda: actions.refresh_stats("dashboard"), "library")
+
+
+@app.post("/settings/telegram")
+def switch_telegram():
+    return result(lambda: actions.set_telegram(request.form.get("enabled") == "on", "dashboard"), "settings")
 
 
 @app.post("/attention/dismiss")

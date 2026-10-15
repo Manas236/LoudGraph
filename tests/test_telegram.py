@@ -550,6 +550,45 @@ def test_offset_survives_a_restart(env):
     assert [kw.get("offset") for kw in fake.of("getUpdates")] == [None, 42]
 
 
+def test_switching_telegram_off_in_the_dashboard_pauses_the_running_bot(env, monkeypatch, pinned_config):
+    """The switch is read every loop: off clears the buttons from the chat while the bot keeps running."""
+    from pipeline import analytics, home, orchestrator, posting, schedule
+    tg, fake, db = env["tg"], env["fake"], env["db"]
+    for module, name in ((schedule, "tick"), (posting, "tick"), (orchestrator, "settle_stopped"), (analytics, "tick")):
+        monkeypatch.setattr(module, name, lambda *a, **k: None)
+
+    def poll(timeout, bot):
+        pinned_config["telegram"]["enabled"] = False      # the owner flips the switch while the bot polls
+        return 0
+
+    def stop(_seconds):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(tg, "poll_once", poll)
+    monkeypatch.setattr(tg.time, "sleep", stop)
+    assert tg._bot_loop() == 0
+    card = home.home_msg()
+    paused = [kw for kw in fake.of("editMessageText") if kw["message_id"] == card][-1]
+    assert paused["text"] == tg.PAUSED_TEXT and paused["reply_markup"] == {"inline_keyboard": []}
+    assert db.kv_get(tg.K_PAUSED) == "1" and not tg.enabled() and tg.configured()
+    assert json.loads(db.kv_get("heartbeat:bot"))["telegram"] is True   # the beat before the switch
+
+
+def test_switching_telegram_back_on_drops_taps_made_while_off(env, pinned_config):
+    from pipeline import home, makequeue
+    tg, fake, db, bot = env["tg"], env["fake"], env["db"], env["bot"]
+    old = menu(env)
+    pinned_config["telegram"]["enabled"] = False
+    tg.pause(bot)
+    fake.updates = [{"update_id": 70, "callback_query": {     # tapped on the paused card: must never run later
+        "id": "cb", "data": "h:pick:coal_share", "from": {"id": OWNER},
+        "message": {"message_id": old, "chat": {"id": OWNER, "type": "private"}}}}]
+    pinned_config["telegram"]["enabled"] = True
+    tg.resume(bot)
+    assert db.kv_get("telegram_offset") == "71" and db.kv_get(tg.K_PAUSED) == ""
+    assert home.home_msg() != old and fake.of("pinChatMessage")[-1]["message_id"] == home.home_msg()   # a fresh menu
+    assert tg.poll_once(1, bot) == 0 and makequeue.jobs("queued") == []
+
+
 def test_a_second_bot_exits_at_once(temp_db, tmp_path, monkeypatch, capsys):
     from pipeline import approve_telegram as bot, lock
     monkeypatch.setattr(lock, "path", lambda key: tmp_path)

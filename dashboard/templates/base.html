@@ -1,12 +1,38 @@
 <!doctype html>
-<html lang="en"><head>
+{% from '_icons.html' import icon, mark %}
+<html lang="en" data-theme="{{ theme }}"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="csrf-token" content="{{ csrf }}">
 <title>{% block title %}Review{% endblock %} · {{ brand }}</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}"><script src="{{ url_for('static', filename='dashboard.js') }}" defer></script>
 </head><body data-page="{{ request.endpoint }}">
-<header class="topbar"><div class="header-inner"><a href="/" class="brand"><span class="brand-symbol" aria-hidden="true">▥</span> {{ brand }}</a>
-<nav aria-label="Main navigation"><a href="/" {{ 'aria-current=page' if request.endpoint == 'review' }}>Review</a><a href="/library" {{ 'aria-current=page' if request.endpoint == 'library' }}>Library</a><a href="/settings" {{ 'aria-current=page' if request.endpoint == 'settings' }}>Settings</a></nav>
-<div id="status-line">{% include '_status.html' %}</div></div></header>
+<div class="shell">
+<aside class="sidebar" id="sidebar" aria-label="Menu">
+<div class="sidebar-top"><a href="/" class="brand">{{ mark() }}<span>{{ brand }}</span></a><button class="icon-button sidebar-close" data-sidebar-close aria-label="Close menu">{{ icon('close') }}</button></div>
+<form action="/make" method="post" data-async><input type="hidden" name="csrf" value="{{ csrf }}"><button class="primary block">{{ icon('plus') }}<span>New video</span></button></form>
+<nav class="side-nav" aria-label="Main navigation">
+{% for endpoint, href, label, name, count in [('review', '/', 'Review', 'review', nav.review), ('queue_page', '/queue', 'Posting queue', 'queue', nav.queue), ('library', '/library', 'Library', 'library', None), ('settings', '/settings', 'Settings', 'settings', None)] %}<a href="{{ href }}" {{ 'aria-current=page' if request.endpoint == endpoint }}>{{ icon(name) }}<span>{{ label }}</span>{% if count is not none %}<span class="count" data-count="{{ name }}" {{ 'hidden' if not count }}>{{ count }}</span>{% endif %}</a>{% endfor %}
+</nav>
+<div class="side-section"><p class="side-label">Make & check</p>
+<form action="/make/batch" method="post" data-async class="batch-row"><input type="hidden" name="csrf" value="{{ csrf }}"><span class="batch-label">{{ icon('layers') }}<span>Make a batch</span></span><span class="batch-sizes">{% for n in (3, 5, 7) %}<button name="count" value="{{ n }}" data-confirm="Make {{ n }} videos now? They are made one at a time and wait for you in Review." aria-label="Make a batch of {{ n }} videos">{{ n }}</button>{% endfor %}</span></form>
+<form action="/stats/refresh" method="post" data-async><input type="hidden" name="csrf" value="{{ csrf }}"><button class="side-action">{{ icon('chart') }}<span>Check stats now</span></button></form>
+<a class="side-action" href="/settings#advanced">{{ icon('logs') }}<span>System & logs</span></a>
+</div>
+<div class="sidebar-foot">
+<form action="/settings/telegram" method="post" data-async data-telegram class="telegram-card {{ 'is-on' if nav.telegram.on }}"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label class="switch telegram-switch"><span class="telegram-icon">{{ icon('send') }}</span><span class="telegram-copy"><b>Telegram</b><small data-telegram-line>{{ nav.telegram.line }}</small></span><input type="checkbox" name="enabled" role="switch" aria-label="Telegram approvals" data-autosave {{ 'checked' if nav.telegram.on }} {{ 'disabled' if not nav.telegram.configured }}></label>
+{% if not nav.telegram.configured %}<a class="side-link" href="/settings#accounts">Set up Telegram in Settings →</a>{% endif %}<noscript><button>Save</button></noscript></form>
+<p class="bot-line {{ 'is-running' if nav.bot }}" data-bot-line><span class="dot" aria-hidden="true"></span><span data-bot-text>{{ 'Bot is running' if nav.bot else 'Bot is stopped — double-click Bot.bat' }}</span></p>
+</div>
+</aside>
+<div class="scrim" data-sidebar-close></div>
+<div class="content">
+<header class="topbar"><button class="icon-button menu-button" data-sidebar-open aria-label="Open menu" aria-controls="sidebar" aria-expanded="false">{{ icon('menu') }}</button>
+<h1 class="page-title">{{ self.title() }}</h1>
+<div id="status-line">{% include '_status.html' %}</div>
+<button class="icon-button theme-toggle" data-theme-toggle aria-label="{{ 'Switch to light theme' if theme == 'dark' else 'Switch to dark theme' }}" title="Light / dark theme">{{ icon('moon') }}{{ icon('sun') }}</button></header>
 <main>{% block body %}{% endblock %}</main>
+</div>
+</div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden>{% for message in get_flashed_messages() %}{{ message }}{% endfor %}</div>
 </body></html>

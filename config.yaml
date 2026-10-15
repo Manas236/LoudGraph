@@ -185,7 +185,9 @@ captions:                       # pipeline/captions.py; hooks in caption_formats
     recent_days: 30
 
 telegram:
-  poll_timeout: 10              # long-poll seconds while idle (a dashboard decision shows on the card within this)
+  enabled: true                 # the dashboard's Telegram switch. false = the bot leaves the chat alone (no cards,
+                                # notes or summaries) but still makes and posts reels; taps made while off are dropped
+  poll_timeout: 10             # long-poll seconds while idle (a dashboard decision shows on the card within this)
   busy_poll_timeout: 2          # while a card is posting or a /new video is rendering
   api_base: "https://api.telegram.org"
 

@@ -91,6 +91,15 @@ def go_live(live: list[str]) -> Path:
     return update_yaml(config.ROOT / "config.yaml", edit, CONFIG_INDENT)
 
 
+def set_telegram(enabled: bool) -> Path:
+    """The dashboard's Telegram switch: telegram.enabled in config.yaml (the bot re-reads it every loop)."""
+    def edit(document):
+        if document.get("telegram") is None:
+            document["telegram"] = {}
+        document["telegram"]["enabled"] = enabled
+    return update_yaml(config.ROOT / "config.yaml", edit, CONFIG_INDENT)
+
+
 def toggle_topic(topic_id: str, enabled: bool) -> Path:
     def edit(document):
         topic = next((t for t in document if t["id"] == topic_id), None)

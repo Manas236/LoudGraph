@@ -13,6 +13,11 @@ def enabled_platforms() -> list[str]:
     return [p for p in PLATFORMS if cfg[p].get("enabled", p == "youtube")]
 
 
+def telegram_switch() -> bool:
+    """The dashboard's Telegram switch (config telegram.enabled); on when the line is missing."""
+    return bool((get_config().get("telegram") or {}).get("enabled", True))
+
+
 def test_mode() -> dict:
     """Which turned-on platforms are in test mode (dry_run) and which post for real.
     on: every turned-on platform is in test mode; testing/live/off: platform keys."""

@@ -169,7 +169,7 @@ def cmd_batch(a):
     import json
     from pipeline import db, ideas, makequeue, review
     from pipeline.config import run_dir
-    from pipeline.lock import held_elsewhere
+    from pipeline.lock import held_elsewhere, single_instance
     db.init()
     if a.count:
         picks = ideas.pick_batch(a.count)
@@ -196,7 +196,11 @@ def cmd_batch(a):
             print(f"SKIPPED  {name}: {review.skip_reason(run['id'])}", flush=True)
         else:
             print(f"FAILED   {name}: {review.plain(run['error'] if run else 'no run')}", flush=True)
-    makequeue.run_foreground(on_done=done)
+    with single_instance("batch") as mine:
+        if not mine:   # e.g. Make a batch pressed twice in the dashboard: one worker makes the whole queue
+            print("Another window is already making the queue: it makes these too, one at a time.")
+            return 0
+        makequeue.run_foreground(on_done=done)
     return 0
 
 

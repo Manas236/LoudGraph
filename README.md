@@ -44,7 +44,7 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py go-live [--check-only]` | read-only Instagram + Facebook checks; for those that pass, turn posting on and test mode off (old test-mode approvals go back to review first) |
 | `python run.py publish [--run ID]` | publish approved runs now, outside the posting queue (the bot's queue posts one a day by itself) |
 | `python run.py stats [--no-summary]` | pull views / avg % watched / skip rate now, recompute topic weights, send the summary (the bot also does this every 6 h by itself) |
-| `python run.py dashboard` | local web UI on http://127.0.0.1:5055 (Review, Library, Settings) |
+| `python run.py dashboard` | local web UI on http://127.0.0.1:5055 (Review, Posting queue, Library, Settings) |
 | `python run.py verify [--run ID ...]` | ffprobe, loudness, A/V sync, stem balance, pitch-vs-data, pixel centring, contact sheet |
 | `python run.py crash-test` | `out/crash_test.mp4`: a synthetic flat-crash-recover series, to hear the event treatment |
 | `python run.py compare --old ID --new ID` | old vs new frame (`compare.png`) and spectrogram (`compare_spectrogram.png`) |
@@ -180,6 +180,16 @@ the browser). `python run.py dashboard` and `python dashboard/app.py` start the 
 second copy notices the first and exits. Everything is local; no frontend build or internet
 connection is needed for the dashboard.
 
+The sidebar holds the pages (with how many reels wait in Review and in the posting queue), **New
+video**, **Make a batch** of 3, 5 or 7 (the same topic choice as Telegram's Make a batch, made one at a
+time by the bot, or by `run.py batch` in the background when the bot is not running), **Check stats
+now**, the **Telegram** switch and whether the bot is running. The Telegram switch sets
+`telegram.enabled` in config.yaml: off, the bot stops listening, removes the review card and marks the
+home card as paused, but keeps making and posting reels; on, it drops any taps made meanwhile and sends a
+fresh home card. The moon/sun button in the top bar switches between the light theme (default) and the
+black dark theme; the choice is remembered in a cookie. Below 1100 px the sidebar opens from the menu
+button.
+
 - **Review** (`/`): one large, playable video, with **Approve** (adds it to the posting queue: one
   reel a day at `posting.time`), **Send to Telegram for
   approval** (shown when Telegram is connected: nothing is posted, the bot puts this video on its
@@ -188,8 +198,11 @@ connection is needed for the dashboard.
   and press Enter to save it to the post title and captions. Platform chips choose where this
   video posts. Disconnected accounts are disabled; you can still approve and the video waits in
   Library. The bot posts approved reels from the posting queue (after you connect the accounts), or
-  use **Post now** in the Library drawer. The caption and hashtags are editable under the video. Remake keeps the topic, chooses new countries and marks the old version
+  use **Post now** in the Posting queue or the Library drawer. The caption and hashtags are editable under the video. Remake keeps the topic, chooses new countries and marks the old version
   replaced. A progress card refreshes every two seconds. Only actual errors need attention.
+- **Posting queue** (`/queue`): approved reels in posting order with the day and time each one
+  posts (the same schedule the bot follows), **Move up** / **Move down**, **Post now** (asks first)
+  and **Unapprove** (back to the front of Review), like the Telegram Posting queue screen.
 - **Library** (`/library`): Posted, Approved, not posted, and Rejected tabs. Thumbnails show the
   middle of the first country's chart. Open a card for the player, platform stats, live links and
   a targeted retry when an upload failed. Test-only posts remain in Approved, not posted.
