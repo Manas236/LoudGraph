@@ -26,3 +26,6 @@ backups/
 
 # raw Graph API responses from the diagnosis (account and Page ids)
 diagnosis_frames/graph_api_pull.json
+
+# DB safety copies made before a migration (pipeline.db.bak_YYYYMMDD_HHMM)
+*.db.bak_*

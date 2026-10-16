@@ -1,619 +1,269 @@
-# Build report (2026-10-07)
+# Graphony: "Which country ends up last?" for every reel, insights audit, hook tracking
 
-Built on Windows 11, Python 3.11.0 venv (`.venv`), FFmpeg 9.0.2, i5 with 6 threads and 8 GB RAM.
-Everything lives in the project root folder. 15 commits, one or more per milestone (`git log`).
-All publishers stayed in dry-run. No credentials were present, so nothing was posted anywhere.
+Pass of 2026-10-16 (IST). Nothing was posted. Published reels were not touched. The previous REPORT.md
+(fix pass of 2026-10-08) is in git history.
 
-## What works
+## Short answer
 
-| # | Milestone | Evidence |
-|---|---|---|
-| 0 | Constraints | `pathlib` only, no shell scripts; Windows/Linux file lock (`pipeline/lock.py`) gives one render at a time; frames are piped to FFmpeg stdin with no per-frame files; `.gitignore` covers `.env`, `tokens/`, `cache/`, `out/`, `*.db`. `git status` after a full run shows none of them tracked. |
-| 1 | Repo layout + state machine | `pipeline/db.py` (SQLite WAL, tables `runs`, `stage_log`, `posts`, `stats`, `topic_weights`). Illegal transitions raise errors and every transition is logged. `tests/test_db.py` passes (5 tests). |
-| 2 | Data + topics | `python run.py topics-verify` fetched all 37 seed topics from the live World Bank API and OWID: **34 verified, 3 dropped** (see Topics). Series are cached in `cache/series/` with `fetched_at` and re-fetched after 30 days. Only the 47 pool countries are kept, so aggregates never enter. |
-| 3 | Scorer | `pipeline/score.py`. Weights and thresholds are in `config.yaml`. `tests/test_score.py`: flat, linear-interpolated, monotone, V-shape, noisy and crash series, plus gaps, low swing and `min_meaningful` (10 tests). |
-| 4 | Picker | 6–9 countries fit 30–45 s; the config caps it at 8. Greedy max-min z-distance, net>0.5 / net<−0.5 / reversals≥2 constraints, best score last, never repeats a (topic, set), and fails with "not enough interesting data" below 5. `tests/test_picker.py` (5 tests). |
-| 5 | Labels | Turning point is found in code (largest single-year move if ≥25% of range, else the pivot before the largest zigzag leg). Gemini call, model auto-selection, retry/backoff, quota handling and a cache keyed by (topic, country, year) are implemented. `validate()` rejects unconfident answers, more than 4 words or 24 chars, a year off by more than ±1, and any number except a nearby year. `tests/test_labels.py` (7 tests). **Not exercised live: no GEMINI_API_KEY**, so every run logs `0/8 labels accepted; no label because: no GEMINI_API_KEY` and renders without tags. |
-| 6 | Timeline | `pipeline/timeline.py` is the only timing source. Audio onsets and the line head both read `Slot.onsets` / `Slot.year_pos`. `tests/test_timeline.py` (6 tests). |
-| 7 | Audio | Karplus-Strong plucks (IIR with a fractional-delay allpass; autocorrelation shows pitch within 0.05% from 165 to 1319 Hz), detuned-saw pad with a sub, swept-noise whoosh, end chord of all pad roots (all from A minor pentatonic, so no semitone clashes). Master: 30 Hz HPF, 15 kHz LPF, look-ahead limiter, −14 LUFS (pyloudnorm). `tests/test_audio.py` (4 tests). |
-| 8 | Render | skia-python 144 backend (logged in `stage_log` and `meta.json`) with a Pillow 2× fallback that was rendered and tested (`test_pillow_fallback_renders_in_safe_zone`). Inter (OFL) and flag-icons (MIT, SVG plus rasterised PNG) are vendored. Layout constants put safe zones at x ≤ 950 and y ≤ 1536. `tests/test_layout.py` asserts the constants **and** renders real frames (long names, wide tick labels, label tags, end card) to check every recorded text box (11 tests). Each run writes `meta.json`, `thumb.jpg` and `video.mp4`. Render takes about 60–75 s for a 40 s video (18 fps). |
-| 9 | Telegram | `pipeline/approve_telegram.py`: long-poll `getUpdates`, `sendVideo` with Approve / Reject / Regenerate buttons, only `TELEGRAM_CHAT_ID` accepted, failure alerts, `/status`, daily summary (sent by `run.py stats`). `tests/test_telegram.py` covers the logic with the Bot API mocked (4 tests). **Not exercised live: no token.** |
-| 10 | Dashboard | `python run.py dashboard` was started and fetched with curl: `/`, `/run/<id>`, `/analytics`, `/topics` and the thumbnail all returned 200. `netstat` showed `127.0.0.1:5055 LISTENING` only, and binding to 0.0.0.0 is refused. CSRF token on all POSTs, media allowlist. Buttons call `pipeline/actions.py`, the same functions the bot calls. `tests/test_dashboard.py` (5 tests). |
-| 11 | Publishing | YouTube: resumable `videos.insert`, categoryId 27, title ≤ 100 chars, read-back that detects `private_locked` and alerts, daily cap. Instagram: endpoints **checked against the current Meta docs** (examples show v25.0): REELS container with `upload_type=resumable`, upload to `rupload.facebook.com/ig-api-upload/...` with `Authorization: OAuth`, `offset` and `file_size` headers, `status_code` polling, `media_publish`. A `video_url` mode is marked BLOCKED without a public host. Optional FB Page Reels (`video_reels` start / upload / finish). In dry-run the approved test run went to `published` with both posts `dry_run` and the exact requests (token redacted) in `publish_youtube.json` / `publish_instagram.json`. |
-| 12 | Analytics + selector | `run.py stats` ran: it pulled stats for 0 posts (none live) and logged the daily summary. Insights metrics were checked against the Meta docs: `plays` is gone; the code uses `views,reach,likes,comments,ig_reels_avg_watch_time`. Weight is mean log(views) after 72 h, shrunk toward the global mean below 3 posts; a topic retires after 3 bottom-quartile posts. Selector is 70% weighted / 30% least-tried and respects cooldown. `tests/test_analytics_selector.py` (4 tests). |
-| 13 | CLI + scheduling | `doctor`, `fetch`, `topics-verify`, `produce`, `bot`, `publish`, `stats`, `dashboard`, plus `verify`. `python run.py doctor` gives **0 failing, 4 warnings** (the 4 missing credentials). README documents Windows Task Scheduler, Linux cron + systemd, and `screen`. Cadence is 2/day (`produce` defaults to it). |
-| 14 | Verification gate | Results below. |
+- **Insights are being pulled, and the token is fine.** It is a Page token, it never expires, and it
+  has every scope needed (`instagram_manage_insights`, `read_insights`, `pages_read_engagement`). Every
+  requested Instagram metric is accepted. **No token regeneration is needed.** Stats had stopped for
+  three reasons, all now fixed:
+  1. The bot had been off since 15 Oct 17:21 IST.
+  2. A restart did not pull straight away.
+  3. Facebook was never pulled.
+  Because of this, the breakout reel had **no stats row at all**.
+- **Breakout vs a low reel posted 20 minutes before it:** 2,125 vs 159 views, 1,535 vs 129 reach,
+  12.1 s vs 9.6 s average watch. Both had 0 shares and 0 saves.
+- **Every Graphony reel now opens with "Which country ends up last?"** (`opening.hook_template:
+  which_last`, `hook_explore_pct: 0`). It uses the breakout reel's own generator logic, and the hook is
+  only used when it is true of the rendered data.
+- **All 5 unposted reels were re-branded.** None had to fall back to its old hook. Each new video keeps
+  the original data, country order and timeline. Its audio stream is byte-identical to the old file.
+  All 5 are in Ready for review, and the review card is on Telegram now.
+- **One layout difference:** below the hook, the metric subtitle wraps to two lines on 4 of the 5 reels,
+  so their dots row sits lower than the breakout's. Details are under "Re-brand" below.
 
-### Verification gate
+## 0. Safety
 
-1. `python -m pytest`: **61 passed**.
-2. `python run.py produce --count 3` (all publishers dry-run). The selector picked 3 different verified topics: **landlines, life_expectancy, nuclear_share**. 3/3 reached `awaiting_approval`. An earlier `air_passengers` run was also re-verified.
-3. and 4. `python run.py verify --run ...` (ffprobe, FFmpeg `ebur128` on the final MP4, spectral-flux onsets in `audio.wav` vs timeline):
-
-| run | topic | size | fps | duration | audio | integrated | true peak | notes matched | median sync error |
-|---|---|---|---|---|---|---|---|---|---|
-| r20261007-141336-9435 | landlines | 1080×1920 | 30 | 39.9 s | aac 48 kHz | −14.0 LUFS | −1.7 dBFS | 278/278 | 7.6 ms |
-| r20261007-141505-ed3d | life_expectancy | 1080×1920 | 30 | 39.9 s | aac 48 kHz | −14.0 LUFS | −1.7 dBFS | 272/272 | 7.6 ms |
-| r20261007-141634-8357 | nuclear_share | 1080×1920 | 30 | 39.9 s | aac 48 kHz | −14.1 LUFS | −1.9 dBFS | 288/288 | 7.6 ms |
-| r20261007-135650-f350 | air_passengers | 1080×1920 | 30 | 39.9 s | aac 48 kHz | −14.1 LUFS | −1.6 dBFS | 232/232 | 7.6 ms |
-
-   All checks pass (limit: median ≤ 40 ms). Full results are in each `out/<run>/verify.json`.
-
-5. I looked at every contact sheet and fixed what was wrong:
-   * Plain crossfades overlapped two country names ("INDEXESIA"). Transitions now dip through the shared background.
-   * Y tick labels were crossed by the line. They now sit in a left gutter.
-   * Label tags were drawn on top of the line. Placement now scores 8 candidate positions against the finished line.
-   * The middle x-axis label read 2006 for 1990–2023 because of banker's rounding. Fixed to half-up.
-   * The Pillow fallback ignored text alpha, so the watermark was bright white. Fixed.
-   * All 32 flags in the final sheets match their countries. No text is in the unsafe zones.
-
-   I also measured the final MP4 rather than trusting the WAV. FFmpeg's native AAC encoder pushed true peak to **+3.7 dBFS** on one video (WAV −2.6 dBTP). The cause is Perceptual Noise Substitution re-synthesising the plucks' noise-burst attacks. Encoding with `-aac_pns 0` makes the MP4 peak match the WAV. A post-encode guard stays in place as a safety net; it did not need to act on the final renders.
-6. Telegram: skipped, because there are no credentials. Callback handling is covered by mocked tests only.
-
-## Sample videos and contact sheets
-
-| topic | video | contact sheet |
-|---|---|---|
-| landlines | `out/r20261007-141336-9435/video.mp4` | `out/r20261007-141336-9435/contact.png` |
-| life_expectancy | `out/r20261007-141505-ed3d/video.mp4` | `out/r20261007-141505-ed3d/contact.png` |
-| nuclear_share | `out/r20261007-141634-8357/video.mp4` | `out/r20261007-141634-8357/contact.png` |
-| air_passengers (extra) | `out/r20261007-135650-f350/video.mp4` | `out/r20261007-135650-f350/contact.png` |
-
-Each folder also has `meta.json` (title, descriptions, tags, sources), `thumb.jpg`, `audio.wav`, `timeline.json` and `verify.json`. The air_passengers run also has `publish_*.json` from the dry-run publish.
-
-## Topics
-
-**Verified (34).** The columns show usable pool countries / countries that pass the scorer / latest data year.
-
-| category | topics |
+| step | done |
 |---|---|
-| economy | inflation (44/38/2025), gdp_growth (47/47/2025), gdp_per_capita (47/46/2025), unemployment (47/45/2025, modelled), military_spending (46/42/2024), remittances (44/21/2025), manufacturing_share (47/34/2025), tourism_arrivals (41/37/2020) |
-| people | fertility_rate_un (47/43/2023, OWID UN WPP), female_labour_participation (47/29/2025, modelled), population_growth (47/45/2025), net_migration (47/44/2025), median_age (47/7/2023) |
-| health | life_expectancy (47/8/2023), child_mortality (47/16/2024), health_spending (46/46/2024), alcohol_consumption (47/30/2020), homicide_rate (33/21/2024), meat_supply (47/43/2023) |
-| energy | nuclear_share (47/19/2025), coal_share (47/26/2025), renewables_share (47/39/2025), solar_share (46/11/2025), hydro_share (46/36/2025), oil_per_capita (42/42/2024) |
-| tech | internet_users (47/34/2025), mobile_subscriptions (47/41/2024), landlines (47/42/2024), broadband (43/36/2024), rnd_spending (30/23/2024) |
-| planet | co2_per_capita (47/45/2024), temperature_anomaly (47/47/2025), air_passengers (45/43/2023), cereal_yield (47/47/2024) |
+| git | Working tree was clean at `8de081d` (nothing to commit before the change) |
+| DB backup | The DB is `pipeline.db` (there is no `state.db`). Copied with the SQLite backup API to `pipeline.db.bak_20261016_1114` (integrity ok, 26 runs, 21 stats rows). `*.db.bak_*` was added to `.gitignore` |
+| processes | No bot or dashboard was running at the start (the last bot heartbeat was 2026-10-15 17:21 IST), so nothing needed stopping |
+| posting | Nothing was posted. Before the restart, the 2 approved reels went back to review, so the posting queue was empty. The missed 15 Oct slot was then closed as "nothing to post" (`posting:slot:2026-10-15`) |
+| file backups | Every re-rendered reel keeps `video_oldhook.mp4`, `thumb_oldhook.jpg`, `meta_oldhook.json` and `captions_oldhook.json` |
 
-**Dropped (3), commented out in `topics.yaml` with the reason:**
-* `fertility_rate` (WDI `SP.DYN.TFR.IN`): the World Bank API returns "Invalid value" for this code today. Confirmed with a direct `curl`. Replaced by the OWID UN WPP series (`fertility_rate_un`), which verified.
-* `refugees_by_origin` (WDI `SM.POP.REFG.OR`): the API says "The indicator was not found. It may have been deleted or archived." Confirmed with `curl`.
-* `forest_area` (WDI `AG.LND.FRST.ZS`): fetched fine, but 0 countries pass the scorer. The FAO series is interpolated between assessments, so it would sound like one repeated note.
+## 1. Insights audit
 
-## Blocked on the owner
+All of these are read-only GET calls, on Graph API v25.0.
 
-Put everything in `.env` (template: `.env.example`). Then run `python run.py doctor`, and once it shows OK, set `dry_run.<platform>: false` in `config.yaml`.
+| # | check | result | evidence |
+|---|---|---|---|
+| a1 | Stats pull implemented | PASS | `pipeline/analytics.py` `collect()`: IG media insights into the `stats` table |
+| a2 | Stats pull has run | PASS | 21 rows, from 2026-10-13T11:09:34Z to the latest at **2026-10-15T10:30:08Z** |
+| a3 | Every posted reel covered | **FAIL** (before the fix) | Only 6 IG posts had rows. The breakout reel (IG post 79) and Coal power (post 71) had none. The last pull ran 19 minutes before the coal reel posted, and no pull ran after that. Facebook had **never** been pulled |
+| b1 | Scheduled in the bot loop | PASS | `approve_telegram._bot_loop` calls `analytics.tick()`, which pulls when 6 h have passed since the last pull (`analytics.every_hours`) |
+| b2 | Scheduled anywhere else | none | Task Scheduler has no Graphony task (only two unrelated Cloudflare tasks). The dashboard's **Check stats now** is a manual `run.py stats --no-summary` |
+| b3 | Pull actually happening | **FAIL** (before the fix) | The bot had been down since 15 Oct 17:21 IST. A restart also waited 6 h after the last pull before pulling again |
+| c | Token scopes (`debug_token`) | **PASS** | type PAGE, `is_valid` true, `expires_at` 0 (never), data access until 2027-01-06. Scopes: read_insights, pages_show_list, business_management, instagram_basic, **instagram_manage_insights**, instagram_content_publish, **pages_read_engagement**, pages_manage_posts, public_profile. Nothing missing |
+| d | IG metric names (current docs) | **PASS** | All 9 requested metrics are accepted together: views, reach, likes, comments, shares, saved, total_interactions, ig_reels_avg_watch_time, ig_reels_video_view_total_time. `reels_skip_rate` is also accepted. The Meta docs list `plays`, `clips_replays_count`, `ig_reels_aggregated_all_plays_count` and `impressions` as deprecated; `views` replaced them. The code already used `views`, so no rename was needed. None were dropped |
+| e | FB Page reels (posting is on) | PASS, 1 dropped | `/{video-id}/video_insights?period=lifetime`: 8 metrics accepted (fb_reels_total_plays, blue_reels_play_count, fb_reels_replay_count, post_video_avg_time_watched, post_video_view_time, post_video_social_actions, post_video_likes_by_reaction_type, post_video_followers). **`post_impressions_unique` is refused** (`(#100) The value must be a valid insights metric`), so it was dropped |
 
-1. **Gemini (labels)**: create an API key at https://aistudio.google.com/apikey and set `GEMINI_API_KEY=...`. The first run lists the models and picks a flash-class one (written to `cache/gemini_model.json`). The model-selection code has not been run against the live list.
-2. **Telegram (approval)**: create a bot with @BotFather (`/newbot`) and set `TELEGRAM_BOT_TOKEN`. Send the bot a message, read `chat.id` from `https://api.telegram.org/bot<TOKEN>/getUpdates`, and set `TELEGRAM_CHAT_ID`. Then run `python run.py bot`. Until then, approval works from the dashboard.
-3. **YouTube**:
-   * In Google Cloud Console, create a project and enable *YouTube Data API v3* and *YouTube Analytics API*.
-   * Configure the OAuth consent screen (External) and set its **publishing status to "In production"**, not "Testing" (corrected in pass 02: in Testing, refresh tokens expire after 7 days and uploads would silently stop; unverified "In production" is fine for a single owner, who clicks through the "unverified app" warning once).
-   * Create Credentials → OAuth client ID → *Desktop app*, and save the JSON as `tokens/client_secret.json`.
-   * Set `YT_CLIENT_SECRET_FILE=tokens/client_secret.json` and run `python -m pipeline.publish_youtube --auth` once.
-   * Uploads stay **private** until the project passes Google's YouTube API audit. The pipeline will mark these `private_locked` and alert you.
-4. **Instagram Reels**:
-   * You need an Instagram professional account linked to a Facebook Page.
-   * Create a Meta app using *Instagram API with Facebook Login*, with `instagram_basic`, `instagram_content_publish`, `instagram_manage_insights` and `pages_read_engagement`.
-   * Set `IG_ACCESS_TOKEN` to a long-lived **Page** access token, and `IG_USER_ID` to the Page's `instagram_business_account.id`.
-   * Optional FB Page Reels: also grant `pages_show_list` and `pages_manage_posts`, set `FB_PAGE_ID`, and set `facebook.enabled: true`.
-5. **Scheduling**: register the Task Scheduler or cron jobs from the README. Nothing has been scheduled on this machine.
+**Branches.** No scope is missing, so no token action is needed. No metric name was wrong; the code
+was restructured anyway, so that a renamed metric is dropped instead of losing the whole pull
+(see 2).
 
-## Known weaknesses (noticed, not fixed)
+### Breakout vs a low reel
 
-* **Scorer weights as specified let pure noise tie a clean story.** White noise gets the minimum reversal points (5), but its large year-to-year jumps earn nearly full shock points (25). A synthetic noise series scored 66.9 against 65.2 for a clean V. Real noisy topics (`gdp_growth`, `temperature_anomaly`) pass for 47/47 countries. A fix would be to scale shock down when reversals ≥ 6; it is not applied, to keep the specified formula.
-* **Smooth topics give low-diversity sets.** life_expectancy (min pairwise distance 0.09) and median_age only have 7–8 passing countries, almost all rising, so the "one falling" constraint cannot be met.
-* **Live APIs are unproven.** Gemini, Telegram, YouTube, Instagram and Facebook calls are written from current docs but have never had a real credential. Expect first-run fixes.
-* **Sync is checked audio vs timeline, not on decoded video.** The line head moves on 33 ms frame steps, and the detector shows a constant ~7.6 ms analysis offset rather than a timing error.
-* **The y-axis is autoscaled per country and not zero-based.** This is deliberate for drama, and the swing ≥ 0.15 filter prevents near-flat lines. Each country also has its own pitch range, so pitch compares years within a country, not countries with each other.
-* **Topic weights mix YouTube and Instagram views on one log scale.** Platforms with different reach will bias it.
-* **The Telegram `getUpdates` offset is in memory only.** After a bot restart, Telegram may re-deliver recent button presses. They are handled as "already approved/rejected", so nothing breaks, but the owner may see an extra notice.
-* **Detached jobs are not tracked.** Dashboard and bot actions launch `run.py` as detached processes (logs in `cache/logs/job-*.log`). There is no job table, so a crashed job only shows up as a run stuck in its stage.
-* **Re-running a run from a stage rewrites its files in place.** `produce --run X --from render` on a published run resets it to `awaiting_approval`, and the posted video's files are overwritten.
-* **The Pillow fallback is plainer.** It has a flat fill instead of a gradient and ring-approximated glow; frames take ~58 ms vs ~38 ms with skia.
-* **Some data ends early.** `tourism_arrivals` stops in 2020 and `alcohol_consumption` in 2020 (WHO), so those videos end at those years.
+Instagram, at 2026-10-16 11:45 IST. The low reel is Coal power, posted the same day 20 minutes earlier
+with "Who overtakes who?".
 
+| | Child mortality (breakout) | Coal power (low) |
+|---|---|---|
+| hook | Which country ends up last? | Who overtakes who? |
+| views | **2,125** | 159 |
+| reach | **1,535** | 129 |
+| avg watch time | **12.1 s** (51.5% of 23.5 s) | 9.6 s (44.9% of 21.5 s) |
+| total watch time | 5.4 h | 0.35 h |
+| likes / comments | 5 / 0 | 1 / 0 |
+| shares / saves | 0 / 0 | 0 / 0 |
+| Facebook plays | 0 | 0 |
 
----
+Every other Instagram reel is at 118-149 views. All 8 Facebook reels together have 7 plays.
 
-# Fix pass 01 (2026-10-07)
+## 2. Stats made reliable
 
-State before this pass is tagged `v0-first-build`. All publishers stayed in dry-run. `python -m pytest`: **89 passed**.
+- **In the bot, on startup, then every 6 h.** `analytics.tick()` now pulls on the first loop after the
+  bot starts, then every `analytics.every_hours`. It runs on a background thread. There was no
+  separate scheduled stats task to disable. Instead, a machine-wide `stats` lock makes sure the bot's
+  pull and the dashboard's Check stats now never run at the same time: a second pull returns at once.
+- **Backfill.** Every pull asks about every reel ever posted, on both Instagram and Facebook. The
+  first pull after the restart therefore filled in all 8 IG and all 8 FB reels, including the
+  breakout.
+- **History.** Each pull adds one row per post with `fetched_at`. Nothing is overwritten. New columns
+  `shares`, `saved` and `avg_watch_s` sit next to views, reach, likes, comments and `avg_view_pct`, and
+  everything Meta returned stays in `raw`.
+- **Failures.** Errors are now caught per reel and per platform, and logged with the token redacted.
+  If Meta refuses one metric name, it is dropped and the others are asked for again. A failed pull is
+  retried on the next cycle. It runs on its own thread, so approvals and the posting queue keep going.
+  The test below shows Meta hanging and then failing while posting still ticks and an approval goes
+  through.
+- **Weights.** Topic weights and hook weights use `analytics.weight_platforms` (YouTube + Instagram).
+  Facebook rows are kept but left out of the weights. With every FB reel at 0-4 plays, including them
+  would only double each reel's count and push all weights toward zero.
 
-## A. Owner's complaints
+## 3. Hook template, tracked apart from the topic
 
-### A1. One centre axis
+- **New fields.** `posts.hook_template` and `runs.hook_template`, added by the existing idempotent
+  migration list in `db.py`. A post copies its run's template when it is created.
+- **How it's set.** The template is read from the question the video really shows (meta.json
+  `opening.question`):
+
+  | question | template |
+  |---|---|
+  | "Which country ends up last?" | `which_last` |
+  | "Who overtakes who?" | `who_overtakes` |
+  | anything else, or no on-screen hook | `other` |
+
+  It is set at render time, and `run.py hooks` or every stats pull fills it in. A second run changed
+  0 rows.
+- **Hook weight.** It uses the same formula as the topic weight (`analytics.compute_weights` with
+  `key="hook_template"`):
+  1. Only posts at least 72 h old count, using their latest views.
+  2. log(views) is z-scored per platform.
+  3. Each template's weight is the mean z.
+  4. With fewer than 3 posts, the weight is shrunk toward the global mean.
+
+  The weights are stored in `hook_weights`. They are for reporting only; config decides the hook.
+  Right now only `other` has posts old enough (4 posts, weight +0.00). `who_overtakes` posts pass 72 h
+  on 16, 17 and 18 Oct. The breakout reel is the first `which_last` post and passes 72 h on
+  **2026-10-18 16:21 IST**.
+- **Telegram home card.** The 📊 Stats button now shows the last 10 reels, each with its hook, topic,
+  views, average watch time and shares, then the average views per hook (2,125 for `which_last` vs 136
+  for `who_overtakes` and 136 for `other`). The card is still a single card shown one screen at a time.
+
+### Backfill mapping (every run with a video)
+
+| run | topic | stage | on-screen hook | hook_template | IG views |
+|---|---|---|---|---|---|
+| r20261007-135650-f350 | air_passengers | rejected | (none) | other | |
+| r20261007-141336-9435 | landlines | rejected | (none) | other | |
+| r20261007-141505-ed3d | life_expectancy | rejected | (none) | other | |
+| r20261007-141634-8357 | nuclear_share | rejected | (none) | other | |
+| r20261007-152531-9d50 | air_passengers | published | (none) | other | 149 |
+| r20261007-153030-d91b | landlines | published | (none) | other | 140 |
+| r20261007-153521-6a24 | nuclear_share | published | (none) | other | 120 |
+| r20261007-153747-82c0 | homicide_rate | published | (none) | other | 135 |
+| r20261013-163924-6028 | meat_supply | published | Who overtakes who? | who_overtakes | 118 |
+| r20261014-110322-1c91 | unemployment | published | Who overtakes who? | who_overtakes | 131 |
+| r20261014-110459-f0bc | female_labour_participation | rejected | Which country falls the most? | other | |
+| r20261014-110651-8461 | coal_share | published | Who overtakes who? | who_overtakes | 159 |
+| r20261014-110740-beb5 | tourism_arrivals | rejected | Which country falls the most? | other | |
+| r20261014-110830-eede | child_mortality | published | Which country ends up last? | **which_last** | **2,125** |
+| r20261014-110924-753f | rnd_spending | approved, now in review | Which country ends up last? | which_last | |
+| r20261014-111011-76c0 | co2_per_capita | approved, now in review | Who overtakes who? (old), Which country ends up last? (new) | which_last | |
+| r20261014-154124-ee99 | population_growth | awaiting approval | Which country ends up last? | which_last | |
+| r20261014-154350-107f | oil_per_capita | awaiting approval | Which country ends up last? | which_last | |
+| r20261014-154607-8185 | inflation | awaiting approval | Who overtakes who? (old), Which country ends up last? (new) | which_last | |
+
+The four reels from 7-9 Oct show no question on screen; DIAGNOSIS.md notes the title was taken off
+the frame. They count as `other`.
+
+## 4. "Which country ends up last?" as the default
+
+- **Same logic as the breakout.** The breakout's hook came from `captions.opening()`. It fills the
+  `ends_last` opener ("{country} ends up last: {value} in {year}") from the computed `final_low` fact:
+  the country whose own last value is the lowest. So for this hook, "last" means the lowest final
+  value, whatever the metric; for child mortality that is Chile, at 0.7%. Under the old logic, a seed
+  picked between the two strongest openers (overtakes, then ends_last). That is why some reels got one
+  hook and some the other.
+- **Nothing new invented.** `opening()` now takes `prefer` (the configured opener). It fills it exactly
+  as before. If the preferred opener cannot be used, or for `hook_explore_pct` % of the seeds, the old
+  choice is made among the other openers.
+- **Config.** `opening.hook_template: which_last` and `opening.hook_explore_pct: 0` are in
+  config.yaml. `auto` restores the old behaviour.
+- **Truth check.** `captions.check_ends_last` runs on the rendered data (the views' years and values).
+  The hook is refused when:
+  - there are fewer than 3 countries;
+  - the claimed country's data does not reach the video's final year;
+  - another country ends at or below it, also compared as shown on screen (0.7% vs 0.7% counts as a
+    tie).
+
+  A country whose own data stops a year early is compared on its last value, exactly as the end card
+  ranks it. The R&D reel has this case: Ireland and the UK end in 2023 at 1.59% and 2.68%, while
+  Mexico is at 0.25% in 2024. When a new reel falls back, its log says why.
+- **Captions.** New hooks and questions are marked `"opener": "ends_last"` in caption_formats.json. A
+  `which_last` reel uses only those, and no other reel uses them. They tease the payoff without naming
+  it, for example "Guess which country ends up last", "Don't scroll before you see who ends up last",
+  "Only one of these countries ends up last in 2025", and "Did your guess for last place match the
+  ending?". The Gemini prompt also says not to give the answer away. The caption rules are
+  unchanged: the template wording must be followed word for word, numbers can come only from computed
+  facts (here, only the final year), no em dashes, and the data credit is added at posting. Video
+  length is unchanged at 20-25 s.
+
+## 5. Re-brand of unposted reels (`run.py rebrand`)
+
+The five reels below were the only Graphony reels between rendered and published: none were in the
+`rendered` stage, and nothing was mid-posting.
+
+| reel | stage before, now | old hook | new hook (end-card answer) | check | captions |
+|---|---|---|---|---|---|
+| Research spending (753f) | approved, now in review | Which country ends up last? | Which country ends up last? (Mexico, 0.25% in 2024) | true | plain fills (Gemini 503) |
+| Carbon emissions (76c0) | approved, now in review | Who overtakes who? | Which country ends up last? (Cuba, 2.2 t in 2024) | true | plain fills (Gemini 503) |
+| Population growth (ee99) | awaiting approval | Which country ends up last? | same (Sweden, +0.25% in 2025) | true | Gemini |
+| Oil use per person (107f) | awaiting approval | Which country ends up last? | same (Bangladesh, 925 in 2024) | true | Gemini |
+| Inflation (8185) | awaiting approval | Who overtakes who? | Which country ends up last? (China, 0.1% in 2025) | true | Gemini |
+
+**No reel fell back to its old hook.** Three already had the hook; they were still re-rendered, so the
+cover and captions match.
+
+- **What the new video reuses.** The frames are drawn again from each run's own data.json, pick.json,
+  labels.json and **timeline.json**. The new MP4 **copies the old file's audio stream**
+  (`ffmpeg -c:a copy`); nothing is synthesised or encoded again.
+- **Queue order.** The two approved reels went back to review with their posting places (5 and 6)
+  saved in `runs.prior_post_pos`. They are first in Ready for review, in their posting order. When
+  re-approved, they take those places back, ahead of anything approved after them (`posting.next_pos`
+  leaves those places free).
+- **Telegram.** The bot opened the existing review card on the first of them. The card then moves
+  through all five, one at a time.
+- **Posting.** It resumes on the normal one-reel-a-day queue (21:00 IST) as soon as reels are approved.
+
+### Verification of each re-rendered reel
+
+| check | result |
+|---|---|
+| Hook on frame 0 | "Which country ends up last?": the same two lines, boxes, 88 px size, colour (#f5f7fa on #0b0d12), and cover time (2.35 s = `thumb_offset`) as the breakout. **Pixel diff of the hook band vs the breakout: 0.0**, in frame 0 and in the cover, on all 5 |
+| Metric subtitle | Same position (first line), colour (#c3cad6) and size (48 px) as the breakout. Population growth's shorter subtitle fits at 52 px |
+| Dots row | Same dot size, spacing and active colour (#22d3ee); one dot per country (4 or 5) |
+| Audio | **MD5 of the audio stream identical to `video_oldhook.mp4`** on all 5. Durations are identical too: 21.57, 24.77, 22.73, 24.77 and 22.60 s |
+| Verification gate (`run.py verify`) | **PASSED on all 5**: -14.2 LUFS, true peak -1.9 to -2.6 dBTP, A/V sync ~7.5 ms, centring, opening frames, duration |
+
+**Layout difference, flagged.** The breakout's subtitle, "% of newborns who die before age 5", fits
+on one line at 48 px. Four of the new subtitles are longer, so the same layout code wraps them to two
+lines:
+- "Research & development spending, / % of GDP"
+- "CO2 from fossil fuels & industry, / tonnes per person"
+- "Oil energy used per person, kWh per / year"
+- "Consumer prices, % rise vs the year / before"
+
+On those four, the dots row, flag and chart start **57 px lower** than in the breakout. On Population
+growth they start 4 px lower. The hook itself is identical, and this is the same layout the breakout
+was made with. Matching the breakout's positions exactly would need either shorter subtitles in
+topics.yaml or a one-line, smaller subtitle. Both are design changes, so neither was made here.
+
+## 6. After the restart
+
+| check | result |
+|---|---|
+| pytest | **296 passed**: 285 before, plus 11 new in `tests/test_hooks.py`. The new tests cover the backfill mapping and its idempotence; the "last" check (true, false, tie, on-screen tie, fewer than 3 countries, data that stops early); which_last as the default, falling back on a tie, plus explore and auto; captions that tease without naming the answer; re-brand (old files kept, audio copied, published reels refused, a tie kept, queue order restored); a pull on startup; refused metrics and FB values; and **Meta hanging and then failing during a pull while the bot loop keeps posting and an approval goes through** |
+| one bot instance | One `run.py bot` holds the `bot` lock: venv launcher PID 17308, interpreter PID 9340, which matches the heartbeat. Dashboard started too (`/ping` answers `graphony-dashboard`) |
+| home card responds | The pinned card (message 37) was edited live by the restarted bot: "👀 Ready for your review: 5", "📅 Approved, waiting to post: 0", "📣 Last posted: Child mortality, … 2,125 views" |
+| stats pull ran and wrote rows | 11:45:26 to 11:46:18 IST: Instagram 8 posts, Facebook 8 posts, so **16 new rows** (21 → 37) |
+| review card | Message 45 is showing Research spending (video), the first of the 5 |
+
+## Files
+
+- **New:** `pipeline/hooks.py` (template tracking, backfill), `pipeline/rebrand.py`,
+  `tests/test_hooks.py`.
 - **Changed:**
-  - Every centred element sits on x = 540, with symmetric 130 px side margins (`render.py`: `MARGIN`, `CX`). This also clears the right-12% zone, because 950 ≤ 88% of 1080.
-  - Text is centred by its **ink** bounds, not its advance width (`canvas.ink()`), so the measured pixel centre is exact.
-  - The flag and the country name are centred as one group.
-  - The chart's gridlines span 130–950 symmetrically. Data is inset 34 px on both sides, so the line's glow stays inside the gridlines.
-  - Y-axis tick labels are inside the plot, small and left-aligned, just above their gridline. There is no gutter.
-  - Progress dots all have the same outer size, so the active dot can't skew the row.
-- **Tests:**
-  - `test_every_centred_element_is_on_x540_in_pixels[skia|pillow]` renders mid-country, transition and end-card frames and measures each element's non-background pixel extent from the image, the same way the owner measured. It asserts a centre of 539.5 ± 2 px (the pixel centre of 0–1079) and margins equal within 4 px.
-  - `verify` repeats the same measurement on frames decoded from every MP4 (the `centred_540` check below).
-- **Measured on the new air_passengers MP4** (`r20261007-152531-9d50`, mid-Germany frame), in the same format as the owner's table:
-
-| element | x range | centre |
-|---|---|---|
-| header (metric) | 137-942 | 539.5 |
-| progress dots | 418-660 | 539.0 |
-| flag + country name | 270-808 | 539.0 |
-| chart incl. y labels | 130-949 | 539.5 |
-| year | 436-643 | 539.5 |
-| value | 322-757 | 539.5 |
-| end-card title | 148-931 | 539.5 |
-| end-card rows | 129-949 | 539.0 |
-| end-card CTA | 289-790 | 539.5 |
-
-  Before (v0): everything was centred at about 507, while the watermark sat at 540.
-
-- **Overlap fix found while reviewing contact sheets:** a line passing a tick label at the left edge used to run through the text (US "19.0%", South Africa "5.0%", Venezuela "20.0"). Tick labels are now drawn above the line with a 5 px background halo, so the line goes visibly behind them. `test_line_never_shows_through_a_tick_label[skia|pillow]` checks this, and I confirmed the test fails when the halo is turned off.
-
-### A2. No title pill
-- The pill is gone. The hook title stays only in `meta.json` as the post title.
-- The metric subtitle is now the header: bold white text, sized 54→40 px to fit on one line, or two lines at 54→34 px if it can't.
-- The stack (header → dots → country → chart → year → value) is computed by `compute_layout()` with fixed gaps and vertically centred in y 0–1536. For a one-line header it runs from y ≈ 169 to y ≈ 1367. The dead band between the subtitle and the chart is gone.
-- **Tests:** `test_no_pill_no_source_no_brand_and_text_in_safe_zone`, `test_header_is_the_metric_and_tick_labels_are_inside_the_chart`, `test_stack_is_vertically_centred_in_safe_area` (top and bottom margins within 40 px), `test_every_topic_header_fits_two_lines`.
-
-### A3. No source text, no brand
-- "Source: …" is removed from every frame, including the end card. The data credit stays in the post description (CC BY attribution).
-- `brand.name` is now `""`, and nothing is drawn when it is empty. `test_brand_draws_only_when_configured` covers the opt-in case.
-- The old channel name was removed from rendered text, meta, descriptions, tags, Telegram captions, the dashboard title (now "Pipeline"), the User-Agent, the doctor header, the CLI description, and the README (neutral placeholders: "Shorts pipeline", `/opt/shorts-pipeline`, `shorts-pipeline-bot.service`).
-- The SQLite file was renamed from the old name to `pipeline.db` (a plain file rename; all runs kept).
-- `tests/test_brand.py` greps every text file in the repo, excluding `.git`, `.venv`, `out` and `cache`, and finds no mention.
-- **Not changed:**
-  - The local folder name, as you allowed.
-  - Earlier git commits carry the old name as author name; rewriting published history is destructive, so I left it. New commits use a neutral author.
-  - Videos rendered before this pass under `out/` still have the old watermark burned in. I didn't delete them; say the word and they go.
-
-### A4. Audio follows the data
-- **Stems:** `pluck.wav`, `pad.wav` and `fx.wav` are rendered separately, levelled by measured loudness, mixed and mastered. Each stem is scaled by the master gain and kept in `out/<run>/`.
-- **Plucks lead:** the pad is set 9 LU under the plucks. Plucks decay faster (T60 0.3 s, about 250 ms audible) and have a brighter attack (brightness 0.9 plus a 2 ms high-passed pick transient).
-  - Measured pluck minus pad on all 4 new videos: see the gate table (≥ 6 required).
-- **Pitch:**
-  - The scale now covers 3 octaves (16 notes).
-  - `note_indices()` guarantees that a move of 15% or more of the range changes the note by at least 2 scale steps. `test_big_moves_always_change_the_note_by_two_steps` runs this over 300 random walks.
-- **Pad tracks the data:**
-  - The low-pass cutoff (180 → 2200 Hz) and gain (0.2 → 1.0) follow the value the line head shows, smoothed over 150 ms.
-  - Total detune is 3 cents (it was 9), so there is no audible pulsing.
-  - The constant sub under the pad is gone.
-- **Events (move ≥ 25% of range):**
-  - `timeline.py` gives the step into an event 3× the duration. The slot gets longer, and video and audio both read the new knots.
-  - The pluck stem plays a scale run from the old note to the new one: a fall is heard as a falling run, a jump as a rising one.
-  - Falls add a short 75→42 Hz sub hit and duck the pad to 5% for 0.35 s ("riser-less silence"). Jumps add a short bright accent.
-  - The head dot pulses harder and an expanding ring marks the landing point.
-  - The picker rebuilds the timeline after slow-mo and drops the least interesting country if the video would exceed 45 s; homicide_rate dropped Sweden.
-- **Tests** (`tests/test_audio.py`, synthetic 3-country track):
-
-| test | measured |
-|---|---|
-| Spearman(values, detected note), per country on the pluck stem | 0.988 / 0.988 / 0.999 |
-| Pluck vs pad stem | −12.88 vs −21.18 LUFS (**8.30 LU**) |
-| Flat-crash-recover, pad stem in the flat years (1992–2001) | RMS 0.0822, centroid 1518 Hz |
-| Same, crash year and the year after (2003–2005) | RMS 0.0010, centroid 238 Hz |
-| Event run detected on the pluck stem | 10 strictly descending notes (MIDI 86 → 52) |
-| Low band (< 90 Hz) of the fx stem around falls vs elsewhere | > 10× (`test_sub_bass_only_on_falls`) |
-
-- **Crash test clip** (`out/crash_test/analysis.json`): slow-mo step 0.36 s vs normal 0.12 s; pad stem flat years RMS 0.13285 / centroid 1050 Hz vs crash years RMS 0.00201 / centroid 172 Hz; event run intended MIDI [79, 74, 72, 67, 64, 60, 55, 52, 48] -> detected [79, 74, 72, 67, 64, 60, 55, 52, 48, 45] (10 descending); MP4 -14.2 LUFS / -2.6 dBFS, 8.6 s.
-
-## B. Known weaknesses fixed
-- **B1. Scorer noise:** shock points are scaled by 0.3 when reversals ≥ 6 (`scorer.weights.noise_*`). `test_noise_scores_clearly_below_v_and_crash`: five white-noise series score **46.8–53.8**, against **64.9** for a clean V and **81.4** for a clean crash. Before, noise scored 66.9 against the V's 65.2.
-- **B2. Low variety:**
-  - **Rule:** a set with no falling country, or with a minimum pairwise z-distance below 0.25, fails as `low variety: …`. A failed run puts the topic on cooldown, and `produce` asks the selector for another topic. If no falling country is in the top 20, the picker also searches all passing countries for one.
-  - **life_expectancy:** it now fails as `low variety: no falling country (net < -0.5)` (run `r20261007-153736-194f`) and is no longer eligible, which is the intended behaviour. The selector replaced it with **homicide_rate**.
-  - **Reason-order fix:** the first attempt (`r20261007-153708-dbea`) failed with the wrong reason, "every set already used", because only 8 countries pass and that set had been used before. The variety verdict now takes precedence over "used".
-  - Tests: `test_low_variety_when_nothing_falls`, `test_low_variety_when_shapes_are_alike`, `test_drops_countries_when_slowmo_makes_it_too_long`.
-- **B3. Telegram restarts:**
-  - The `getUpdates` offset is stored in a new `kv` table and written before each update is handled, so a crash skips an update rather than repeating it. `test_offset_survives_a_restart` covers this.
-  - The test also caught a **real bug that would have crashed the live bot**. `call()` used `timeout` both as the HTTP timeout and as the Bot API's long-poll parameter, so every `getUpdates` raised "multiple values for keyword argument 'timeout'". The HTTP timeout is now `http_timeout`.
-- **B4. Re-rendering published runs:**
-  - `produce --run X --from …` and the dashboard's Retry button refuse when the run is published or publishing, or has any uploaded/live/private_locked post.
-  - `--as-new` (or "Re-render as new run" on the dashboard) copies the run's inputs into a new run and produces that instead.
-  - Tests: `tests/test_orchestrator.py`, 4 tests.
-  - **Mistake during this pass:** to demonstrate the refusal, I ran an in-place re-render of v0 run `r20261007-135650-f350`. That run was `awaiting_approval` with only dry-run posts, so B4 correctly allowed it, and it overwrote the run's v0 video and audio with new-pipeline output.
-  - **Recovery:** I checked out `v0-first-build` in a temporary git worktree and re-rendered that run's unchanged inputs with the v0 code into `out/v0_baseline/r20261007-135650-f350/`. The result is identical: −14.02 LUFS and −1.55 dBTP, the exact values the v0 log recorded. The one deliberate difference is that `brand.name` was blanked, so this regenerated file doesn't put the old name back into an output. The A/B images use this baseline.
-- **B5. Topic weights:** log(views) is z-scored within each platform before topics are combined, and "bottom quartile" for retirement is judged per platform. `test_views_are_zscored_per_platform` shows the worst Instagram topic, despite 20× the raw views, now ranks below the best YouTube topic.
-- **B6. `.env.example` audit:**
-  - Nothing was missing and nothing extra. The code reads exactly 7 variables, all through `config.secret()`: `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `YT_CLIENT_SECRET_FILE`, `IG_USER_ID`, `IG_ACCESS_TOKEN`, `FB_PAGE_ID`. `.env.example` listed the same 7, and the names match the README and REPORT.
-  - **Diff:** comments were grouped (one for both Telegram variables, one for both Instagram variables). Each variable now has its own "what it is; where to get it" line, and a header says every variable is optional and the list is test-enforced.
-  - **Gap fixed:** the file never said that `IG_ACCESS_TOKEN` is also the Page token used for Facebook Page Reels. It does now.
-  - **Code change:** `config.SECRET_NAMES` existed but was unused. It is now authoritative: `secret()` raises on any name not in it.
-  - `tests/test_env_example.py` asserts that `.env.example` keys = names read in code = `SECRET_NAMES`, that the only direct environment access is inside `secret()`, that every variable has a "what; where" comment, and that the README uses the same names.
-
-## Other changes found during the gate
-- **AAC true peak:**
-  - With the brighter pluck attacks, AAC still overshot by up to about 0.9 dB even with PNS off. The first A/B MP4 measured −0.7 dBFS.
-  - The encoder headroom went from 0.5 to 1.3 dB.
-  - The post-encode safety guard now re-encodes from the **original WAV**. It used to re-encode the decoded AAC, which added a second generation of overshoot, so it moved −0.7 to only −0.8 while costing 0.5 LU of loudness.
-- The master loop now alternates normalise and limit until loudness is within 0.15 LU of target and true peak is under the ceiling. It used to finish around −14.45.
-- Timelines saved before slow-mo still load (linear knots).
-
-## Verification gate (fix pass 01)
-
-`python run.py verify` on every new video. All checks are measured on the final MP4, the stems and the timeline:
-
-| run | topic | size / fps | duration | LUFS | true peak | sync median (matched) | pluck - pad | min pitch rho | centring err / margin diff | passed |
-|---|---|---|---|---|---|---|---|---|---|---|
-| `r20261007-152531-9d50` | air_passengers (same set as v0) | 1080x1920 / 30 | 44.3 s | -14.2 | -2.4 dBFS | 7.43 ms (232/232) | 8.32 LU | 0.961 | 1.0 / 2 px | yes |
-| `r20261007-153030-d91b` | landlines | 1080x1920 / 30 | 41.8 s | -14.2 | -1.7 dBFS | 7.53 ms (279/279) | 8.31 LU | 0.98 | 1.0 / 2 px | yes |
-| `r20261007-153521-6a24` | nuclear_share | 1080x1920 / 30 | 44.9 s | -14.2 | -2.6 dBFS | 7.43 ms (288/288) | 8.32 LU | 0.981 | 1.0 / 2 px | yes |
-| `r20261007-153747-82c0` | homicide_rate | 1080x1920 / 30 | 40.6 s | -14.2 | -2.3 dBFS | 7.45 ms (197/197) | 8.3 LU | 0.972 | 0.5 / 1 px | yes |
-
-Contact sheets: I looked at every new sheet. Confirmed on all four:
-- no pill
-- no source text
-- no brand text
-- everything on one centre axis
-- y labels inside the chart
-- all flags correct for their countries
-- nothing overlapping (after the tick-label halo fix above)
-
-## Paths
-- **A/B:**
-  - `out/r20261007-152531-9d50/compare.png`: v0 frame vs new frame at t = 2.60 s (mid-Germany). Red ticks mark x = 540.
-  - `out/r20261007-152531-9d50/compare_spectrogram.png`: v0 vs new, Germany segment, 60 Hz–3 kHz on a log scale, with the 2020 crash marked.
-  - v0 baseline: `out/v0_baseline/r20261007-135650-f350/`.
-- **Crash test clip:** `out/crash_test.mp4`, with stems, timeline and `analysis.json` in `out/crash_test/`.
-- **New sample videos** (each folder also holds `contact.png`, `verify.json`, `pluck.wav`/`pad.wav`/`fx.wav` and `meta.json`):
-  - air_passengers, same 8 countries as v0 run `r20261007-135650-f350`: `out/r20261007-152531-9d50/video.mp4`
-  - landlines: `out/r20261007-153030-d91b/video.mp4`
-  - nuclear_share: `out/r20261007-153521-6a24/video.mp4`
-  - homicide_rate (replaces life_expectancy, which correctly fails as low variety): `out/r20261007-153747-82c0/video.mp4`
-
----
-
-# Pass 02: go-live (2026-10-07)
-
-State before this pass is tagged `v1-video-approved`. The repo is now linked to https://github.com/Manas236/LoudGraph (`main` and both tags pushed).
-
-**No credentials were found.** There is no `.env`, none of the 7 variables is set in the process environment, and `tokens/` is empty. Following the pass's branch rule, sections 1–6 were skipped and are marked BLOCKED below. Nothing was sent to Telegram, Gemini, YouTube, Instagram or Facebook, and there are **no test posts, ids or URLs**. All publishers are still in dry-run.
-
-**The test suite was not run in this pass.** The `python -m pytest` command was denied by this session's permission check, so the new and changed tests below are written but **not executed**. The last full run was 89 passed (fix pass 01). Every changed module was byte-compiled, and `doctor` and the dashboard were run live (results below). Run `python -m pytest` before relying on this pass.
-
-## Per-integration result
-
-| integration | result | exact missing item |
-|---|---|---|
-| Telegram (§1) | BLOCKED | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
-| Gemini labels (§2) | BLOCKED | `GEMINI_API_KEY` |
-| YouTube (§3) | BLOCKED | `YT_CLIENT_SECRET_FILE` (then `tokens/youtube_token.json`: the owner must run `python -m pipeline.publish_youtube --auth` once) |
-| Instagram Reels (§4) | BLOCKED | `IG_USER_ID`, `IG_ACCESS_TOKEN` |
-| Facebook Page Reels (§5) | BLOCKED | `FB_PAGE_ID`, `facebook.enabled: true` in `config.yaml` (and `IG_ACCESS_TOKEN`, the Page token) |
-| End-to-end (§6) | BLOCKED | needs Telegram plus at least one live platform |
-| Preflight (§0) | DONE | none |
-| Dashboard (§7) | DONE | none (needs no credentials) |
-
-## Bugs found against real APIs
-
-None, because no real API could be called. Changes made while wiring the health checks were found by reading the code and Google/Meta docs, not by a live failure:
-
-- **YouTube quota day.** The daily upload cap counted uploads per UTC day, but YouTube resets the quota at midnight Pacific time. Two uploads at 16:00 and 18:00 Pacific fell on different UTC days but used the same quota day. The cap now counts from midnight Pacific (`db.quota_day_start`; `tzdata` was already installed). Test: `test_youtube_cap_counts_the_pacific_quota_day`.
-- **YouTube dead refresh token.** A failed refresh used to surface as a raw `RefreshError` (`invalid_grant`). It now raises `NotAuthorized` with the fix in the message, so the failed post and the Telegram alert say what to do. See §0.
-- **Facebook Reels status.** A finished FB reel was stored as `uploaded` with no link, so it could never show as live. It is now `live` with `https://www.facebook.com/reel/<video_id>`. *That URL pattern is not verified against a real post.*
-- **No "uploading" state.** Publishers jumped from nothing to the final status. YouTube, Instagram and Facebook now write `uploading` while the upload runs, so the dashboard chip can show it. Instagram's old "pending / container created" is now "uploading".
-- **Instagram token check.** `doctor` now calls `debug_token` and reports the token's expiry and any missing permissions (needed: `instagram_basic`, `instagram_content_publish`, `instagram_manage_insights`, `pages_read_engagement`, plus `pages_show_list` and `pages_manage_posts` when Facebook is on). Graph error code 190 is reported as **expired**. *Unverified live.* If `debug_token` refuses the Page token, the check says "permissions not checked" and falls back to the plain account lookup.
-
-## 0. Preflight
-
-`python run.py doctor` before any change:
-
-```
-[OK  ] ffmpeg - ffmpeg version 9.0.2-full_build-www.gyan.dev
-[OK  ] ffprobe - ffprobe version 9.0.2-full_build-www.gyan.dev
-[OK  ] dir cache/ - writable
-[OK  ] dir out/ - writable
-[OK  ] dir tokens/ - writable
-[OK  ] fonts - Inter-Regular.ttf, Inter-Semibold.ttf, Inter-Bold.ttf, Inter-Black.ttf
-[OK  ] flags - 47 PNG flags
-[OK  ] render backend - skia (skia-python 144.0.post2)
-[WARN] GEMINI_API_KEY - missing: videos will have no turning-point labels
-[WARN] Telegram - TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing: approval via dashboard only
-[WARN] YouTube - YT_CLIENT_SECRET_FILE missing (dry_run=True)
-[WARN] Instagram - IG_USER_ID / IG_ACCESS_TOKEN missing (dry_run=True)
-[OK  ] dry_run - youtube=True, instagram=True, facebook=True
-
-0 failing, 4 warnings
-```
-
-After this pass the credential lines come from the same checks the dashboard uses (`pipeline/health.py`), so they are named per integration and Facebook gets its own line: `[WARN] Gemini`, `[WARN] Telegram`, `[WARN] YouTube`, `[WARN] Instagram`, `[OK  ] Facebook - facebook.enabled is false`. Still **0 failing, 4 warnings**.
-
-- **YouTube OAuth instructions fixed** in the README, this report's owner steps (pass 1 said "add your account as a test user"), `.env.example`, and the messages from `doctor` and the publisher. The consent screen must be set to publishing status **"In production"**, not "Testing": in Testing, Google expires the refresh token 7 days after `--auth`. Unverified "In production" is fine for one owner, who clicks through the "unverified app" warning once. The README also says to re-run `--auth` if the token was made while still in Testing.
-- **`doctor` detects a dead YouTube token.** `publish_youtube.check()` now always refreshes the stored token in memory (nothing is written; `doctor` stays read-only). A `RefreshError` is reported as state **expired**, WARN while YouTube is in dry-run and FAIL when it is live, with the fix in the message. With no token at all it says "the owner must run `python -m pipeline.publish_youtube --auth` once". Tests: `test_doctor_flags_a_youtube_token_that_no_longer_refreshes`, `test_youtube_without_a_token_asks_the_owner_to_authorise`.
-
-## 7. Dashboard upgrade
-
-127.0.0.1-only binding, the CSRF token on every POST and the shared `pipeline/actions.py` functions are unchanged.
-
-- **Lanes with human names.** Every DB stage maps to exactly one lane (`dashboard/app.py: LANES`):
-  - Data secured: `queued`, `data_ready`, `picked`, `labelled`
-  - Video made: `rendered`
-  - Waiting for approval: `awaiting_approval`
-  - Approved: `approved`, `publishing`
-  - Shipped: `published`
-  - Failed and Rejected lanes
-
-  `queued` and `publishing` weren't in the brief's list. They go in the lane of the journey they belong to, and the card says what is running ("getting data…", "publishing…").
-- **Cards** show the title (from `meta.json`), topic, thumbnail and time in the current stage. Each has one chip per platform (YT / IG / FB) coloured by post status: pending, uploading, live, private-locked (with 🔒), dry-run (dashed) or failed. A legend sits above the board, and a live or private-locked post's chip links to it. FB appears only when it is enabled or has a post. "Sent to Telegram ✓" appears on waiting cards once a `telegram: sent message` log exists.
-- **Live render progress.** `render_video` calls `on_progress` about once a second, and the orchestrator writes the fraction to `runs.progress` / `progress_at` (at least every 2 s, as required). The card shows "making the video 43%" with a bar. A stage change clears it, and writing it does not touch `updated_at`, so time-in-stage stays true. While anything is running the board refreshes every 2 s, otherwise every 5 s. A card that has sat in a running stage for 30 min with no fresh progress says "stalled?".
-- **Errors.** The failed card shows the stage, the error and a *Retry from <stage>* button that calls `actions.retry`. Publish failures can now be retried too (`RETRY_STEPS` adds `publish`): the run goes back to `approved` and `publish --run` is started, and platforms already done are skipped.
-- **Health panel:**
-  - The `doctor` result per credential (OK / missing / expired / invalid / error, detail on hover), re-checked in a background thread every 15 min or on *Re-check*, and cached in `kv`.
-  - Publishing mode per platform.
-  - YouTube uploads counted against today's cap (Pacific quota day). Google does not expose quota units through the API, so this counter is the cap the code enforces.
-  - The bot heartbeat: `run.py bot` writes a `heartbeat:bot` row at least once a minute, and the tile turns red when it is older than 3 min or missing.
-  - The next scheduled run: Task Scheduler tasks whose action runs `run.py` (next run time via `Get-ScheduledTaskInfo`), or crontab lines on Linux.
-- **"Make a video now"** calls `actions.make_video`, which spawns `run.py produce --count 1`, the same function as the CLI. A second click within 60 s is refused.
-- **Small screens.** The lanes are one row on wide screens, wrap below 1200 px and stack below 560 px. The health tiles reflow, the header wraps, the run page goes to one column, and tables scroll sideways instead of squashing.
-- **DB migration.** The first connection after this pass added `progress` and `progress_at` to `runs` in the existing `pipeline.db` (`ALTER TABLE ADD COLUMN`; no rows changed). New databases get them from the schema. Test: `test_old_database_gets_the_new_columns`.
-
-**Live check.** `python run.py dashboard` on the real `pipeline.db`:
-- `/`, `/fragment/board`, `/run/<id>`, `/analytics`, `/topics`, `/api/board` and a thumbnail all returned 200.
-- `netstat` showed only `127.0.0.1:5055 LISTENING`.
-- The board held 8 runs waiting for approval and 2 failed (life_expectancy, low variety).
-- The background health check ran and showed the 4 missing credentials and Facebook disabled. The heartbeat shows red "never", because the bot is not running. The next run shows "none", because nothing is scheduled on this machine.
-
-Playwright isn't installed, so the screenshots are from headless Edge (`out/dashboard_screens/`):
-
-| file | what |
-|---|---|
-| `board_wide.png` | real board, 1600 px |
-| `board_phone_375.png` | real board in a true 375 px viewport (an iframe: headless Edge will not lay out narrower than 476 px, so a plain `--window-size=390` shot is a cropped 476 px layout) |
-| `run_phone_375.png` | run page at 375 px |
-| `demo_board_wide.png` | **demo data, not the real DB**: copies of the real runs, put into other stages in a throwaway database in the session scratchpad, to show every state (render at 43%, sent to Telegram ✓, uploading / live / private-locked / dry-run / failed chips, retry-from-publish, green heartbeat) |
-| `board.html` | the saved HTML of the real board |
-
-I looked at every screenshot and fixed two things:
-- Cards without a title showed the topic twice; they now show the run id underneath.
-- On a phone the run page's countries table squashed its label column into tall rows; scrollable tables now keep a 560 px minimum width.
-
-**New tests (written, not run, see above):**
-- `tests/test_dashboard.py`:
-  - `test_every_stage_has_exactly_one_lane` (stage mapping)
-  - `test_chip_states_cover_every_post_status`
-  - `test_cards_land_in_their_lanes`
-  - `test_waiting_card_shows_sent_to_telegram`
-  - `test_platform_chips_follow_post_status_and_link_live_posts`
-  - `test_render_progress_shows_on_the_card`
-  - `test_failed_card_shows_error_and_retries_from_its_stage`
-  - `test_retry_publish_reapproves_and_publishes`
-  - `test_make_video_button_runs_produce_count_1`
-  - `test_health_panel_turns_red_when_the_bot_is_silent`
-- `tests/test_health.py`:
-  - `test_heartbeat_state` (heartbeat logic: 180 s is OK, 181 s is stale, missing or bad rows read as never)
-  - `test_bot_loop_writes_a_heartbeat`
-  - `test_credential_checks_without_secrets_stay_offline`
-  - the two YouTube token tests in §0
-- `tests/test_db.py`:
-  - `test_progress_is_written_and_cleared_on_transition`
-  - `test_old_database_gets_the_new_columns`
-  - `test_youtube_cap_counts_the_pacific_quota_day`
-
-## Config added
-
-`go_live_test.instagram_post` and `go_live_test.facebook_post`, both `false`. These are for the go-live rerun of §4/§5: with `false` the test stops before the public publish step. Nothing in normal operation reads them.
-
-## Remaining owner steps
-
-1. **Run the tests:** `python -m pytest`. They were not run in this pass.
-2. **Create `.env`** from `.env.example` and fill in what you have (README, *Credentials*):
-   - **Telegram:** `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
-   - **Gemini:** `GEMINI_API_KEY`.
-   - **YouTube:** set the consent screen to **In production**, save the Desktop-app client JSON as `tokens/client_secret.json`, set `YT_CLIENT_SECRET_FILE=tokens/client_secret.json`, then run `python -m pipeline.publish_youtube --auth` once and click through the unverified-app warning.
-   - **Instagram:** `IG_USER_ID`, `IG_ACCESS_TOKEN` (a long-lived Page token with the permissions above).
-   - **Facebook, optional:** `FB_PAGE_ID` and `facebook.enabled: true`.
-3. **Decide whether the go-live test may post publicly:** `go_live_test.instagram_post` / `facebook_post` in `config.yaml`. The default `false` stops before the public step.
-4. Run `python run.py doctor` until every line you filled in is OK. Restart the dashboard after editing `.env`, because it reads `.env` at start.
-5. **Start the bot:** `python run.py bot`. The health panel's heartbeat should turn green within a minute.
-6. **Re-run pass 02 sections 1–6** with the credentials in place.
-7. Optional: register the scheduled tasks from the README. The health panel will then show the next run.
-
----
-
-# Dashboard rework (v3) (2026-10-08)
-
-**Tests: 146 passed, 0 failed**, run in this pass with `.venv\Scripts\python.exe -m pytest`. That includes every test Pass 02 wrote but could not run.
-
-**State check.** Tag `v2-pre-dashboard-rework` already existed at the clean HEAD `d330adb`; it is pushed with this pass. There were no commits after `v1-video-approved` besides Pass 02. The working tree held an uncommitted partial version of this rework from an earlier run that had stopped. It included the Review, Library and Settings pages, `pipeline/accounts.py`, `errors.py`, `schedule.py` and `settings.py`, skip handling, the migration and tests. It matched the spec and its 135 tests passed, so I kept it and finished it. **No stash was created.**
-
-## What changed, per page
-
-**Top bar.** "Graphony" sits on the left and in the browser tab, with `Review · Library · Settings` beside it. The right side shows one status message, in this priority order:
-1. bot stopped (only when Telegram is configured)
-2. N videos failed to post
-3. Test mode
-4. N accounts not connected
-5. All good
-
-Clicking it goes to the place that fixes it.
-
-**Review (`/`).**
-- **One video at a time.** It plays the real MP4 in a 9:16 player about 75vh tall, served with Range support (206).
-- **Right panel**, top to bottom:
-  - the hook title (click to edit, Enter saves it to `meta.json` and the DB, which the publishers read)
-  - "What it shows" (the topic subtitle)
-  - countries in play order with flags
-  - labels
-  - "Will post to" chips: only enabled platforms, "test" in test mode, "not connected" disabled
-  - **Approve & post**, **Remake** and **Reject**, with A / M / X
-- **Queue.** "1 of 8 waiting" sits above the player and a thumbnail strip below it. ← → move through the queue. After an action a toast appears and the next video slides in without a page reload.
-- **Nothing connected:** the button reads "Approve (posts once accounts are connected)", and the video waits in Library → Approved, not posted.
-- **Empty:** "All caught up.", the next scheduled time or "No schedule set", and Make a video now.
-- **Making a video:** a progress card refreshes every 2 s.
-- **Needs attention:** one amber banner with a plain sentence, the fix, Retry, Dismiss and a Details disclosure.
-- **Changed in this pass:**
-  - Removed the page heading and tagline that pushed the queue strip below the fold. At 1440×900 the player, the whole strip and the Approve button now fit on one screen.
-  - The player is an exact 9:16 box instead of a wide grey frame.
-  - Approve is a solid green. It was a pale mint that looked disabled.
-  - A progress card with no stage change and no render progress for 30 min now says "no progress since …; it may have stopped". The old board had a "stalled?" flag, and the partial rework had dropped it.
-  - An expired or rejected account found by a check now reads "Instagram is not connected: the access token expired." It used to say "upload failed" even though no upload had run.
-
-**Library (`/library`).**
-- Tabs: **Posted · Approved, not posted · Rejected**, each with a count.
-- **Cards** show:
-  - a thumbnail from the middle of the first country's chart, cached as `out/<run>/review-thumb.jpg`
-  - the title and "made … ago"
-  - one plain line per platform
-- **The drawer** has:
-  - the player
-  - per-platform stats and live links
-  - for a failed platform: the reason, the fix and Try again
-  - the run id and logs, only under a collapsed "Technical details"
-- **Changed in this pass:**
-  - tighter card spacing; the thumbnail background now matches the video
-  - the drawer no longer says "tap to see why" or shows empty stat dashes for a platform that never went live
-
-**Settings (`/settings`).**
-- **Accounts:** five rows with the status in words. Test runs only that service's doctor check.
-- **Posting:**
-  - on/off and Test mode per platform
-  - videos per day and posting times
-  - writes `config.yaml` through ruamel.yaml, after a backup to `config.yaml.bak-<timestamp>`
-- **Topics:** the table, writing `topics.yaml` after a backup.
-- **Advanced:** collapsed by default.
-- **Changed in this pass:**
-  - The Accounts section says where `.env` is, with the real folder path.
-  - Every "How to connect" starts with the exact `.env` variable(s) it fills.
-  - The steps were completed:
-    - **YouTube:** consent screen "In production", running `--auth` in its own terminal, and the YouTube API audit form.
-    - **Instagram:** professional account, linked Page, Meta app, Graph API Explorer → long-lived token → Page token from `me/accounts` → `instagram_business_account`.
-    - **Facebook:** the same Page token plus `pages_manage_posts`, and `FB_PAGE_ID`.
-    - **Telegram:** BotFather, then the chat id from `getUpdates`.
-    - **Gemini:** the AI Studio key.
-
-## Behaviour behind the UI (from the partial run, checked and tested)
-
-- **Skips are not failures.** When the picker can't build a set, the run becomes `skipped` with a `skip` row in `topic_events`. `produce` then tries the next topic, up to 5 attempts per video. If all 5 skip, there is one Needs-attention message: "Couldn't find an interesting topic to make. Add topics or wait for cooldowns."
-- **Migration.** The two old life_expectancy picker failures in the real `pipeline.db` are now `skipped`, with two skip events (the "already been used" one and the low-variety one). The rows and logs are kept, and they are gone from every failure list. The migration is idempotent.
-- **Names.** All 34 topics have a `name`, and the pages show `name` and `subtitle`, never the slug.
-- **Errors.** `pipeline/errors.py: explain_error` maps these errors to {sentence, fix, Settings section}:
-  - token expired
-  - quota exceeded
-  - network down
-  - media processing failed
-  - missing permission
-  - ffmpeg crash
-
-  Anything else reads "Something went wrong while <stage>", with the raw text under Details.
-
-## Brand and one-click launch (this pass)
-
-- **Brand and watermark.**
-  - `brand.name: "Graphony"` is set in `config.yaml`, together with a new `render.watermark: false`. The renderer draws the name only when `render.watermark` is true, so a non-empty `brand.name` alone puts nothing on the frames.
-  - **Test:** `test_brand_name_alone_never_puts_text_on_frames` renders intro, mid, transition and end frames with `brand.name: "Graphony"` and `watermark: false`. It asserts there is no brand text box, and that the pixels are identical to a render with no brand name at all.
-- **Where the name appears:**
-  - the dashboard top bar and the browser tab
-  - the Telegram approval message, whose first line is now "Graphony · new video to review"
-  - the Telegram daily summary and `/status`
-  - the `doctor` header
-  - the README title
-- **Dashboard.bat**
-  - cds to its own folder and uses `.venv\Scripts\python.exe`. Without `.venv` it shows one line and pauses.
-  - If `http://127.0.0.1:5055/ping` already answers `graphony-dashboard`, it only opens the browser.
-  - Otherwise it starts the dashboard in its own window, polls for up to 15 s, and opens the browser.
-  - **Verified live** with a copy whose browser-open calls wrote marker files:
-    - the first launch opened after 3.8 s, listening on 127.0.0.1 only
-    - the second launch exited 0 in 0.5 s after only opening the browser
-    - without `.venv`, it showed the one-line message and exited 1
-- **Bot.bat** follows the same pattern. `run.py bot` now holds an OS lock (`cache/bot.lock`), so a second copy prints "already running" and exits: two bots would fight over Telegram `getUpdates`. Its missing-`.venv` path was verified live. I did not live-run the bot itself, because it would long-poll your real Telegram bot and write a heartbeat into the real DB. The lock is covered by `test_a_second_bot_exits_at_once`.
-- `python dashboard/app.py` runs the same server as `run.py dashboard`. A test runs it from an unrelated folder.
-- `.vscode/launch.json` has **Dashboard** and **Bot** configurations.
-- `.gitattributes` checks `*.bat` out with CRLF, because cmd.exe can misparse LF-only batch files.
-- **Safety.** `.env` now holds real keys, and `pipeline/config.py` loads it at import. An autouse fixture in `tests/conftest.py` therefore strips every secret from every test, and the screenshot script does the same. No test or screenshot run can call a real API.
-
-## Required tests (all executed)
-
-| requirement | test |
-|---|---|
-| status-line priority | `test_dashboard.py::test_status_line_priority` |
-| skip → next topic (≤5) and one attention message | `test_dashboard_behaviour.py::test_skip_tries_next_topic_up_to_five` (0/1/4/5 skips), `test_explicit_topic_skip_falls_back_and_real_failure_does_not_skip` |
-| migration of old picker-failed runs | `test_migration_preserves_two_old_runs_as_skip_events` |
-| inline title edit reaches the publisher | `test_title_edit_persists_exact_payload_consumed_by_publishers` |
-| approve with nothing connected → Approved, not posted | `test_no_accounts_approval_stays_in_library_and_never_calls_publisher` |
-| video Range request → 206 | `test_video_range_response_and_whitelist` |
-| error mapping | `test_error_mapping` (7 cases) |
-| YAML writes back up and stay valid YAML | `test_yaml_writes_backup_validate_and_preserve_comments` |
-| no run id or slug in Review/Library HTML (regex) | `test_review_shows_video_queue_and_clear_actions_without_ids`, `test_html_never_contains_ids_or_slugs_for_any_library_tab` |
-
-**Added in this pass:**
-- watermark: `test_brand_name_alone_never_puts_text_on_frames` and `test_brand_draws_only_when_the_watermark_flag_is_on`
-- brand default: `test_brand_is_graphony_and_the_watermark_is_off_by_default`
-- Telegram: `test_messages_carry_the_graphony_header`
-- bot lock: `test_a_second_bot_exits_at_once`
-- direct run: `test_app_py_runs_directly_from_any_folder`
-- connect steps: `test_how_to_connect_names_every_env_variable_in_plain_steps` and `test_settings_show_where_each_key_goes_and_brand`
-- account banner: `test_an_expired_account_is_explained_as_a_connection_not_an_upload`
-- stalled card: `test_a_making_card_with_no_progress_for_30_minutes_says_so`
-
-## Screenshots
-
-These are in `out/dashboard_screens/v3/`, each at 1440×900 and 390×844 (27 PNGs, plus `checks.json`). They were taken with headless Edge over the DevTools protocol (Playwright is not installed) by running `.venv\Scripts\python.exe scripts\dashboard_screenshots.py`.
-- **Real data:** each state starts from a read-only copy of the real `pipeline.db`, with the real 8 waiting videos.
-- **Fake states** (empty, making, attention, the library tabs) are changes to that throwaway copy only.
-- The script checks that every run in the real DB (id, stage, title, platforms, replaced) is unchanged afterwards, and it was.
-- It also clicks →, then Approve, in the browser, and checks the queue drops from 8 to 7 with a toast.
-
-| state | files |
-|---|---|
-| Review with the real queue | `review_queue_*.png`, `review_queue_panel_390x844.png` (the panel scrolled into view) |
-| Review empty | `review_empty_*.png` |
-| Review while making a video | `review_making_*.png` |
-| Review with Needs attention | `review_attention_*.png` |
-| Library tabs | `library_posted_*.png`, `library_approved_*.png`, `library_rejected_*.png` |
-| Library drawer | `library_drawer_*.png` |
-| Settings | `settings_*.png`, `settings_connect_youtube_*.png`, `settings_posting_*.png`, `settings_topics_*.png`, `settings_advanced_*.png` |
-
-**Checklist.** I looked at every screenshot. The script also asserts, on every shot: no horizontal overflow, exactly one status message, no "Nothing here", no run id and no slug in the page text.
-- The waiting video and the Approve button are the most prominent things on Review.
-- There are no "Nothing here" lanes, ids or slugs.
-- Red appears only on the attention and library states, where a fixture upload really failed.
-- Nothing overlaps or overflows at 390 px. The Review buttons are a sticky bottom bar there.
-
-**Fixed after looking at them:**
-- the "Pipeline" brand
-- the pale primary button
-- the queue strip below the fold
-- the top bar shifting 8 px on the empty page (`scrollbar-gutter: stable`)
-- the queue strip's scrollbar on phones
-- the drawer wording
-
-## doctor
-
-`python run.py doctor` before you filled `.env`: **0 failing, 4 warnings** (the four missing credentials).
-
-When I re-ran it, you had already filled six of the seven variables:
-
-```
-[OK  ] ffmpeg, ffprobe, dirs, fonts, flags, render backend (skia)
-[OK  ] Gemini - valid, model gemini-3.8-flash
-[OK  ] Telegram - bot ok, approvals from your chat
-[WARN] YouTube - YT_CLIENT_SECRET_FILE missing (dry_run=True)
-[FAIL] Instagram - IG user lookup: HTTP 400 ... Session has expired on Tuesday, 26-May-26 ... code 190, error_subcode 463
-[OK  ] Facebook - facebook.enabled is false
-1 failing, 1 warnings
-```
-
-The only failure is a credential: Meta says the `IG_ACCESS_TOKEN` you pasted expired on 26 May 2026. The code reports it correctly as **expired**, and Settings will show "Expired — reconnect" once its background check runs. Nothing in the code needs fixing.
-
-`.env` already existed (you created it during this pass), so it was **not** copied from `.env.example` and was not changed.
-
-## Left undone / for you to know
-
-- **Three of the eight waiting videos were rendered before fix pass 01.** Landlines, Life expectancy and Nuclear power were rendered between 14:29 and 14:35 on 2026-10-07. Fix pass 01 landed at 15:23. Their frames still show the **old channel name**, a "Source:" line and the title pill. Reject them, or Remake them for new versions; don't approve them. I did not change them.
-- **Instagram token.** The one in `.env` has expired and must be replaced (see below).
-- I did not live-run `Bot.bat` (see above).
-- Screenshots exist only at 1440 and 390 wide. The tablet-width layout has a CSS breakpoint but no screenshot.
-
----
-
-# Owner: next steps
-
-- **Fill `.env`** (in this folder; steps in Settings → Accounts → How to connect):
-  - `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` already work.
-  - `IG_ACCESS_TOKEN`: replace it with a new long-lived Page token (the current one expired 26 May 2026).
-  - `IG_USER_ID` and `FB_PAGE_ID` are filled; they can only be checked once the new token works.
-  - `YT_CLIENT_SECRET_FILE`: still empty. Use `tokens/client_secret.json`.
-- **Run YouTube auth once**, in its own terminal: `.venv\Scripts\python.exe -m pipeline.publish_youtube --auth`
-- **Double-click `Bot.bat`** and keep its window open.
-- **Reject or Remake** the three pre-fix videos (Landlines, Life expectancy, Nuclear power).
-- **Re-run the Pass 02 go-live prompt, sections 1–6.**
+  - `analytics.py`: FB pull, per-metric fallback, pull on startup, lock, hook weights, weight
+    platforms.
+  - `captions.py`: `check_ends_last`, `opening(prefer, explore)`, opener-specific caption pools,
+    `fresh` captions.
+  - `render.py`: config-driven opening, `audio_from`.
+  - `db.py`: migrations, `hook_weights`, a post inherits its template, stats columns.
+  - `home.py`: Stats screen.
+  - `review.py`, `actions.py`, `posting.py`: posting place kept across a re-approval.
+  - `orchestrator.py`: records the template and any fallback.
+  - `run.py`: `rebrand`, `hooks`.
+  - Also `caption_formats.json`, `config.yaml` and the README.
+
+## Open notes
+
+- **Captions.** Gemini was overloaded (HTTP 503 on both models) for Research spending and Carbon
+  emissions. They got the plain template fills, which pass the same checks. A later
+  `run.py captions --run …` would ask Gemini again.
+- **Facebook.** The Page still gets 0-4 plays a reel. Its stats are kept but not used in the weights.
+- **Country hashtag.** It comes from the strongest fact and is never chosen to be the answer, but in
+  principle it could be the last country.

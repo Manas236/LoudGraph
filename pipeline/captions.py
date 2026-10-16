@@ -233,10 +233,15 @@ def _fact_fields(f: dict) -> dict:
             "value": f.get("value"), "verb": "rose" if "up" in f.get("dirs", []) else "fell"}
 
 
-def opening(facts: list[dict], seed: int = 0, formats: dict | None = None) -> dict | None:
+def opening(facts: list[dict], seed: int = 0, formats: dict | None = None, prefer: str | None = None,
+            explore_pct: float = 0, verify=None) -> dict | None:
     """The question the video opens with and the answer its end card reveals. Both come from
     caption_formats.json "openers" filled with a computed fact (no LLM); the first openers whose
-    fact exists are preferred, and `seed` varies the choice between the top two."""
+    fact exists are preferred, and `seed` varies the choice between the top two.
+
+    prefer: an opener id every video opens with when its fact exists and verify(fact) (if given)
+    returns None; otherwise, and for explore_pct % of the seeds, the choice above is made among the
+    other openers. The result's "fallback" says why the preferred opener was not used."""
     formats = formats or load_formats()
     avail = []
     for o in formats.get("openers", []):
@@ -247,11 +252,54 @@ def opening(facts: list[dict], seed: int = 0, formats: dict | None = None) -> di
                 if all(fields.get(n) not in (None, "") for n in names):
                     avail.append((o, f, o["answer"].format(**fields)))
                 break
+    fallback = None
+    if prefer:
+        mine = [a for a in avail if a[0]["id"] == prefer]
+        if explore_pct > 0 and random.Random(seed).random() * 100 < explore_pct:
+            fallback = f"exploring: {explore_pct:g}% of reels open with another question"
+        elif not mine:
+            fallback = f"no fact for the {prefer} opener in this video"
+        else:
+            fallback = verify(mine[0][1]) if verify else None
+            if fallback is None:
+                avail = mine
+        if fallback:
+            avail = [a for a in avail if a[0]["id"] != prefer]
     if not avail:
         return None
     o, f, answer = avail[seed % min(2, len(avail))]
-    return {"id": o["id"], "question": o["question"], "answer": answer, "fact": f,
-            "highlight": [n for n in (f["country"], f.get("country2")) if n]}
+    out = {"id": o["id"], "question": o["question"], "answer": answer, "fact": f,
+           "highlight": [n for n in (f["country"], f.get("country2")) if n]}
+    if fallback:
+        out["fallback"] = fallback
+    return out
+
+
+def check_ends_last(fact: dict, rows: dict[str, list[tuple[int, float]]], fmt=str) -> str | None:
+    """None when "<country> ends up last" (the final_low fact) is true of the data the video shows,
+    else why it is false or meaningless. rows: {iso3: [(year, value), ...]} as rendered; fmt: the
+    on-screen value format. "Last" means what the final_low fact means: the lowest final value.
+
+    The country must reach the video's final year, have at least 2 other countries to beat, and end
+    strictly below every other country's final value, also as the video shows it (a tie on screen,
+    e.g. 0.7% and 0.7%, is no answer). A country whose data stops a year early counts with its last value."""
+    ends = {iso: sorted(r)[-1] for iso, r in rows.items() if r}
+    if len(ends) < 3:
+        return f"only {len(ends)} countries: there is no real last place"
+    iso = fact.get("iso3")
+    if iso not in ends:
+        return f"{fact.get('country')} is not in the video"
+    final_year = max(y for y, _ in ends.values())
+    year, value = ends[iso]
+    if year != final_year:
+        return f"{fact['country']}'s data stops in {year}, before the video's final year {final_year}"
+    lowest = min((i for i in ends if i != iso), key=lambda i: ends[i][1])
+    other = ends[lowest][1]
+    if value > other:
+        return f"false: another country ends lower ({fmt(other)}) than {fact['country']} ({fmt(value)})"
+    if value == other or fmt(value) == fmt(other):
+        return f"tie: two countries end at {fmt(value)}"
+    return None
 
 
 def fact_years(f: dict) -> set[str]:
@@ -330,6 +378,17 @@ def load_formats() -> dict:
             "openers": [o for o in d.get("openers", []) if o.get("id") and o.get("question") and o.get("answer")]}
 
 
+def for_opener(formats: dict, opener: str | None) -> dict:
+    """The hooks and questions for a video that opens with `opener`: the ones written for it (their
+    "opener" field) when there are any, so the caption teases the answer the end card reveals;
+    otherwise the general ones. Hooks and questions written for an opener are never used elsewhere."""
+    out = dict(formats)
+    for key in ("hooks", "questions"):
+        own = [x for x in formats[key] if opener and x.get("opener") == opener]
+        out[key] = own or [x for x in formats[key] if not x.get("opener")]
+    return out
+
+
 def clean(text) -> str:
     if not isinstance(text, str):
         return ""
@@ -397,10 +456,11 @@ class Context:
     """Everything a variant is checked against, for one video."""
 
     def __init__(self, topic: dict, countries: list[tuple[str, str]], facts: list[dict], x_start: int, x_end: int,
-                 formats: dict | None = None, s: dict | None = None):
+                 formats: dict | None = None, s: dict | None = None, opening: dict | None = None):
         self.topic, self.facts, self.x_start, self.x_end = topic, facts, x_start, x_end
         self.s = s or settings()
-        self.formats = formats or load_formats()
+        self.opening = opening or {}   # the video's opening question ({"id", "question"}), when known
+        self.formats = for_opener(formats or load_formats(), self.opening.get("id"))
         self.names = [n for _, n in countries]
         self.by_lower = {n.lower(): n for n in self.names}
         self.others = [c["name"] for c in config_countries() if c["name"] not in self.names]
@@ -584,8 +644,9 @@ def _fill_variant(h: dict, ctx: Context, used: set[str], out: list[dict], questi
         hook = _fill(h.get("fill"), f, ctx)
         if not hook:
             continue
-        for q in questions:
-            if spread and any(q["id"] == o["question_id"] for o in out):
+        asked = {o["question_id"] for o in out}
+        for q in sorted(questions, key=lambda q: q["id"] in asked):   # a question not used yet first
+            if spread and q["id"] in asked:
                 continue
             question = _question_for(q, f)
             v = {"template_id": h["id"], "hook": hook, "question_id": q["id"], "question": question,
@@ -632,7 +693,7 @@ Video
 - Topic: {topic}
 - Metric: {metric}
 - Countries (in play order): {countries}
-- Years: {x_start} to {x_end}
+- Years: {x_start} to {x_end}{opening}
 
 Facts, computed from the data. These are the ONLY facts and the ONLY numbers you may use:
 {facts}
@@ -667,6 +728,9 @@ def build_prompt(ctx: Context, n: int, used: set[str], feedback: str = "") -> st
     return PROMPT.format(
         topic=ctx.topic.get("name", ""), topic_lower=(ctx.topic.get("name") or "").lower(),
         metric=ctx.topic.get("subtitle", ""), countries=", ".join(ctx.names), x_start=ctx.x_start, x_end=ctx.x_end,
+        opening=(f"\n- The video opens with the question \"{ctx.opening['question']}\" and only its last frames "
+                 f"reveal the answer. The caption must make people want to see it, and never give it away."
+                 if any(h.get("opener") for h in ctx.formats["hooks"]) else ""),
         facts="\n".join(f"- {f['id']}: {f['text']}" for f in ctx.facts),
         hooks="\n".join(f"- {h['id']}: {h['text']}  (suits: {', '.join(h.get('facts') or ['any'])})" for h in hooks),
         questions="\n".join(f"- {q['id']}: {q['text']}" for q in ctx.formats["questions"]),
@@ -879,11 +943,13 @@ def trending_rank(tags: list[str], tr: dict, get=None, now: datetime | None = No
 # ------------------------------------------------------------------ one video
 
 def generate(topic: dict, countries: list[tuple[str, str]], series: dict, x_start: int, x_end: int, seed: int = 0,
-             llm: bool | None = None, ask=None, trending: bool | None = None, get=None) -> dict:
-    """Facts, `variants` caption variants and the hashtags for one video (nothing is written)."""
+             llm: bool | None = None, ask=None, trending: bool | None = None, get=None,
+             opening: dict | None = None) -> dict:
+    """Facts, `variants` caption variants and the hashtags for one video (nothing is written).
+    opening: the video's opening question (meta.json "opening"); its own hooks are used when it has any."""
     s = settings()
     facts = compute_facts(topic, countries, series, x_start, x_end)
-    ctx = Context(topic, countries, facts, x_start, x_end, s=s)
+    ctx = Context(topic, countries, facts, x_start, x_end, s=s, opening=opening)
     n = int(s["variants"])
     notes, accepted = [], []
     use_llm = s["llm"] if llm is None else llm
@@ -908,8 +974,8 @@ def generate(topic: dict, countries: list[tuple[str, str]], series: dict, x_star
     tags, tag_notes = pick_hashtags(topic, facts, seed, s, trending=trending, get=get)
     model = ", ".join(sorted({v["model"] for v in accepted if v.get("model")})) or None   # the model(s) that served
     return {"generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "model": model,
-            "facts": facts, "metric_line": ctx.metric, "variants": variants, "hashtags": tags, "chosen": 0,
-            "notes": notes + tag_notes}
+            "opener": ctx.opening.get("id"), "facts": facts, "metric_line": ctx.metric, "variants": variants,
+            "hashtags": tags, "chosen": 0, "notes": notes + tag_notes}
 
 
 def current(c: dict) -> dict:
@@ -1074,26 +1140,35 @@ def save(run_id: str, c: dict) -> None:
     tmp.replace(p)
 
 
-def generate_for_run(run_id: str, llm: bool | None = None, trending: bool | None = None, ask=None, get=None) -> dict:
-    """Make out/<run_id>/captions.json from the run's data.json and pick.json. A choice already made
-    on the review card is kept when that variant still exists."""
+def generate_for_run(run_id: str, llm: bool | None = None, trending: bool | None = None, ask=None, get=None,
+                     fresh: bool = False) -> dict:
+    """Make out/<run_id>/captions.json from the run's data.json and pick.json (and the opening question
+    in meta.json). A choice already made on the review card is kept when that variant still exists.
+    fresh=True (a new opening question): option 1 is chosen, and an earlier own caption is kept in
+    "edits" but no longer posted."""
     from . import db
     d = run_dir(run_id)
     data = json.loads((d / "data.json").read_text(encoding="utf-8"))
     p = json.loads((d / "pick.json").read_text(encoding="utf-8"))
+    try:
+        opening = json.loads((d / "meta.json").read_text(encoding="utf-8")).get("opening")
+    except (OSError, ValueError):
+        opening = None
     run = db.get_run(run_id) or {}
     topic = get_topic(run.get("topic_id") or data["topic_id"])
     names = country_by_iso3()
     countries = [(c, names[c]["name"] if c in names else c) for c in p["countries"]]
     c = generate(topic, countries, data["series"], p["x_start"], p["x_end"], seed=zlib.crc32(run_id.encode()),
-                 llm=llm, ask=ask, trending=trending, get=get)
+                 llm=llm, ask=ask, trending=trending, get=get, opening=opening)
     c = {"run_id": run_id, "topic_id": topic["id"], **c, "credit": credit_lines(topic, data)}
     old = load(run_id)
-    if old and 0 < old.get("chosen", 0) < len(c["variants"]):
+    if old and not fresh and 0 < old.get("chosen", 0) < len(c["variants"]):
         c["chosen"] = old["chosen"]
     for k in ("edit", "edits", "use_edit"):   # the owner's own caption survives a regeneration
         if old and k in old:
             c[k] = old[k]
+    if fresh:
+        c["use_edit"] = False
     save(run_id, c)
     return c
 

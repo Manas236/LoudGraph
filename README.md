@@ -43,7 +43,9 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py batch [--count N] [--queue-only]` | the Telegram Make a batch from the command line: queue N distinct topics, then make the queue here one at a time (the bot does it itself when it is running) |
 | `python run.py go-live [--check-only]` | read-only Instagram + Facebook checks; for those that pass, turn posting on and test mode off (old test-mode approvals go back to review first) |
 | `python run.py publish [--run ID]` | publish approved runs now, outside the posting queue (the bot's queue posts one a day by itself) |
-| `python run.py stats [--no-summary]` | pull views / avg % watched / skip rate now, recompute topic weights, send the summary (the bot also does this every 6 h by itself) |
+| `python run.py stats [--no-summary]` | pull Instagram + Facebook insights for every posted reel now, recompute topic and hook weights, send the summary (the bot also does this when it starts and every 6 h; two pulls never overlap) |
+| `python run.py hooks` | fill in and list each reel's hook template (`which_last`, `who_overtakes`, `other`, from the question its video shows), with the hook weights |
+| `python run.py rebrand [--run ID ...] [--dry-run] [--no-send]` | re-render reels that are made but not posted with the configured opening question (`opening.hook_template`): same data, countries and audio track (copied from the old file), old files kept as `*_oldhook.*`, approved ones back to review keeping their posting-queue place |
 | `python run.py dashboard` | local web UI on http://127.0.0.1:5055 (Review, Posting queue, Library, Settings) |
 | `python run.py verify [--run ID ...]` | ffprobe, loudness, A/V sync, stem balance, pitch-vs-data, pixel centring, contact sheet |
 | `python run.py crash-test` | `out/crash_test.mp4`: a synthetic flat-crash-recover series, to hear the event treatment |
@@ -71,7 +73,8 @@ queued -> data_ready -> picked -> labelled -> rendered -> awaiting_approval -> a
 
 All state lives in SQLite (`pipeline.db`, WAL): `runs` (incl. live render `progress` and the review
 `queue_pos`), `make_jobs` (the make queue: New reel, batches, retries), `stage_log`,
-`posts`, `stats`, `topic_weights`, plus `kv` (the Telegram `getUpdates` offset, so a bot restart never
+`posts` (each with its `hook_template`), `stats` (one row per post per pull, never overwritten),
+`topic_weights`, `hook_weights`, plus `kv` (the Telegram `getUpdates` offset, so a bot restart never
 re-delivers a button press; the bot heartbeat; cached health checks). The dashboard and the bot only
 read/write that state, and their buttons call the same functions (`pipeline/actions.py`).
 
@@ -128,8 +131,9 @@ The steps are 1 getting data, 2 rendering, 3 writing captions, 4 ready. Its butt
 - **Errors** show on the home card in plain words, e.g. "⚠️ Rendering failed for Coal power: the
   internet connection was interrupted.", with **Retry** and **Drop it**; never a stack trace. A post
   that failed on one platform shows the same way, and Retry posts only that platform again.
-- **Stats**: the last Instagram reels with views, % watched, the 3-second skip rate, likes, shares
-  and saves, and **Check stats now**. **Account**: the Instagram account and Facebook Page read live
+- **Stats**: the last 10 Instagram reels, each with its hook question, topic, views, average watch time
+  and shares, then the average views per hook template (with its weight once its reels are 72 h old),
+  and **Check stats now**. **Account**: the Instagram account and Facebook Page read live
   from Meta by id, so a renamed account shows its new name at once.
 
 **Send to Telegram for approval** in the dashboard puts that reel on the review card within about 10
@@ -247,9 +251,18 @@ two batches. Settings changes are picked up by running processes without restart
   `fx` holds the whooshes, a short sub hit on falls and a bright accent on jumps (no sub-bass
   elsewhere). The pad sits 9 LU under the plucks. Master: −14 LUFS, ≤ −1 dBTP after AAC.
 - **Opening** (`render.py`, `captions.opening`): from frame 0 the video asks a question built from a
-  computed fact (`openers` in `caption_formats.json`, e.g. "Who overtakes who?", "Which country ends
-  up last?"), big for `timing.hook_hold` (2.5 s), then shrinking into the header that stays to the end.
-  The metric with its unit sits under it in readable type, and the first chart is already drawing.
+  computed fact (`openers` in `caption_formats.json`), big for `timing.hook_hold` (2.5 s), then
+  shrinking into the header that stays to the end. The metric with its unit sits under it in readable
+  type, and the first chart is already drawing. Every reel opens with `opening.hook_template`
+  ("Which country ends up last?", the hook of the 2,000-view breakout reel; "last" = the lowest final
+  value) when that is true of the rendered data: the last country reaches the final year and ends
+  strictly below the others, also as shown on screen (no tie), with at least 3 countries
+  (`captions.check_ends_last`). Otherwise, and for `opening.hook_explore_pct` % of reels (0 by
+  default), the old choice between the two strongest openers is made among the others; the run's log
+  says why. Its captions use only the hooks and questions written for that opener (`"opener":
+  "ends_last"` in `caption_formats.json`): they tease who ends up last and never name it.
+- **Hook template** (`pipeline/hooks.py`): each run and post records which question its video opens
+  with (`which_last`, `who_overtakes`, `other`), apart from the topic, so the stats can compare hooks.
 - **End card** (`timing.end_card`, 2.5 s): the answer to the opening question (filled in code from the
   same fact), every country ranked by where it ends, the countries in the answer highlighted.
 - **Layout** (`render.py`): one centre axis (x = 540) with symmetric 130 px margins; top to bottom from
@@ -266,9 +279,16 @@ two batches. Settings changes are picked up by running processes without restart
   overloaded (503), rate-limited (429), down or silent
   model hands over to the next one at once, without minutes of retries; the log says which model served
   each call, and `labels.json` / `captions.json` record it.
-- **Stats**: the bot collects them itself every `analytics.every_hours` (6 h) on a background thread, so
-  it needs no OS scheduler (and keeps working on a server); the Telegram summary goes out at most once a
-  day. Instagram adds skip rate, shares, saves and watch time (as a % of the video) to every row.
+- **Stats**: the bot collects them itself when it starts and every `analytics.every_hours` (6 h), on a
+  background thread, so it needs no OS scheduler (and keeps working on a server); the Telegram summary
+  goes out at most once a day. Every pull asks about every reel ever posted and ADDS a row per post (the
+  history is kept, so growth curves can be read back). Instagram: views, reach, likes, comments, shares,
+  saves, total interactions, average and total watch time, skip rate (`plays` is gone from the Graph
+  API; `views` replaced it). Facebook Page reels: plays, replays, average watch time, reactions and
+  shares (`video_insights`). A metric Meta refuses is dropped and the others still land; a failed pull
+  is logged and tried again next cycle, and never stops the bot, approvals or posting. Topic and hook
+  weights use the platforms in `analytics.weight_platforms` (YouTube + Instagram: the Facebook Page has
+  no audience yet).
 
 ## Credentials (`.env`)
 

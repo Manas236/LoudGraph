@@ -102,8 +102,13 @@ def step_render(run_id: str, topic: dict) -> tuple[str, dict]:
         meta = render.build_meta(run_id, topic, data, p, labels, views, tl, ainfo)
         meta["render"] = info
         meta["opening"] = opening              # the question the video opens with + the end card's answer
+        meta["hook_template"] = opening["hook_template"]   # hooks.py: tracked apart from the topic
         meta["cover_seconds"] = info["cover_seconds"]   # publish_instagram sends it as thumb_offset
         _write(run_id, "meta.json", meta)
+        db.set_hook_template(run_id, opening["hook_template"])
+        if opening.get("fallback") and db.get_run(run_id):   # (a TEST video has no run row)
+            db.log(run_id, "labelled", f"opens with \"{opening['question']}\" instead of the configured hook: "
+                                       f"{opening['fallback']}")
     n_ev = sum(len(s.events) for s in tl.slots)
     msg = (f"rendered {tl.n_frames} frames ({tl.n_frames / tl.fps:.1f}s, {n_ev} slow-mo events) with "
            f"{info['backend']} backend [{info['backend_note']}] in {info['render_seconds']}s; audio "

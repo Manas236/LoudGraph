@@ -148,6 +148,11 @@ render:
   cover_before_shrink: 0.15     # cover frame (thumb_offset) = this long before the hook starts to shrink
   watermark: false              # true = draw brand.name faintly on every frame; false = the video carries no name
 
+opening:                        # the question every video opens with (on screen from frame 0, then the header)
+  hook_template: which_last     # which_last = "Which country ends up last?" (the 2,096-view breakout reel);
+                                # who_overtakes = "Who overtakes who?"; auto = the old choice between the top two
+  hook_explore_pct: 0           # this % of new reels open with another question instead (the old choice); 0 = none
+
 labels:
   enabled: true
   max_words: 4
@@ -233,6 +238,8 @@ analytics:
   summary_every_hours: 24       # ... and sends the Telegram summary at most this often
   min_age_hours: 72
   shrink_n: 3
+  weight_platforms: [youtube, instagram]   # whose views set the topic and hook weights; Facebook Page reels are
+                                # pulled and kept too, but the Page has no audience yet (0-3 plays a reel)
 
 selector:
   exploit_share: 0.7

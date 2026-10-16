@@ -17,6 +17,8 @@
     python run.py go-live [--check-only]
     python run.py account
     python run.py batch [--count N] [--queue-only]
+    python run.py rebrand [--run RUN_ID ...] [--dry-run] [--no-send]
+    python run.py hooks
 """
 from __future__ import annotations
 
@@ -204,6 +206,42 @@ def cmd_batch(a):
     return 0
 
 
+def cmd_rebrand(a):
+    """Re-render the reels that are made but not posted with the configured opening question
+    (opening.hook_template), keeping their data, countries and audio track; see pipeline/rebrand.py."""
+    import json
+    from pipeline import db, rebrand
+    db.init()
+    if a.dry_run:
+        ids = a.run or [r["id"] for r in rebrand.candidates()]
+        for rid in ids:
+            p = rebrand.plan(rid)
+            p.pop("_ctx", None)
+            print(json.dumps(p, indent=1, ensure_ascii=False))
+        return 0
+    res = rebrand.rebrand_all(a.run, by="run.py rebrand", send=not a.no_send)
+    print(json.dumps(res, indent=1, ensure_ascii=False, default=str))
+    return 0 if all(r["action"] in ("rebranded", "kept") for r in res) else 1
+
+
+def cmd_hooks(a):
+    """Fill in hook_template for every reel (from the question its video shows) and print it, with the
+    average views and the weight per hook template."""
+    from pipeline import analytics, db, hooks
+    from pipeline.config import get_config
+    db.init()
+    posted = {p["run_id"]: p for p in db.latest_stats() if p["platform"] == "instagram"}
+    for r in hooks.backfill():
+        s = posted.get(r["run_id"])
+        views = f"{s['views']} views" if s and s["views"] is not None else ""
+        print(f"{r['run_id']}  {r['topic_id']:<28} {r['stage']:<18} {r['hook_template']:<14} "
+              f"{r['question'] or '(no on-screen hook)'}  {views}")
+    for tpl, w in analytics.update_hook_weights().items():
+        print(f"weight {tpl}: {w['weight']:+.3f} over {w['n_posts']} post(s) at least "
+              f"{get_config()['analytics']['min_age_hours']} h old")
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="run.py", description="Graphony: data-sonification Shorts/Reels pipeline")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -263,6 +301,14 @@ def main(argv=None):
     s.set_defaults(fn=cmd_batch)
     sub.add_parser("account", help="show the connected Instagram account and Facebook Page, read live by id "
                                    "(read-only)").set_defaults(fn=cmd_account)
+    s = sub.add_parser("rebrand", help="re-render unposted reels with the configured opening question "
+                                       "(same data, countries and audio track; old files kept as *_oldhook.*)")
+    s.add_argument("--run", nargs="*", help="run ids (default: every reel made but not posted)")
+    s.add_argument("--dry-run", action="store_true", help="only say what would change")
+    s.add_argument("--no-send", action="store_true", help="do not ask the bot to show them on the review card")
+    s.set_defaults(fn=cmd_rebrand)
+    sub.add_parser("hooks", help="fill in and list each reel's hook template, with the hook weights").set_defaults(
+        fn=cmd_hooks)
     a = p.parse_args(argv)
     setup_logging()
     return a.fn(a) or 0

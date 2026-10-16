@@ -31,16 +31,21 @@ def spawn(*args: str) -> int:
 
 
 def approve(run_id: str, by: str, publish_now: bool = False, platforms: list[str] | None = None) -> str:
-    """Approve a reel: it joins the back of the posting queue (posting.py posts one a day).
+    """Approve a reel: it joins the back of the posting queue (posting.py posts one a day), or takes back
+    the place it had before it was sent back for a fresh approval (review.back_to_review keep_place).
     publish_now=True posts it at once instead (Post now)."""
     from .accounts import enabled_platforms
     from .posting import next_pos, post_now
     chosen = enabled_platforms() if platforms is None else platforms
     if any(p not in enabled_platforms() for p in chosen):
         raise ValueError("Choose an enabled platform.")
+    run = db.get_run(run_id)
+    prior = run.get("prior_post_pos") if run else None
+    place = f"back in its place ({prior:g})" if prior is not None else "in the posting queue"
     # approved_by marks an approval made by this code: the publisher refuses to post live without it
-    db.transition(run_id, "approved", f"approved via {by}: in the posting queue", platforms=json.dumps(chosen),
-                  approved_by=f"{by} {db.now()}", approved_at=db.now(), post_pos=next_pos())
+    db.transition(run_id, "approved", f"approved via {by}: {place}", platforms=json.dumps(chosen),
+                  approved_by=f"{by} {db.now()}", approved_at=db.now(),
+                  post_pos=prior if prior is not None else next_pos(), prior_post_pos=None)
     if publish_now:
         post_now(run_id, by)
     return "approved"

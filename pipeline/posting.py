@@ -59,9 +59,11 @@ def queue() -> list[dict]:
 
 
 def next_pos() -> float:
-    """The back of the posting queue."""
+    """The back of the posting queue, behind the places kept for reels waiting to be approved again
+    (review.back_to_review keep_place), so those go back in front of reels approved after them."""
     with db.db() as c:
-        r = c.execute("SELECT MAX(COALESCE(post_pos, rowid)) FROM runs WHERE stage='approved'").fetchone()[0]
+        r = c.execute("SELECT MAX(p) FROM (SELECT MAX(COALESCE(post_pos, rowid)) p FROM runs WHERE stage='approved' "
+                      "UNION ALL SELECT MAX(prior_post_pos) FROM runs WHERE stage='awaiting_approval')").fetchone()[0]
     return (r or 0) + 1
 
 

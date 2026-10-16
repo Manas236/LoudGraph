@@ -249,15 +249,22 @@ def fit(base: str, tail: list[str], limit: int = CAPTION_LIMIT) -> str:
 
 # ------------------------------------------------------------------ going back to review
 
-def back_to_review(run_id: str, why: str) -> None:
+def back_to_review(run_id: str, why: str, keep_place: bool = False) -> None:
     """Move a run (not posted anywhere) back to review: forget its earlier approval, platform
-    choice and every not-live post record, so it posts only after a fresh approval."""
+    choice and every not-live post record, so it posts only after a fresh approval.
+    keep_place=True (an approved reel that was re-rendered): its place in the posting queue is kept in
+    prior_post_pos and given back when it is approved again (actions.approve)."""
+    run = db.get_run(run_id)
+    place = {"prior_post_pos": run["post_pos"] if run["post_pos"] is not None else run["ref"]} \
+        if keep_place and run and run["stage"] == "approved" else {}
     with db.db() as c:
         gone = [r["platform"] for r in c.execute("SELECT platform FROM posts WHERE run_id=? AND status NOT IN "
                                                  "('live','uploaded','private_locked')", (run_id,))]
         c.execute("DELETE FROM posts WHERE run_id=? AND status NOT IN ('live','uploaded','private_locked')", (run_id,))
     note = f"; removed test/failed post records: {', '.join(sorted(gone))}" if gone else ""
-    db.transition(run_id, "awaiting_approval", why + note, reset=True, platforms=None)
+    if place:
+        note += f"; keeps its place ({place['prior_post_pos']:g}) in the posting queue when approved again"
+    db.transition(run_id, "awaiting_approval", why + note, reset=True, platforms=None, **place)
 
 
 def _posted(run_id: str) -> bool:

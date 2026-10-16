@@ -184,21 +184,30 @@ def test_every_shipped_template_fills_into_a_valid_caption(ctx):
     from pipeline import captions
     checked = 0
     for h in captions.load_formats()["hooks"]:
-        facts = [f for f in ctx.facts if ctx.usable(h, f)]
+        c = ctx if not h.get("opener") else \
+            captions.Context(TOPIC, COUNTRIES, ctx.facts, 2000, 2010, opening={"id": h["opener"]})
+        facts = [f for f in c.facts if c.usable(h, f)]
         if not facts:
             continue
-        hook = captions._fill(h["fill"], facts[0], ctx)
-        v = {"template_id": h["id"], "hook": hook, "question_id": "comes_last",
-             "question": "Guess which country comes last?", "fact_ids": [facts[0]["id"]]}
-        assert captions.validate(v, ctx, set()) is None, (h["id"], hook)
+        hook = captions._fill(h["fill"], facts[0], c)
+        q = next(q for q in c.formats["questions"] if "[" not in q["text"])
+        v = {"template_id": h["id"], "hook": hook, "question_id": q["id"], "question": q["text"],
+             "fact_ids": [facts[0]["id"]]}
+        assert captions.validate(v, c, set()) is None, (h["id"], hook)
         checked += 1
-    assert checked >= 18
+    assert checked >= 23
 
 
 def test_caption_formats_and_hashtag_pools_are_clean():
     from pipeline import captions
     f = captions.load_formats()
-    assert 15 <= len(f["hooks"]) <= 20 and len({h["id"] for h in f["hooks"]}) == len(f["hooks"])
+    general = [h for h in f["hooks"] if not h.get("opener")]
+    assert 15 <= len(general) <= 20 and len({h["id"] for h in f["hooks"]}) == len(f["hooks"])
+    teasers = captions.for_opener(f, "ends_last")   # "Which country ends up last?": its own hooks + questions
+    assert len(teasers["hooks"]) >= 3 and teasers["questions"] and all(x.get("opener") for x in teasers["hooks"])
+    for x in teasers["hooks"] + teasers["questions"]:   # they tease the answer, so they never name a country
+        assert "[Country" not in x["text"] and (x.get("fill") is None or "{country" not in x["fill"])
+    assert not any(h.get("opener") for h in captions.for_opener(f, "overtakes")["hooks"])
     for t in [h["text"] for h in f["hooks"]] + [q["text"] for q in f["questions"]]:
         assert not any(d in t for d in captions.DASHES)
     assert all(q["text"].endswith("?") for q in f["questions"])

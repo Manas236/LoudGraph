@@ -134,6 +134,13 @@ CREATE TABLE IF NOT EXISTS topic_weights (
     retired_reason TEXT,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS hook_weights (
+    hook_template TEXT PRIMARY KEY,
+    weight REAL,
+    n_posts INTEGER NOT NULL DEFAULT 0,
+    mean_log_views REAL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -156,7 +163,12 @@ MIGRATIONS = [("runs", "progress", "REAL"), ("runs", "progress_at", "TEXT"),
               ("runs", "queue_pos", "REAL"), ("runs", "approved_by", "TEXT"),
               ("make_jobs", "source", "TEXT"), ("make_jobs", "batch_id", "INTEGER"),
               ("make_jobs", "dismissed", "INTEGER NOT NULL DEFAULT 0"),
-              ("runs", "post_pos", "REAL"), ("runs", "approved_at", "TEXT")]
+              ("runs", "post_pos", "REAL"), ("runs", "approved_at", "TEXT"),
+              # the on-screen hook (hooks.py), apart from the topic; a post copies its run's when it is made
+              ("runs", "hook_template", "TEXT"), ("posts", "hook_template", "TEXT"),
+              # the posting-queue place of a reel sent back for a fresh approval; restored when re-approved
+              ("runs", "prior_post_pos", "REAL"),
+              ("stats", "shares", "INTEGER"), ("stats", "saved", "INTEGER"), ("stats", "avg_watch_s", "REAL")]
 _ready: set[str] = set()
 
 
@@ -406,15 +418,16 @@ def upsert_post(run_id: str, platform: str, status: str, remote_id: str | None =
     ts = now()
     with db() as c:
         c.execute(
-            """INSERT INTO posts(run_id, platform, status, remote_id, url, message, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?)
+            """INSERT INTO posts(run_id, platform, status, remote_id, url, message, created_at, updated_at, hook_template)
+               VALUES (?,?,?,?,?,?,?,?,(SELECT hook_template FROM runs WHERE id=?))
                ON CONFLICT(run_id, platform) DO UPDATE SET
                  status=excluded.status,
                  remote_id=COALESCE(excluded.remote_id, posts.remote_id),
                  url=COALESCE(excluded.url, posts.url),
                  message=excluded.message,
-                 updated_at=excluded.updated_at""",
-            (run_id, platform, status, remote_id, url, message, ts, ts),
+                 updated_at=excluded.updated_at,
+                 hook_template=COALESCE(posts.hook_template, excluded.hook_template)""",
+            (run_id, platform, status, remote_id, url, message, ts, ts, run_id),
         )
         c.execute(
             "INSERT INTO stage_log(run_id, stage, message, ts) VALUES (?,?,?,?)",
@@ -462,11 +475,15 @@ def uploads_today(platform: str, now_utc: datetime | None = None) -> int:
 
 # ---------------------------------------------------------------- stats + weights
 
-def add_stats(post_id: int, views=None, avg_view_pct=None, reach=None, likes=None, comments=None, raw=None) -> None:
+def add_stats(post_id: int, views=None, avg_view_pct=None, reach=None, likes=None, comments=None, raw=None,
+              shares=None, saved=None, avg_watch_s=None) -> None:
+    """One more stats row for a post: every pull is kept (fetched_at), so a reel's growth can be read back."""
     with db() as c:
         c.execute(
-            "INSERT INTO stats(post_id, fetched_at, views, avg_view_pct, reach, likes, comments, raw) VALUES (?,?,?,?,?,?,?,?)",
-            (post_id, now(), views, avg_view_pct, reach, likes, comments, json.dumps(raw) if raw is not None else None),
+            "INSERT INTO stats(post_id, fetched_at, views, avg_view_pct, reach, likes, comments, raw, shares, saved, "
+            "avg_watch_s) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (post_id, now(), views, avg_view_pct, reach, likes, comments, json.dumps(raw) if raw is not None else None,
+             shares, saved, avg_watch_s),
         )
 
 
@@ -475,12 +492,20 @@ def latest_stats() -> list[dict]:
     with db() as c:
         rows = c.execute(
             """SELECT p.id post_id, p.run_id, p.platform, p.status, p.url, p.remote_id, p.created_at posted_at,
-                      r.topic_id, s.views, s.avg_view_pct, s.reach, s.likes, s.comments, s.fetched_at
+                      r.topic_id, COALESCE(p.hook_template, r.hook_template) hook_template, s.views, s.avg_view_pct,
+                      s.reach, s.likes, s.comments, s.shares, s.saved, s.avg_watch_s, s.fetched_at
                FROM posts p JOIN runs r ON r.id = p.run_id
                LEFT JOIN stats s ON s.id = (SELECT MAX(id) FROM stats WHERE post_id = p.id)
                ORDER BY p.created_at DESC"""
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def set_hook_template(run_id: str, template: str) -> None:
+    """The run's on-screen hook template, on the run and on every post made from it."""
+    with db() as c:
+        c.execute("UPDATE runs SET hook_template=? WHERE id=?", (template, run_id))
+        c.execute("UPDATE posts SET hook_template=? WHERE run_id=?", (template, run_id))
 
 
 def set_topic_weight(topic_id: str, weight: float | None, n_posts: int, mean_log_views: float | None,
@@ -500,6 +525,22 @@ def topic_weights() -> dict[str, dict]:
     init()
     with db() as c:
         return {r["topic_id"]: dict(r) for r in c.execute("SELECT * FROM topic_weights").fetchall()}
+
+
+def set_hook_weight(template: str, weight: float | None, n_posts: int, mean_log_views: float | None) -> None:
+    with db() as c:
+        c.execute(
+            """INSERT INTO hook_weights(hook_template, weight, n_posts, mean_log_views, updated_at) VALUES (?,?,?,?,?)
+               ON CONFLICT(hook_template) DO UPDATE SET weight=excluded.weight, n_posts=excluded.n_posts,
+                 mean_log_views=excluded.mean_log_views, updated_at=excluded.updated_at""",
+            (template, weight, n_posts, mean_log_views, now()),
+        )
+
+
+def hook_weights() -> dict[str, dict]:
+    init()
+    with db() as c:
+        return {r["hook_template"]: dict(r) for r in c.execute("SELECT * FROM hook_weights").fetchall()}
 
 
 # ---------------------------------------------------------------- small persistent settings

@@ -202,12 +202,21 @@ class CountryView:
 
 def opening_for(topic: dict, views: list[CountryView], x0: int, x1: int, seed: int = 0) -> dict:
     """The video's opening question and the answer its end card reveals, from facts computed on the
-    countries and years the video shows (captions.compute_facts / captions.opening)."""
-    from .captions import compute_facts, opening
-    facts = compute_facts(topic, [(v.iso3, v.name) for v in views],
-                          {v.iso3: list(zip(v.years, v.values)) for v in views}, x0, x1)
-    return opening(facts, seed) or {"id": None, "question": topic.get("name") or topic.get("title", ""),
-                                    "answer": "", "highlight": []}
+    countries and years the video shows (captions.compute_facts / captions.opening).
+
+    The question is config.yaml opening.hook_template ("Which country ends up last?" by default) when it is
+    true of the rendered data (captions.check_ends_last: no tie, at least 3 countries); otherwise, and for
+    opening.hook_explore_pct % of the reels, the old choice among the other questions ("fallback" says why)."""
+    from .captions import check_ends_last, compute_facts, opening
+    from .hooks import classify, preferred_opener, settings
+    rows = {v.iso3: list(zip(v.years, v.values)) for v in views}
+    facts = compute_facts(topic, [(v.iso3, v.name) for v in views], rows, x0, x1)
+    verify = (lambda f: check_ends_last(f, rows, lambda val: format_value(topic, val))) \
+        if preferred_opener() == "ends_last" else None
+    o = opening(facts, seed, prefer=preferred_opener(), explore_pct=settings()["hook_explore_pct"], verify=verify) or \
+        {"id": None, "question": topic.get("name") or topic.get("title", ""), "answer": "", "highlight": []}
+    o["hook_template"] = classify(o["question"])
+    return o
 
 
 def cover_seconds(tl: Timeline, cfg: dict | None = None) -> float:
@@ -594,9 +603,11 @@ def build_views(topic: dict, pick: dict, data: dict, labels: dict, tl: Timeline,
 
 def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path, out_mp4: Path,
                  thumb: Path | None = None, cfg: dict | None = None, on_progress=None,
-                 opening: dict | None = None) -> dict:
+                 opening: dict | None = None, audio_from: Path | None = None) -> dict:
     """on_progress(frame, n_frames) is called about once a second while frames are written.
-    thumb gets the cover frame (the opening question over the first line, see cover_seconds)."""
+    thumb gets the cover frame (the opening question over the first line, see cover_seconds).
+    audio_from: an earlier MP4 of this same timeline whose audio stream is copied unchanged (a re-render
+    with a new opening question); the WAV is then not encoded again and the true-peak guard is skipped."""
     cfg = cfg or get_config()
     vc = cfg["video"]
     r = Renderer(topic, tl, views, cfg, opening)
@@ -605,17 +616,22 @@ def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path,
     if not ffmpeg:
         raise RuntimeError("ffmpeg not on PATH")
     tmp = out_mp4.with_suffix(".part.mp4")
+    if audio_from:
+        audio = ["-i", str(audio_from), "-map", "0:v:0", "-map", "1:a:0"]
+        audio_codec = ["-c:a", "copy"]
+    else:
+        audio = ["-i", str(wav), "-map", "0:v:0", "-map", "1:a:0"]
+        # -aac_pns 0: the native encoder's Perceptual Noise Substitution re-synthesises the plucks'
+        # noise-burst attacks and created peaks up to +6 dB over the WAV; without it TP matches the WAV.
+        audio_codec = ["-c:a", "aac", "-aac_pns", "0", "-b:a", vc["audio_bitrate"], "-ar", str(cfg["audio"]["sample_rate"])]
     cmd = [
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(vc["fps"]), "-i", "-",
-        "-i", str(wav),
-        "-map", "0:v:0", "-map", "1:a:0",
+        *audio,
         "-vf", "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p",
         "-c:v", "libx264", "-preset", vc["preset"], "-crf", str(vc["crf"]), "-pix_fmt", "yuv420p",
         "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
-        # -aac_pns 0: the native encoder's Perceptual Noise Substitution re-synthesises the plucks'
-        # noise-burst attacks and created peaks up to +6 dB over the WAV; without it TP matches the WAV.
-        "-c:a", "aac", "-aac_pns", "0", "-b:a", vc["audio_bitrate"], "-ar", str(cfg["audio"]["sample_rate"]),
+        *audio_codec,
         "-movflags", "+faststart", str(tmp),
     ]
     errlog = out_mp4.parent / "ffmpeg.log"
@@ -641,7 +657,7 @@ def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path,
         raise RuntimeError(f"ffmpeg exited {rc}: {errlog.read_text(errors='replace')[-800:]}")
     if on_progress:
         on_progress(tl.n_frames, tl.n_frames)
-    guard = _true_peak_guard(tmp, wav, cfg)
+    guard = {"audio_copied_from": audio_from.name} if audio_from else _true_peak_guard(tmp, wav, cfg)
     tmp.replace(out_mp4)
     cover = cover_seconds(tl, cfg)
     if thumb is not None:
@@ -650,7 +666,8 @@ def render_video(topic: dict, tl: Timeline, views: list[CountryView], wav: Path,
     el = time.time() - t0
     return {"backend": r.backend, "backend_note": r.cv.backend_note, "frames": tl.n_frames,
             "render_seconds": round(el, 1), "fps": round(tl.n_frames / el, 1), "true_peak_guard": guard,
-            "cover_seconds": cover, "opening": {k: r.opening.get(k) for k in ("id", "question", "answer", "highlight")}}
+            "cover_seconds": cover, "opening": {k: r.opening.get(k) for k in ("id", "question", "answer", "highlight",
+                                                                            "hook_template", "fallback")}}
 
 
 def _true_peak_guard(mp4: Path, wav: Path, cfg: dict) -> dict:

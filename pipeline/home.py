@@ -342,8 +342,11 @@ def _n(n, word: str) -> str:
     return f"{n:,} {word}" + ("" if n == 1 else "s")
 
 
-def stats_text(limit: int = 6) -> str:
-    rows = [s for s in db.latest_stats() if s["status"] in review.LIVE]
+def stats_text(limit: int = 10) -> str:
+    """The Stats screen: the last `limit` Instagram reels (hook, topic, views, average watch time, shares),
+    then the average views per hook template (the hook weight once its reels are analytics.min_age_hours old)."""
+    from .hooks import LABELS, OTHER
+    rows = [s for s in db.latest_stats() if s["status"] in review.LIVE and s["platform"] == "instagram"]
     raw = {}
     with db.db() as c:
         for r in c.execute("SELECT post_id, raw FROM stats WHERE id IN (SELECT MAX(id) FROM stats GROUP BY post_id)"):
@@ -351,23 +354,35 @@ def stats_text(limit: int = 6) -> str:
                 raw[r["post_id"]] = json.loads(r["raw"] or "{}")
             except ValueError:
                 pass
-    ig = [s for s in rows if s["platform"] == "instagram"][:limit]
     last = db.kv_get("stats:last_run")
     lines = ["📊 Stats" + (f" (Instagram, checked {when(last)})" if last else " (not checked yet)"), ""]
-    if not ig:
+    if not rows:
         lines.append("No Instagram posts with stats yet.")
-    for s in ig:
+    else:
+        lines.append(f"Last {min(limit, len(rows))} reels:")
+    for s in rows[:limit]:
         r = raw.get(s["post_id"], {})
-        bits = [_n(s["views"], "view") if s["views"] is not None else "views not in yet"]
-        if s.get("avg_view_pct") is not None:
-            bits.append(f"{s['avg_view_pct']:.0f}% watched")
-        if r.get("reels_skip_rate") is not None:
-            bits.append(f"{r['reels_skip_rate']:.0f}% skipped in 3 s")
-        bits.append(", ".join(_n(v, w) for v, w in ((s["likes"], "like"), (r.get("shares"), "share"), (r.get("saved"), "save"))))
-        lines.append(f"• {review.topic_name(s['topic_id'])} ({when(s['posted_at'])}): " + ", ".join(bits))
-    views = [s["views"] for s in rows if s["platform"] == "instagram" and s["views"] is not None]
-    if views:
-        lines += ["", f"Average: {_n(round(sum(views) / len(views)), 'view')} over {_n(len(views), 'reel')}."]
+        watch = s.get("avg_watch_s")
+        if watch is None and isinstance(r.get("ig_reels_avg_watch_time"), (int, float)):
+            watch = r["ig_reels_avg_watch_time"] / 1000
+        shares = s["shares"] if s.get("shares") is not None else r.get("shares")
+        bits = [_n(s["views"], "view") if s["views"] is not None else "views not in yet",
+                f"{watch:.1f} s avg watch" if watch is not None else "watch time not in yet",
+                _n(shares, "share") if shares is not None else "shares not in yet"]
+        hook = LABELS.get(s.get("hook_template") or OTHER, LABELS[OTHER])
+        lines.append(f"• {review.topic_name(s['topic_id'])} ({when(s['posted_at'])})\n   ❓ {hook}\n   " + " · ".join(bits))
+    by_hook: dict[str, list[int]] = {}
+    for s in rows:
+        if s["views"] is not None:
+            by_hook.setdefault(s.get("hook_template") or OTHER, []).append(s["views"])
+    if by_hook:
+        weights = db.hook_weights()
+        lines += ["", "Average views per hook:"]
+        for tpl, views in sorted(by_hook.items(), key=lambda kv: -sum(kv[1]) / len(kv[1])):
+            w = weights.get(tpl)
+            weight = f", weight {w['weight']:+.2f}" if w and w.get("weight") is not None else ""
+            lines.append(f"• {LABELS.get(tpl, tpl)}: {_n(round(sum(views) / len(views)), 'view')} "
+                         f"over {_n(len(views), 'reel')}{weight}")
     return "\n".join(lines)
 
 

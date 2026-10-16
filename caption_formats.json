@@ -13,7 +13,10 @@
   "A hook with no 'fill' is only used by Gemini.",
   "'openers' are the question the VIDEO opens with (big on screen, then the header) and the answer its",
   "end card reveals. 'fact' picks the computed fact; the answer is filled from it in code (no Gemini).",
-  "The first openers whose fact exists in a video are preferred. Keep questions free of numbers."
+  "The first openers whose fact exists in a video are preferred. Keep questions free of numbers.",
+  "A hook or question with 'opener' is written for the video that opens with that question: such a video",
+  "uses ONLY those (they tease the answer the end card reveals, so they never name it), and no other video",
+  "uses them. config.yaml opening.hook_template picks the opener every new video starts with."
  ],
  "hooks": [
   {"id": "wait_for", "text": "Wait for [Country]",
@@ -75,7 +78,17 @@
    "fill": "The {metric} chart nobody shows you"},
   {"id": "from_to_watch", "text": "From [x] to [y]. Watch [Country]",
    "facts": ["biggest_rise", "biggest_fall", "surprising", "sharpest"],
-   "fill": "From {from} to {to}. Watch {country}"}
+   "fill": "From {from} to {to}. Watch {country}"},
+  {"id": "last_guess", "opener": "ends_last", "text": "Guess which country ends up last",
+   "facts": ["final_low"], "fill": "Guess which country ends up last"},
+  {"id": "last_in_year", "opener": "ends_last", "text": "Only one of these countries ends up last in [year]",
+   "facts": ["final_low"], "fill": "Only one of these countries ends up last in {year}"},
+  {"id": "last_dont_scroll", "opener": "ends_last", "text": "Don't scroll before you see who ends up last",
+   "facts": ["final_low"], "fill": "Don't scroll before you see who ends up last"},
+  {"id": "last_bet", "opener": "ends_last", "text": "Bet you can't guess who ends up last",
+   "facts": ["final_low"], "fill": "Bet you can't guess who ends up last"},
+  {"id": "last_wait", "opener": "ends_last", "text": "Wait for the end to see who ends up last",
+   "facts": ["final_low"], "fill": "Wait for the end to see who ends up last"}
  ],
  "openers": [
   {"id": "overtakes", "fact": "crossover", "question": "Who overtakes who?",
@@ -101,6 +114,10 @@
   {"id": "your_line", "text": "Which line would your country draw?"},
   {"id": "guess_match", "text": "Did your guess match the ending?"},
   {"id": "rooting_for", "text": "Which country were you rooting for?"},
-  {"id": "would_guess", "text": "Would you have guessed [Country]?"}
+  {"id": "would_guess", "text": "Would you have guessed [Country]?"},
+  {"id": "last_your_guess", "opener": "ends_last", "text": "Which country did you guess would end up last?"},
+  {"id": "last_called_it", "opener": "ends_last", "text": "Did you call last place before the end?"},
+  {"id": "last_match", "opener": "ends_last", "text": "Did your guess for last place match the ending?"},
+  {"id": "last_surprise", "opener": "ends_last", "text": "Did last place surprise you?"}
  ]
 }
