@@ -166,6 +166,8 @@ MIGRATIONS = [("runs", "progress", "REAL"), ("runs", "progress_at", "TEXT"),
               ("runs", "post_pos", "REAL"), ("runs", "approved_at", "TEXT"),
               # the on-screen hook (hooks.py), apart from the topic; a post copies its run's when it is made
               ("runs", "hook_template", "TEXT"), ("posts", "hook_template", "TEXT"),
+              # the exact wording of a which_last hook ("Who drops to the bottom?"); None for other templates
+              ("runs", "hook_phrase", "TEXT"), ("posts", "hook_phrase", "TEXT"),
               # the posting-queue place of a reel sent back for a fresh approval; restored when re-approved
               ("runs", "prior_post_pos", "REAL"),
               ("stats", "shares", "INTEGER"), ("stats", "saved", "INTEGER"), ("stats", "avg_watch_s", "REAL")]
@@ -418,16 +420,18 @@ def upsert_post(run_id: str, platform: str, status: str, remote_id: str | None =
     ts = now()
     with db() as c:
         c.execute(
-            """INSERT INTO posts(run_id, platform, status, remote_id, url, message, created_at, updated_at, hook_template)
-               VALUES (?,?,?,?,?,?,?,?,(SELECT hook_template FROM runs WHERE id=?))
+            """INSERT INTO posts(run_id, platform, status, remote_id, url, message, created_at, updated_at, hook_template,
+                                 hook_phrase)
+               VALUES (?,?,?,?,?,?,?,?,(SELECT hook_template FROM runs WHERE id=?),(SELECT hook_phrase FROM runs WHERE id=?))
                ON CONFLICT(run_id, platform) DO UPDATE SET
                  status=excluded.status,
                  remote_id=COALESCE(excluded.remote_id, posts.remote_id),
                  url=COALESCE(excluded.url, posts.url),
                  message=excluded.message,
                  updated_at=excluded.updated_at,
-                 hook_template=COALESCE(posts.hook_template, excluded.hook_template)""",
-            (run_id, platform, status, remote_id, url, message, ts, ts, run_id),
+                 hook_template=COALESCE(posts.hook_template, excluded.hook_template),
+                 hook_phrase=COALESCE(posts.hook_phrase, excluded.hook_phrase)""",
+            (run_id, platform, status, remote_id, url, message, ts, ts, run_id, run_id),
         )
         c.execute(
             "INSERT INTO stage_log(run_id, stage, message, ts) VALUES (?,?,?,?)",
@@ -492,7 +496,8 @@ def latest_stats() -> list[dict]:
     with db() as c:
         rows = c.execute(
             """SELECT p.id post_id, p.run_id, p.platform, p.status, p.url, p.remote_id, p.created_at posted_at,
-                      r.topic_id, COALESCE(p.hook_template, r.hook_template) hook_template, s.views, s.avg_view_pct,
+                      r.topic_id, COALESCE(p.hook_template, r.hook_template) hook_template,
+                      COALESCE(p.hook_phrase, r.hook_phrase) hook_phrase, s.views, s.avg_view_pct,
                       s.reach, s.likes, s.comments, s.shares, s.saved, s.avg_watch_s, s.fetched_at
                FROM posts p JOIN runs r ON r.id = p.run_id
                LEFT JOIN stats s ON s.id = (SELECT MAX(id) FROM stats WHERE post_id = p.id)
@@ -501,11 +506,12 @@ def latest_stats() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def set_hook_template(run_id: str, template: str) -> None:
-    """The run's on-screen hook template, on the run and on every post made from it."""
+def set_hook_template(run_id: str, template: str, phrase: str | None = None) -> None:
+    """The run's on-screen hook template and, for which_last, its exact wording (hook_phrase), on the run and
+    on every post made from it."""
     with db() as c:
-        c.execute("UPDATE runs SET hook_template=? WHERE id=?", (template, run_id))
-        c.execute("UPDATE posts SET hook_template=? WHERE run_id=?", (template, run_id))
+        c.execute("UPDATE runs SET hook_template=?, hook_phrase=? WHERE id=?", (template, phrase, run_id))
+        c.execute("UPDATE posts SET hook_template=?, hook_phrase=? WHERE run_id=?", (template, phrase, run_id))
 
 
 def set_topic_weight(topic_id: str, weight: float | None, n_posts: int, mean_log_views: float | None,

@@ -4,6 +4,10 @@
 # source: worldbank -> code is a WDI indicator code
 # source: owid      -> code is "<grapher-slug>/<column>" or "github:<energy-data|co2-data>/<column>"
 # subtitle is shown on screen and must say what the number IS.
+# Keep it on ONE line (the renderer tries 52 px down to 44 px; tests/test_hooks.py measures every subtitle with
+# the video's font): a second line pushes the whole chart about 57 px down. Shorten the words, never the font.
+# rank (optional): lower_first when a lower number is the better outcome; otherwise the highest value ranks
+# first. The which_last hooks ("Which country ends up last?") and the end card's order follow it.
 # value_scale (optional) multiplies raw values before unit_format, e.g. 1.0e-6 for millions.
 # category is used only for the dashboard.
 
@@ -14,7 +18,7 @@
   source: worldbank
   code: FP.CPI.TOTL.ZG
   title: "If inflation had a sound"
-  subtitle: "Consumer prices, % rise vs the year before"
+  subtitle: "Consumer prices, % rise in a year"
   unit_format: "{:.1f}%"
   start_year: 1990
   min_meaningful: 2.0
@@ -38,7 +42,7 @@
   source: worldbank
   code: NY.GDP.PCAP.KD
   title: "What getting richer sounds like"
-  subtitle: "GDP per person, constant 2015 US dollars"
+  subtitle: "GDP per person, 2015 US dollars"
   unit_format: "${:,.0f}"
   start_year: 1990
   min_meaningful: 100
@@ -51,6 +55,7 @@
   code: SL.UEM.TOTL.ZS
   title: "If unemployment had a sound"
   subtitle: "Unemployed, % of the labour force"
+  rank: lower_first             # a lower number is the better outcome: last = the highest value
   unit_format: "{:.1f}%"
   start_year: 1991
   min_meaningful: 2.0
@@ -98,7 +103,7 @@
   source: worldbank
   code: ST.INT.ARVL
   title: "The year tourism went silent"
-  subtitle: "International tourist arrivals per year, millions"
+  subtitle: "Foreign tourist arrivals, millions"
   unit_format: "{:.1f}M"
   value_scale: 1.0e-6
   start_year: 1995
@@ -161,7 +166,7 @@
   source: worldbank
   code: SM.POP.NETM
   title: "Where people move to, as music"
-  subtitle: "Net migration (arriving minus leaving), thousands"
+  subtitle: "Arriving minus leaving, thousands"
   unit_format: "{:+,.0f}K"
   value_scale: 1.0e-3
   start_year: 1990
@@ -214,6 +219,7 @@
   code: child-mortality/child_mortality_rate
   title: "The sound of fewer children dying"
   subtitle: "% of newborns who die before age 5"
+  rank: lower_first             # a lower number is the better outcome: last = the highest value
   unit_format: "{:.1f}%"
   start_year: 1990
   min_meaningful: 0.5
@@ -237,7 +243,7 @@
   source: owid
   code: total-alcohol-consumption-per-capita-litres-of-pure-alcohol/sh_alc_pcap_li
   title: "If drinking had a sound"
-  subtitle: "Litres of pure alcohol per person 15+, per year"
+  subtitle: "Pure alcohol, litres per person 15+"
   unit_format: "{:.1f} L"
   start_year: 2000
   min_meaningful: 1.0
@@ -250,6 +256,7 @@
   code: homicide-rate-unodc/value__category_total__sex_total__age_total__unit_of_measurement_rate_per_100_000_population
   title: "Murder rates, played as music"
   subtitle: "Homicides per 100,000 people per year"
+  rank: lower_first             # a lower number is the better outcome: last = the highest value
   unit_format: "{:.1f}"
   start_year: 1995
   min_meaningful: 1.0
@@ -334,7 +341,7 @@
   source: owid
   code: github:energy-data/oil_energy_per_capita
   title: "How much oil each person burns"
-  subtitle: "Oil energy used per person, kWh per year"
+  subtitle: "Oil used per person, kWh per year"
   unit_format: "{:,.0f}"
   start_year: 1990
   min_meaningful: 500
@@ -383,7 +390,7 @@
   source: worldbank
   code: IT.NET.BBND.P2
   title: "Home broadband, as music"
-  subtitle: "Fixed broadband subscriptions per 100 people"
+  subtitle: "Fixed broadband per 100 people"
   unit_format: "{:.1f}"
   start_year: 2001
   min_meaningful: 2.0
@@ -395,7 +402,7 @@
   source: worldbank
   code: GB.XPD.RSDV.GD.ZS
   title: "Who is investing in the future?"
-  subtitle: "Research & development spending, % of GDP"
+  subtitle: "R&D spending, % of GDP"
   unit_format: "{:.2f}%"
   start_year: 1996
   min_meaningful: 0.3
@@ -408,7 +415,7 @@
   source: owid
   code: github:co2-data/co2_per_capita
   title: "What your carbon footprint sounds like"
-  subtitle: "CO2 from fossil fuels & industry, tonnes per person"
+  subtitle: "Fossil CO2, tonnes per person"
   unit_format: "{:.1f} t"
   start_year: 1990
   min_meaningful: 0.5
@@ -420,7 +427,7 @@
   source: owid
   code: annual-temperature-anomalies/temperature_anomaly
   title: "The sound of a warming planet"
-  subtitle: "Average temperature vs 1991-2020 mean, °C"
+  subtitle: "Temperature vs 1991-2020, °C"
   unit_format: "{:+.2f}°C"
   start_year: 1990
   min_meaningful: 0.3
@@ -432,7 +439,7 @@
   source: worldbank
   code: IS.AIR.PSGR
   title: "The year flying stopped"
-  subtitle: "Passengers flown by each country's airlines, millions"
+  subtitle: "Passengers on its airlines, millions"
   unit_format: "{:.1f}M"
   value_scale: 1.0e-6
   start_year: 1995

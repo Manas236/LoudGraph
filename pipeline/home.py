@@ -343,8 +343,9 @@ def _n(n, word: str) -> str:
 
 
 def stats_text(limit: int = 10) -> str:
-    """The Stats screen: the last `limit` Instagram reels (hook, topic, views, average watch time, shares),
-    then the average views per hook template (the hook weight once its reels are analytics.min_age_hours old)."""
+    """The Stats screen: the last `limit` Instagram reels (hook template with its exact phrasing, topic, views,
+    average watch time, shares), then the average views per hook template (the hook weight once its reels are
+    analytics.min_age_hours old; every which_last phrasing counts toward the one which_last weight)."""
     from .hooks import LABELS, OTHER
     rows = [s for s in db.latest_stats() if s["status"] in review.LIVE and s["platform"] == "instagram"]
     raw = {}
@@ -369,7 +370,8 @@ def stats_text(limit: int = 10) -> str:
         bits = [_n(s["views"], "view") if s["views"] is not None else "views not in yet",
                 f"{watch:.1f} s avg watch" if watch is not None else "watch time not in yet",
                 _n(shares, "share") if shares is not None else "shares not in yet"]
-        hook = LABELS.get(s.get("hook_template") or OTHER, LABELS[OTHER])
+        tpl = s.get("hook_template") or OTHER   # the template (what the weight counts) and its exact wording
+        hook = f"{tpl}: “{s['hook_phrase']}”" if s.get("hook_phrase") else f"{tpl} ({LABELS.get(tpl, LABELS[OTHER])})"
         lines.append(f"• {review.topic_name(s['topic_id'])} ({when(s['posted_at'])})\n   ❓ {hook}\n   " + " · ".join(bits))
     by_hook: dict[str, list[int]] = {}
     for s in rows:
@@ -381,7 +383,7 @@ def stats_text(limit: int = 10) -> str:
         for tpl, views in sorted(by_hook.items(), key=lambda kv: -sum(kv[1]) / len(kv[1])):
             w = weights.get(tpl)
             weight = f", weight {w['weight']:+.2f}" if w and w.get("weight") is not None else ""
-            lines.append(f"• {LABELS.get(tpl, tpl)}: {_n(round(sum(views) / len(views)), 'view')} "
+            lines.append(f"• {tpl} ({LABELS.get(tpl, tpl)}): {_n(round(sum(views) / len(views)), 'view')} "
                          f"over {_n(len(views), 'reel')}{weight}")
     return "\n".join(lines)
 

@@ -61,7 +61,7 @@ def test_review_shows_video_queue_and_clear_actions_without_ids(client):
     assert "1 of" not in html or "waiting" in html
     assert "of 2 waiting" in html and "Approve (posts once accounts are connected)" in html
     assert 'data-action="remake"' in html and 'data-action="reject"' in html
-    assert "Passengers flown by each country" in html and "United States" in html
+    assert "Passengers on its airlines" in html and "United States" in html
     assert "Nothing here" not in html and "heartbeat" not in html
     assert not re.search(r"r\d{8}-\d{6}-[0-9a-f]{4}|air_passengers|homicide_rate", html)
     assert len(re.findall(r'class="status status-', html)) == 1

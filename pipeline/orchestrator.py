@@ -96,19 +96,25 @@ def step_render(run_id: str, topic: dict) -> tuple[str, dict]:
             audio.write_wav(d / f"{name}.wav", x, ainfo["sample_rate"])
         _write(run_id, "audio.json", ainfo)
         views = render.build_views(topic, p, data, labels, tl)
-        opening = render.opening_for(topic, views, p["x_start"], p["x_end"], seed=zlib.crc32(run_id.encode()))
+        opening = render.opening_for(topic, views, p["x_start"], p["x_end"], seed=zlib.crc32(run_id.encode()),
+                                     run_id=run_id)
         info = render.render_video(topic, tl, views, d / "audio.wav", d / "video.mp4", thumb=d / "thumb.jpg",
                                    on_progress=_progress_writer(run_id), opening=opening)
         meta = render.build_meta(run_id, topic, data, p, labels, views, tl, ainfo)
         meta["render"] = info
         meta["opening"] = opening              # the question the video opens with + the end card's answer
         meta["hook_template"] = opening["hook_template"]   # hooks.py: tracked apart from the topic
+        meta["hook_phrase"] = opening.get("hook_phrase")   # ... and the exact which_last wording
         meta["cover_seconds"] = info["cover_seconds"]   # publish_instagram sends it as thumb_offset
         _write(run_id, "meta.json", meta)
-        db.set_hook_template(run_id, opening["hook_template"])
-        if opening.get("fallback") and db.get_run(run_id):   # (a TEST video has no run row)
-            db.log(run_id, "labelled", f"opens with \"{opening['question']}\" instead of the configured hook: "
-                                       f"{opening['fallback']}")
+        db.set_hook_template(run_id, opening["hook_template"], opening.get("hook_phrase"))
+        if db.get_run(run_id):   # (a TEST video has no run row)
+            if opening.get("fallback"):
+                db.log(run_id, "labelled", f"opens with \"{opening['question']}\" instead of the configured hook: "
+                                           f"{opening['fallback']}"[:1500])
+            elif opening.get("choice"):
+                db.log(run_id, "labelled", f"opens with \"{opening['question']}\" ({opening['choice']}; true because: "
+                                           f"{opening['truth']})"[:1500])
     n_ev = sum(len(s.events) for s in tl.slots)
     msg = (f"rendered {tl.n_frames} frames ({tl.n_frames / tl.fps:.1f}s, {n_ev} slow-mo events) with "
            f"{info['backend']} backend [{info['backend_note']}] in {info['render_seconds']}s; audio "

@@ -149,9 +149,38 @@ render:
   watermark: false              # true = draw brand.name faintly on every frame; false = the video carries no name
 
 opening:                        # the question every video opens with (on screen from frame 0, then the header)
-  hook_template: which_last     # which_last = "Which country ends up last?" (the 2,096-view breakout reel);
-                                # who_overtakes = "Who overtakes who?"; auto = the old choice between the top two
+  hook_template: which_last     # which_last = a guess-the-loser question from `phrasings` (the style of the 2,096-view
+                                # breakout reel); who_overtakes = "Who overtakes who?"; auto = the old choice between the top two
   hook_explore_pct: 0           # this % of new reels open with another question instead (the old choice); 0 = none
+  recent_block: 3               # a phrasing shown by one of the last 3 reels (posted, then the posting queue, then
+                                # Ready for review) is not used again; among the rest the least-used one is picked
+  # which_last phrasings: loser questions only. Edit, add or remove freely; every reel stays hook_template which_last
+  # (the hook weight is not split) and stores the exact wording as hook_phrase. A phrasing is used only when its
+  # `check` is TRUE of the reel's own data (pipeline/hooks.py) and it fits on screen like the first one does:
+  #   ends_last      the country with the worst final rank (fields: country, value, year)
+  #   falls_most     the biggest fall in value, start to end (country, from, to, from_year, to_year)
+  #   drops_to_last  last at the end, NOT last in the first year every country has data (country, rank_from,
+  #                  from_year, value, year)
+  #   loses_lead     the only country that led at some point and is not first at the end (country, country2 = who
+  #                  took the lead, year)
+  #   overtaken_most passed by the most countries, at least 2: behind it at the start, ahead at the end (country, n)
+  #   loses_ground   the biggest drop in rank start to end, at least 2 places (country, rank_from, rank_to,
+  #                  from_year, year)
+  # Rank follows the topic's direction (topics.yaml `rank`: highest value first unless lower_first). spatial: true
+  # = up/down words (falls, drops, bottom): only for topics ranked highest first, where the chart agrees.
+  # `answer` is the end card's line and must answer the question. The first ends_last phrasing is the fallback.
+  # Ties in the rotation go by this order, so it alternates the kinds of question.
+  phrasings:
+    - {text: "Which country ends up last?", check: ends_last, answer: "{country} ends up last: {value} in {year}"}
+    - {text: "Which country falls the most?", check: falls_most, spatial: true, answer: "{country} falls the most: {from} to {to}"}
+    - {text: "Which country loses the lead?", check: loses_lead, answer: "{country} loses the lead to {country2} in {year}"}
+    - {text: "Who drops to the bottom?", check: drops_to_last, spatial: true, answer: "{country} drops from {rank_from} in {from_year} to last in {year}"}
+    - {text: "Who gets overtaken most?", check: overtaken_most, answer: "{country} gets overtaken by {n} countries"}
+    - {text: "Which country finishes last?", check: ends_last, answer: "{country} finishes last: {value} in {year}"}
+    - {text: "Who loses the most ground?", check: loses_ground, answer: "{country} drops from {rank_from} in {from_year} to {rank_to} in {year}"}
+    - {text: "Which country sinks to last?", check: drops_to_last, spatial: true, answer: "{country} sinks from {rank_from} in {from_year} to last in {year}"}
+    - {text: "Who comes last in the end?", check: ends_last, answer: "{country} comes last: {value} in {year}"}
+    - {text: "Who ends up at the bottom?", check: ends_last, spatial: true, answer: "{country} ends up at the bottom: {value} in {year}"}
 
 labels:
   enabled: true

@@ -200,23 +200,96 @@ class CountryView:
         self.ticks = [t for t in nice_ticks(vmin, vmax, 4) if self.ylo <= t <= self.yhi]
 
 
-def opening_for(topic: dict, views: list[CountryView], x0: int, x1: int, seed: int = 0) -> dict:
-    """The video's opening question and the answer its end card reveals, from facts computed on the
-    countries and years the video shows (captions.compute_facts / captions.opening).
+def opening_for(topic: dict, views: list[CountryView], x0: int, x1: int, seed: int = 0,
+                history: list | None = None, run_id: str | None = None) -> dict:
+    """The video's opening question and the answer its end card reveals, from the countries and years the
+    video shows.
 
-    The question is config.yaml opening.hook_template ("Which country ends up last?" by default) when it is
-    true of the rendered data (captions.check_ends_last: no tie, at least 3 countries); otherwise, and for
-    opening.hook_explore_pct % of the reels, the old choice among the other questions ("fallback" says why)."""
-    from .captions import check_ends_last, compute_facts, opening
-    from .hooks import classify, preferred_opener, settings
+    opening.hook_template which_last (the default): a guess-the-loser phrasing from opening.phrasings whose
+    truth check holds for this data and that fits on screen like the first one, picked by the rotation in
+    hooks.choose() over `history` (default: hooks.phrase_history(), without run_id itself); the end card shows
+    that phrasing's answer. When none is true, and for opening.hook_explore_pct % of the reels, the old choice
+    among the other questions (caption_formats.json openers; "fallback" says why). Other hook_template values:
+    the old choice (captions.opening)."""
+    import random
+    from . import hooks
+    from .captions import check_ends_last, compute_facts, load_formats, opening
     rows = {v.iso3: list(zip(v.years, v.values)) for v in views}
     facts = compute_facts(topic, [(v.iso3, v.name) for v in views], rows, x0, x1)
-    verify = (lambda f: check_ends_last(f, rows, lambda val: format_value(topic, val))) \
-        if preferred_opener() == "ends_last" else None
-    o = opening(facts, seed, prefer=preferred_opener(), explore_pct=settings()["hook_explore_pct"], verify=verify) or \
-        {"id": None, "question": topic.get("name") or topic.get("title", ""), "answer": "", "highlight": []}
-    o["hook_template"] = classify(o["question"])
+    fmt = lambda val: format_value(topic, val)  # noqa: E731
+    s = hooks.settings()
+    if s["hook_template"] == hooks.WHICH_LAST:
+        if s["hook_explore_pct"] > 0 and random.Random(seed).random() * 100 < s["hook_explore_pct"]:
+            why = f"exploring: {s['hook_explore_pct']:g}% of reels open with another question"
+        else:
+            past = hooks.phrase_history(exclude=run_id) if history is None else list(history)
+            o, why_not = hooks.which_last_opening(topic, rows, {v.iso3: v.name for v in views}, fmt, past,
+                                                  phrasing_fits)
+            if o:
+                return o
+            why = "no which_last phrasing is true of this data and fits: " + \
+                "; ".join(f"{q} ({w})" for q, w in why_not.items())
+        formats = load_formats()   # the old choice, without the loser questions (their truth is checked above)
+        formats["openers"] = [x for x in formats["openers"] if hooks.classify(x["question"]) != hooks.WHICH_LAST]
+        o = opening(facts, seed, formats=formats)
+        if o:
+            o["fallback"] = why
+    else:
+        verify = (lambda f: check_ends_last(f, rows, fmt)) if hooks.preferred_opener() == "ends_last" else None
+        o = opening(facts, seed, prefer=hooks.preferred_opener(), explore_pct=s["hook_explore_pct"], verify=verify)
+    o = o or {"id": None, "question": topic.get("name") or topic.get("title", ""), "answer": "", "highlight": []}
+    o["hook_template"] = hooks.classify(o["question"])
+    o["hook_phrase"] = o["question"] if o["hook_template"] == hooks.WHICH_LAST else None
     return o
+
+
+_MEASURE: dict[str, object] = {}
+
+
+def _measure_canvas(cfg: dict | None = None):
+    """A canvas with the renderer's backend and fonts, only for measuring text."""
+    from .assets import ensure_fonts
+    backend = (cfg or get_config())["render"]["backend"]
+    if backend not in _MEASURE:
+        _MEASURE[backend] = make_canvas(W, H, ensure_fonts(), backend)
+    return _MEASURE[backend]
+
+
+def hook_layout(question: str, cfg: dict | None = None) -> tuple[int, int, int, int]:
+    """(big size, big lines, header size, header lines) the opening question is drawn with."""
+    (bs, bl), (ss, sl) = hook_fit(_measure_canvas(cfg), question)
+    return bs, len(bl), ss, len(sl)
+
+
+def answer_fit(cv, answer: str) -> tuple[int, list[str]] | None:
+    """The end card answer: the largest size from 64 px down to 44 px at which it fits on 1 or 2 balanced lines."""
+    for s in range(64, 43, -2):
+        fit = balanced_lines(cv, answer, "black", s, CONTENT_W)
+        if fit:
+            return s, fit
+    return None
+
+
+def phrasing_fits(question: str, answer: str, cfg: dict | None = None) -> str | None:
+    """None when a which_last phrasing is drawn exactly like the first phrasing (same sizes and lines, so the
+    metric line and the chart stay where they are) and its end card answer fits; else why not."""
+    from .hooks import DEFAULT_PHRASINGS, phrasings
+    ref = (phrasings() or DEFAULT_PHRASINGS)[0]["text"]
+    want, got = hook_layout(ref, cfg), hook_layout(question, cfg)
+    if got != want:
+        return (f"it is drawn at {got[0]} px on {got[1]} line(s) (header {got[2]} px, {got[3]} line(s)) instead of "
+                f"{want[0]} px on {want[1]} (header {want[2]} px, {want[3]}): the chart would move")
+    if answer_fit(_measure_canvas(cfg), answer) is None:
+        return f"its end card answer {answer!r} does not fit on 2 lines at 44 px"
+    return None
+
+
+def end_order(topic: dict, views: list[CountryView]) -> list[int]:
+    """The end card's rows: where each country ends, first place first (the highest value, unless topics.yaml
+    says rank: lower_first), so the which_last answer's country sits where the question says."""
+    from .hooks import rank_sign
+    sign = rank_sign(topic)
+    return sorted(range(len(views)), key=lambda i: -sign * views[i].values[-1])
 
 
 def cover_seconds(tl: Timeline, cfg: dict | None = None) -> float:
@@ -381,12 +454,7 @@ class Renderer:
         y = L["dots_band"][0]
         answer = self.opening.get("answer") or ""
         if answer:
-            size, lines = 44, cv.wrap(answer, "black", 44, CONTENT_W)[:2]
-            for s in range(64, 43, -2):
-                fit = balanced_lines(cv, answer, "black", s, CONTENT_W)
-                if fit:
-                    size, lines = s, fit
-                    break
+            size, lines = answer_fit(cv, answer) or (44, cv.wrap(answer, "black", 44, CONTENT_W)[:2])
             step = round(size * 1.12)
             for k, ln in enumerate(lines):
                 cv.text(CX, y + CAP * size + k * step, ln, "black", size, rc["text"], anchor="m", tag="end_answer")
@@ -399,7 +467,7 @@ class Renderer:
         row_h = min(150.0, (STACK_BOTTOM - cta_h - y) / n)
         rows_top = y
         hl = set(self.opening.get("highlight") or [])
-        order = sorted(range(n), key=lambda i: -self.views[i].values[-1])   # where each country ends, highest first
+        order = end_order(self.topic, self.views)
         pad = 22
         spark_l, spark_r = SAFE_LEFT + 450, SAFE_RIGHT - pad - 6
         for r, i in enumerate(order):

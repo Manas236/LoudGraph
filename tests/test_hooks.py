@@ -1,6 +1,7 @@
-"""Hook templates (pipeline/hooks.py), "Which country ends up last?" as the default opening question and its
-truth check, re-branding unposted reels (pipeline/rebrand.py), and stats that can fail without stopping the
-bot. No network: Meta, Telegram and the renderer are faked."""
+"""Hook templates (pipeline/hooks.py): the which_last guess-the-loser phrasings, their truth checks computed from
+the data, the rotation, the end card answer that answers the question asked, hook_phrase tracking, subtitles on
+one line, re-branding unposted reels (pipeline/rebrand.py), and stats that can fail without stopping the bot.
+No network: Meta, Telegram and the renderer are faked."""
 import json
 import threading
 from datetime import datetime, timedelta, timezone
@@ -8,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import requests
 
-TOPIC_ID = "homicide_rate"                  # a real topic (unit "{:.1f}"), so get_topic works
+TOPIC_ID = "landlines"                      # a real topic ranked highest first (unit "{:.1f}"), so get_topic works
 YEARS = list(range(2000, 2011))
 SERIES = {
     "IND": list(zip(YEARS, [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 30])),     # overtakes France in 2007
@@ -16,7 +17,18 @@ SERIES = {
     "FRA": list(zip(YEARS, [10, 13, 16, 19, 22, 25, 20, 15, 10, 7, 5])),    # ends last: 5.0 in 2010
     "JPN": list(zip(YEARS, [15, 15, 14, 14, 13, 13, 13, 12, 12, 12, 12])),
 }
+NAMES = {"IND": "India", "USA": "United States", "FRA": "France", "JPN": "Japan"}
+# every check is true here: Norway leads, falls the most and ends last; Finland takes the lead in 2002
+RACE_YEARS = [2000, 2001, 2002, 2003, 2004]
+RACE = {"NOR": [50, 45, 30, 20, 10], "SWE": [40, 38, 35, 32, 30], "FIN": [30, 40, 42, 44, 45],
+        "DNK": [20, 25, 28, 33, 35], "ISL": [10, 15, 20, 22, 25]}
+RACE_NAMES = {"NOR": "Norway", "SWE": "Sweden", "FIN": "Finland", "DNK": "Denmark", "ISL": "Iceland"}
+RACE_ROWS = {i: list(zip(RACE_YEARS, v)) for i, v in RACE.items()}
+# no loser question is true: France and Japan tie for last, nobody falls, the US always leads
+NO_LOSER = {"USA": [(y, 40 + 0.1 * k) for k, y in enumerate(YEARS)], "IND": [(y, 1 + 2.9 * k) for k, y in enumerate(YEARS)],
+            "FRA": [(y, 10 + 0.2 * k) for k, y in enumerate(YEARS)], "JPN": [(y, 11 + 0.1 * k) for k, y in enumerate(YEARS)]}
 FLOW = ["data_ready", "picked", "labelled", "rendered", "awaiting_approval"]
+FMT = lambda v: f"{v:.1f}"   # noqa: E731 - landlines' unit_format
 
 
 class Resp:
@@ -29,41 +41,276 @@ class Resp:
 
 @pytest.fixture
 def env(temp_db, tmp_path, monkeypatch, pinned_config):
-    from pipeline import accounts, actions
+    from pipeline import accounts, actions, config, hooks
+    # hooks may first have been imported during a dashboard test, which binds that test's get_config for good
+    monkeypatch.setattr(hooks, "get_config", config.get_config)
     pinned_config["paths"].update(out=str(tmp_path / "out"), cache=str(tmp_path / "cache"))
-    pinned_config["opening"] = {"hook_template": "which_last", "hook_explore_pct": 0}
+    pinned_config["opening"] = {**pinned_config["opening"], "hook_template": "which_last", "hook_explore_pct": 0,
+                                "recent_block": 3}
     monkeypatch.setattr(actions, "spawn", lambda *a: 0)
     monkeypatch.setattr(accounts, "ready_destinations", lambda run: ["instagram"])
     return temp_db
 
 
+def P():
+    """The configured phrasings, in order."""
+    from pipeline import hooks
+    return [p["text"] for p in hooks.phrasings()]
+
+
+def topic(lower_first=False):
+    from pipeline.topics import get_topic
+    t = dict(get_topic(TOPIC_ID))
+    if lower_first:
+        t["rank"] = "lower_first"
+    return t
+
+
+def views(series, names):
+    from pipeline.render import CountryView
+    return [CountryView(iso3=i, name=names[i], iso2=None, color="#22d3ee", years=[y for y, _ in s],
+                        values=[v for _, v in s]) for i, s in series.items()]
+
+
 def reel(db, question=None, stage="awaiting_approval", series=None):
     """A run with the files a rendered reel has (data, pick, labels, timeline, video, meta)."""
-    from pipeline import timeline
+    from pipeline import hooks, timeline
     from pipeline.config import run_dir
     series = series or SERIES
+    years = sorted({y for s in series.values() for y, _ in s})
     rid = db.create_run(TOPIC_ID)
     for st in FLOW[:FLOW.index(stage) + 1] if stage in FLOW else FLOW:
         db.transition(rid, st)
     d = run_dir(rid)
     isos = list(series)
     (d / "data.json").write_text(json.dumps({"topic_id": TOPIC_ID, "series": {k: [list(r) for r in v] for k, v in series.items()}}))
-    (d / "pick.json").write_text(json.dumps({"countries": isos, "x_start": 2000, "x_end": 2010,
+    (d / "pick.json").write_text(json.dumps({"countries": isos, "x_start": years[0], "x_end": years[-1],
                                              "scores": {i: {"score": 50} for i in isos}}))
     (d / "labels.json").write_text("{}")
-    tl = timeline.build([(i, [y for y, _ in series[i]], [v for _, v in series[i]]) for i in isos], 2000, 2010)
+    tl = timeline.build([(i, [y for y, _ in series[i]], [v for _, v in series[i]]) for i in isos], years[0], years[-1])
     tl.save(d / "timeline.json")
     (d / "audio.wav").write_bytes(b"RIFF-old-audio")
     (d / "video.mp4").write_bytes(b"old video")
     (d / "thumb.jpg").write_bytes(b"old cover")
-    ids = {"Which country ends up last?": "ends_last", "Who overtakes who?": "overtakes",
-           "Which country falls the most?": "falls_most"}
-    opening = {"id": ids[question], "question": question, "answer": "a"} if question else None
+    ids = {"Who overtakes who?": "overtakes"}
+    opening = {"id": ids.get(question, "which_last" if hooks.classify(question) == "which_last" else "other"),
+               "question": question, "answer": "a"} if question else None
     (d / "meta.json").write_text(json.dumps({"title": "t", "duration_seconds": 22.0, "opening": opening}))
     return rid
 
 
-# ------------------------------------------------------------------ the hook template, apart from the topic
+def publish(db, rid):
+    db.transition(rid, "approved")
+    db.transition(rid, "publishing")
+    db.upsert_post(rid, "instagram", "live", remote_id="m-" + rid)
+    db.transition(rid, "published")
+
+
+# ------------------------------------------------------------------ the truth checks, from the data
+
+def test_every_check_is_computed_from_the_data():
+    from pipeline import hooks
+    t = hooks.truths(topic(), RACE_ROWS, RACE_NAMES, FMT)
+    assert all(r["ok"] for r in t.values()), {k: r["why"] for k, r in t.items() if not r["ok"]}
+    assert t["ends_last"]["fields"] == {"country": "Norway", "value": "10.0", "year": 2004}
+    assert t["falls_most"]["fields"] == {"country": "Norway", "from": "50.0", "to": "10.0", "from_year": 2000,
+                                         "to_year": 2004}
+    assert t["drops_to_last"]["fields"] == {"country": "Norway", "rank_from": "1st", "from_year": 2000, "value": "10.0",
+                                            "year": 2004}
+    assert t["loses_lead"]["fields"] == {"country": "Norway", "country2": "Finland", "year": 2002}
+    assert t["loses_lead"]["highlight"] == ["Norway", "Finland"]
+    assert t["overtaken_most"]["fields"] == {"country": "Norway", "n": 4}
+    assert t["loses_ground"]["fields"] == {"country": "Norway", "rank_from": "1st", "rank_to": "5th", "from_year": 2000,
+                                           "year": 2004}
+    assert all(r["fact"] for r in t.values())
+
+
+def test_a_check_is_false_when_the_data_does_not_say_it():
+    from pipeline import hooks
+    t = hooks.truths(topic(), SERIES, NAMES, FMT)
+    assert t["ends_last"]["ok"] and t["falls_most"]["ok"] and t["drops_to_last"]["ok"]
+    assert t["falls_most"]["fields"]["country"] == "France" and t["drops_to_last"]["fields"]["rank_from"] == "3rd"
+    assert "changes hands" in t["loses_lead"]["why"]            # the US, then France, then India: no single loser
+    assert not t["overtaken_most"]["ok"] and not t["loses_ground"]["ok"]   # nobody is passed by 2 or drops 2 places
+    already = {**RACE_ROWS, "NOR": list(zip(RACE_YEARS, [5, 6, 7, 8, 9]))}
+    t = hooks.truths(topic(), already, RACE_NAMES, FMT)
+    assert t["ends_last"]["ok"] and "already last in 2000" in t["drops_to_last"]["why"]
+    on_screen_tie = {**SERIES, "JPN": SERIES["JPN"][:-1] + [(2010, 5.04)]}   # 5.0 and 5.0 on screen
+    assert hooks.truths(topic(), on_screen_tie, NAMES, FMT)["ends_last"]["why"].startswith("tie")
+    early = {**SERIES, "FRA": SERIES["FRA"][:-1]}                         # France's data stops in 2009
+    assert "stops in 2009" in hooks.truths(topic(), early, NAMES, FMT)["ends_last"]["why"]
+    t = hooks.truths(topic(), NO_LOSER, NAMES, FMT)
+    assert not any(r["ok"] for r in t.values()), {k: r for k, r in t.items() if r["ok"]}
+    assert t["falls_most"]["why"].startswith("no country falls")
+
+
+def test_ends_last_is_checked_against_the_rendered_data():
+    from pipeline.captions import check_ends_last
+
+    def check(series, country="FRA"):
+        return check_ends_last({"iso3": country, "country": NAMES[country]}, series, FMT)
+
+    assert check(SERIES) is None
+    assert check(SERIES, "JPN").startswith("false")                                       # France is lower
+    assert check({**SERIES, "JPN": SERIES["JPN"][:-1] + [(2010, 5.0)]}).startswith("tie")
+    assert check({k: SERIES[k] for k in ("IND", "FRA")}).startswith("only 2 countries")
+    assert check({**SERIES, "USA": SERIES["USA"][:-1]}) is None                          # another country ends early
+
+
+def test_last_follows_the_metric_direction():
+    """rank: lower_first (a lower number is better): last is the HIGHEST final value, the lead is the lowest, the
+    up/down phrasings are left out, and the end card ranks the lowest value first."""
+    from pipeline import hooks, render
+    t = hooks.truths(topic(lower_first=True), RACE_ROWS, RACE_NAMES, FMT)
+    assert t["ends_last"]["fields"] == {"country": "Finland", "value": "45.0", "year": 2004}
+    assert t["loses_lead"]["fields"] == {"country": "Iceland", "country2": "Norway", "year": 2003}
+    o, why_not = hooks.which_last_opening(topic(lower_first=True), RACE_ROWS, RACE_NAMES, FMT, [])
+    assert (o["question"], o["answer"]) == ("Which country ends up last?", "Finland ends up last: 45.0 in 2004")
+    spatial = ("Who ends up at the bottom?", "Which country falls the most?", "Who drops to the bottom?",
+               "Which country sinks to last?")
+    assert all("up/down words" in why_not[q] for q in spatial) and not set(spatial) & set(o["eligible"])
+    v = views(RACE_ROWS, RACE_NAMES)
+    assert [v[i].name for i in render.end_order(topic(), v)] == ["Finland", "Denmark", "Sweden", "Iceland", "Norway"]
+    assert [v[i].name for i in render.end_order(topic(lower_first=True), v)] == \
+        ["Norway", "Iceland", "Sweden", "Denmark", "Finland"]
+    from pipeline.topics import load_topics
+    assert {t["id"] for t in load_topics() if t.get("rank") == "lower_first"} == \
+        {"child_mortality", "homicide_rate", "unemployment"}
+
+
+# ------------------------------------------------------------------ rotation
+
+def test_rotation_never_reuses_the_last_3_and_picks_the_least_used(env):
+    from pipeline import hooks
+    p = P()
+    assert len(p) == 10 and p[0] == "Which country ends up last?"
+
+    def pick(history):
+        return hooks.which_last_opening(topic(), RACE_ROWS, RACE_NAMES, FMT, history)[0]["question"]
+
+    assert pick([]) == p[0]
+    assert pick([p[0]] * 3) == p[1]
+    assert pick([p[0], p[1], p[2]]) == p[3]
+    assert pick([p[1], p[2], p[3], p[1], p[2], p[3], p[0], None, None]) == p[4]   # p[1..3] used twice: the least used
+    history = []
+    for _ in range(12):
+        q = pick(history)
+        assert q not in history[-3:]
+        history.append(q)
+    assert set(history) == set(p)
+
+
+def test_the_fallback_is_ends_up_last_when_every_true_phrasing_was_just_used(env, pinned_config):
+    from pipeline import hooks
+    rising = {"NOR": list(zip(RACE_YEARS, [1, 2, 3, 4, 5])), "SWE": list(zip(RACE_YEARS, [10, 11, 12, 13, 14])),
+              "FIN": list(zip(RACE_YEARS, [20, 21, 22, 23, 24]))}         # only "last" is true: Norway
+    last = [x["text"] for x in hooks.phrasings() if x["check"] == "ends_last"]
+    assert len(last) == 4 and last[0] == "Which country ends up last?"
+    o, _ = hooks.which_last_opening(topic(), rising, RACE_NAMES, FMT, last[1:])
+    assert o["question"] == last[0] and o["choice"].startswith("rotation") and o["eligible"] == last
+    pinned_config["opening"]["recent_block"] = 4
+    o, _ = hooks.which_last_opening(topic(), rising, RACE_NAMES, FMT, [last[0], last[3], last[1], last[2]])
+    assert o["question"] == "Which country ends up last?" and o["choice"].startswith("fallback")
+
+
+def test_a_phrasing_with_a_bad_answer_or_check_is_left_out(env, pinned_config):
+    from pipeline import hooks
+    pinned_config["opening"]["phrasings"] = [
+        {"text": "Which country ends up last?", "check": "ends_last", "answer": "{country} ends up last: {value} in {year}"},
+        {"text": "Who melts down?", "check": "melts", "answer": "{country}"},
+        {"text": "Which country loses the lead?", "check": "loses_lead", "answer": "{country} loses it to {nobody}"}]
+    o, why_not = hooks.which_last_opening(topic(), RACE_ROWS, RACE_NAMES, FMT, [])
+    assert o["eligible"] == ["Which country ends up last?"]
+    assert "unknown check" in why_not["Who melts down?"] and "nobody" in why_not["Which country loses the lead?"]
+    assert hooks.classify("Who drops to the bottom?") == "which_last"   # the shipped wordings keep their template
+
+
+# ------------------------------------------------------------------ the video: question, reveal, layout
+
+def test_the_end_card_answers_the_question_that_was_asked(env):
+    """Each phrasing, reached through the rotation, opens the video and its own answer closes it."""
+    from pipeline import render
+    p = P()
+    want = {"Which country ends up last?": "Norway ends up last: 10.0 in 2004",
+            "Which country finishes last?": "Norway finishes last: 10.0 in 2004",
+            "Who comes last in the end?": "Norway comes last: 10.0 in 2004",
+            "Who ends up at the bottom?": "Norway ends up at the bottom: 10.0 in 2004",
+            "Which country falls the most?": "Norway falls the most: 50.0 to 10.0",
+            "Who drops to the bottom?": "Norway drops from 1st in 2000 to last in 2004",
+            "Which country sinks to last?": "Norway sinks from 1st in 2000 to last in 2004",
+            "Which country loses the lead?": "Norway loses the lead to Finland in 2002",
+            "Who gets overtaken most?": "Norway gets overtaken by 4 countries",
+            "Who loses the most ground?": "Norway drops from 1st in 2000 to 5th in 2004"}
+    assert set(want) == set(p)
+    for k in range(10):
+        o = render.opening_for(topic(), views(RACE_ROWS, RACE_NAMES), 2000, 2004, history=p[:k])
+        assert (o["question"], o["answer"]) == (p[k], want[p[k]])
+        assert o["hook_template"] == "which_last" and o["hook_phrase"] == p[k] and "fallback" not in o
+        assert o["truth"] and "Norway" in o["highlight"]
+
+
+def test_with_no_true_phrasing_the_video_opens_with_another_question(env, pinned_config):
+    from pipeline import render
+    o = render.opening_for(topic(), views(NO_LOSER, NAMES), 2000, 2010, seed=0, history=[])
+    assert (o["question"], o["hook_template"], o["hook_phrase"]) == ("Who overtakes who?", "who_overtakes", None)
+    assert o["fallback"].startswith("no which_last phrasing")
+    pinned_config["opening"]["hook_explore_pct"] = 100
+    o = render.opening_for(topic(), views(RACE_ROWS, RACE_NAMES), 2000, 2004, seed=0, history=[])
+    assert o["hook_template"] != "which_last" and o["fallback"].startswith("exploring")
+    pinned_config["opening"].update(hook_template="auto", hook_explore_pct=0)
+    assert {render.opening_for(topic(), views(SERIES, NAMES), 2000, 2010, seed=s)["id"] for s in range(4)} == \
+        {"overtakes", "ends_last"}                           # auto: the old choice between the top two
+
+
+def test_every_phrasing_is_drawn_like_the_first_so_the_chart_never_moves():
+    from pipeline import hooks, render
+    ref = render.hook_layout(P()[0])
+    assert ref == (88, 2, 54, 1)
+    fields = {"country": "United Kingdom", "country2": "Saudi Arabia", "value": "$12,345", "year": 2025,
+              "from": "$12,345", "to": "$1,234", "from_year": 1990, "to_year": 2025, "rank_from": "1st",
+              "rank_to": "10th", "n": 9}
+    for p in hooks.phrasings() + [{**x, "spatial": False} for x in hooks.DEFAULT_PHRASINGS]:
+        assert render.hook_layout(p["text"]) == ref, p["text"]
+        assert render.phrasing_fits(p["text"], p["answer"].format(**fields)) is None, p["text"]
+    assert "the chart would move" in render.phrasing_fits("Who slips to last place?", "x")   # 1 line at 72 px
+
+
+def test_every_subtitle_is_one_line_so_the_chart_sits_where_a_one_line_reel_does():
+    from pipeline import render
+    from pipeline.topics import load_topics
+    cv = render._measure_canvas()
+    for t in load_topics():
+        size, lines = render.header_fit(cv, t["subtitle"])
+        assert len(lines) == 1 and size >= 44, (t["id"], size, lines)
+    hook = render.hook_layout(P()[0])
+    one = render.compute_layout(*hook, 52, 1)
+    two = render.compute_layout(*hook, 48, 2)                  # what a wrapped subtitle did
+    assert two["chart_t"] - one["chart_t"] >= 50
+    for tid in ("co2_per_capita", "oil_per_capita", "net_migration", "gdp_per_capita"):   # shortened, not shrunk
+        size, lines = render.header_fit(cv, next(t for t in load_topics() if t["id"] == tid)["subtitle"])
+        assert (size, len(lines)) == (52, 1)
+        assert render.compute_layout(*hook, size, 1)["chart_t"] == one["chart_t"]
+
+
+# ------------------------------------------------------------------ the caption follows the screen
+
+def test_caption_line_1_is_the_question_on_screen(env):
+    from pipeline import captions
+    asked = []
+    for q in ("Who drops to the bottom?", "Which country loses the lead?", "Which country ends up last?"):
+        rid = reel(env, q)
+        c = captions.generate_for_run(rid, ask=lambda prompt: asked.append(prompt))
+        assert c["opener"] == "which_last" and len(c["variants"]) == 3
+        assert len({v["template_id"] for v in c["variants"]}) == 3
+        for v in c["variants"]:
+            hook, _, question = v["caption"].split("\n")
+            assert hook.startswith(q) and question.endswith("?") and "France" not in hook + question
+    assert not asked                                            # the wording is fixed: Gemini is not asked
+    over = captions.generate_for_run(reel(env, "Who overtakes who?"), llm=False)    # other openers: the general hooks
+    assert not any(v["template_id"].startswith("wl_") for v in over["variants"])
+
+
+# ------------------------------------------------------------------ tracking: hook_template + hook_phrase
 
 def test_hook_backfill_maps_every_reel_by_its_on_screen_question(env):
     from pipeline import hooks
@@ -74,12 +321,16 @@ def test_hook_backfill_maps_every_reel_by_its_on_screen_question(env):
     old = reel(db, None)                                 # the reels from before 13 Oct had no on-screen hook
     db.transition(last, "approved")
     db.transition(last, "publishing")
-    db.upsert_post(last, "instagram", "live", remote_id="m1")   # posted before the field existed
+    db.upsert_post(last, "instagram", "live", remote_id="m1")   # posted before the fields existed
     rows = {r["run_id"]: r for r in hooks.backfill()}
     assert {k: v["hook_template"] for k, v in rows.items()} == {
-        last: "which_last", over: "who_overtakes", falls: "other", old: "other"}
+        last: "which_last", over: "who_overtakes", falls: "which_last", old: "other"}
+    assert {k: v["hook_phrase"] for k, v in rows.items()} == {
+        last: "Which country ends up last?", over: None, falls: "Which country falls the most?", old: None}
     assert all(r["changed"] for r in rows.values())
-    assert db.get_posts(last)[0]["hook_template"] == "which_last" and db.get_run(over)["hook_template"] == "who_overtakes"
+    post = db.get_posts(last)[0]
+    assert (post["hook_template"], post["hook_phrase"]) == ("which_last", "Which country ends up last?")
+    assert db.get_run(over)["hook_template"] == "who_overtakes" and db.get_run(over)["hook_phrase"] is None
     assert not any(r["changed"] for r in hooks.backfill())          # idempotent
     db.upsert_post(over, "facebook", "live", remote_id="f1")        # a new post copies its run's template
     assert db.get_posts(over)[0]["hook_template"] == "who_overtakes"
@@ -92,85 +343,44 @@ def test_the_migration_is_idempotent(env):
         db._ensure_schema(c)
         cols = {r["name"] for r in c.execute("PRAGMA table_info(posts)")}
         runs = {r["name"] for r in c.execute("PRAGMA table_info(runs)")}
-    assert "hook_template" in cols and {"hook_template", "prior_post_pos"} <= runs
+    assert {"hook_template", "hook_phrase"} <= cols and {"hook_template", "hook_phrase", "prior_post_pos"} <= runs
 
 
-def test_hook_weights_use_the_topic_weight_formula_per_template():
-    from pipeline.analytics import compute_weights
-    now = datetime(2026, 10, 20, tzinfo=timezone.utc)
-    ts = lambda h: (now - timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")   # noqa: E731
-    rows = [{"topic_id": "a", "hook_template": "which_last", "views": 2100, "platform": "instagram", "posted_at": ts(80)},
-            {"topic_id": "b", "hook_template": "who_overtakes", "views": 130, "platform": "instagram", "posted_at": ts(80)},
-            {"topic_id": "c", "hook_template": "who_overtakes", "views": 150, "platform": "instagram", "posted_at": ts(90)},
-            {"topic_id": "d", "hook_template": "which_last", "views": 9999, "platform": "instagram", "posted_at": ts(10)}]
-    w = compute_weights(rows, 72, 3, 10 ** 9, now=now, key="hook_template")
-    assert w["which_last"]["n_posts"] == 1 and w["who_overtakes"]["n_posts"] == 2       # the 10 h old post waits
-    assert w["which_last"]["weight"] > w["who_overtakes"]["weight"]
-    assert w["which_last"]["weight"] < w["which_last"]["mean_z"]                          # 1 post: shrunk to the mean
-
-
-# ------------------------------------------------------------------ "ends up last" must be true
-
-def check(series, country="FRA"):
-    from pipeline.captions import check_ends_last
-    names = {"IND": "India", "USA": "United States", "FRA": "France", "JPN": "Japan"}
-    return check_ends_last({"iso3": country, "country": names[country]}, series, lambda v: f"{v:.1f}")
-
-
-def test_ends_last_is_checked_against_the_rendered_data():
-    assert check(SERIES) is None
-    assert check(SERIES, "JPN").startswith("false")                                       # France is lower
-    tie = {**SERIES, "JPN": SERIES["JPN"][:-1] + [(2010, 5.0)]}
-    assert check(tie).startswith("tie")
-    on_screen_tie = {**SERIES, "JPN": SERIES["JPN"][:-1] + [(2010, 5.04)]}                 # 5.0 and 5.0 on screen
-    assert check(on_screen_tie).startswith("tie")
-    assert check({k: SERIES[k] for k in ("IND", "FRA")}).startswith("only 2 countries")
-    early = {**SERIES, "FRA": SERIES["FRA"][:-1]}                                        # stops in 2009
-    assert "stops in 2009" in check(early, "FRA")
-    other_early = {**SERIES, "USA": SERIES["USA"][:-1]}                                  # USA ends 2009 at 18.0
-    assert check(other_early) is None
-
-
-def test_which_last_is_the_default_opening_and_falls_back_when_it_is_not_true(env, pinned_config):
-    from pipeline import render
-    from pipeline.render import CountryView
-    from pipeline.topics import get_topic
-    topic = get_topic(TOPIC_ID)
-    names = {"IND": "India", "USA": "United States", "FRA": "France", "JPN": "Japan"}
-
-    def views(series):
-        return [CountryView(iso3=i, name=names[i], iso2=None, color="#22d3ee", years=[y for y, _ in s],
-                            values=[v for _, v in s]) for i, s in series.items()]
-
-    for seed in range(6):                                   # the old choice alternated with "Who overtakes who?"
-        o = render.opening_for(topic, views(SERIES), 2000, 2010, seed=seed)
-        assert (o["question"], o["answer"], o["hook_template"]) == \
-            ("Which country ends up last?", "France ends up last: 5.0 in 2010", "which_last")
-        assert "fallback" not in o
-    tie = {**SERIES, "JPN": SERIES["JPN"][:-1] + [(2010, 5.0)]}
-    o = render.opening_for(topic, views(tie), 2000, 2010, seed=0)
-    assert o["question"] == "Who overtakes who?" and o["fallback"].startswith("tie")
-    pinned_config["opening"] = {"hook_template": "which_last", "hook_explore_pct": 100}
-    o = render.opening_for(topic, views(SERIES), 2000, 2010, seed=0)
-    assert o["hook_template"] != "which_last" and o["fallback"].startswith("exploring")
-    pinned_config["opening"] = {"hook_template": "auto", "hook_explore_pct": 0}
-    assert {render.opening_for(topic, views(SERIES), 2000, 2010, seed=s)["id"] for s in range(4)} == \
-        {"overtakes", "ends_last"}                           # auto: the old choice between the top two
-
-
-def test_which_last_captions_tease_the_answer_without_giving_it_away(env):
-    from pipeline import captions
+def test_hook_phrase_is_copied_to_posts_and_shown_next_to_the_template(env):
+    from pipeline import home
     db = env
-    rid = reel(db, "Which country ends up last?")
-    c = captions.generate_for_run(rid, llm=False)
-    teasers = {h["id"] for h in captions.for_opener(captions.load_formats(), "ends_last")["hooks"]}
-    assert len(c["variants"]) == 3 and {v["template_id"] for v in c["variants"]} <= teasers
-    for v in c["variants"]:
-        hook, _, question = v["caption"].split("\n")
-        assert "last" in (hook + question).lower() and "France" not in hook + question
-    assert c["opener"] == "ends_last"
-    over = captions.generate_for_run(reel(db, "Who overtakes who?"), llm=False)    # other openers: the general hooks
-    assert not {v["template_id"] for v in over["variants"]} & teasers
+    rid = reel(db, "Who drops to the bottom?")
+    db.set_hook_template(rid, "which_last", "Who drops to the bottom?")
+    publish(db, rid)
+    post = db.get_posts(rid)[0]
+    assert (post["hook_template"], post["hook_phrase"]) == ("which_last", "Who drops to the bottom?")
+    db.add_stats(post["id"], views=321)
+    row = next(s for s in db.latest_stats() if s["run_id"] == rid)
+    assert (row["hook_template"], row["hook_phrase"]) == ("which_last", "Who drops to the bottom?")
+    text = home.stats_text()
+    assert "❓ which_last: “Who drops to the bottom?”" in text and "321 views" in text
+
+
+def test_the_history_is_posted_then_queued_then_waiting(env):
+    from pipeline import actions, hooks
+    db = env
+    legacy = reel(db, "Which country ends up last?")
+    db.set_hook_template(legacy, "which_last")         # posted before hook_phrase existed: read from its video
+    publish(db, legacy)
+    posted = reel(db, "Which country finishes last?")
+    db.set_hook_template(posted, "which_last", "Which country finishes last?")
+    publish(db, posted)
+    queued = reel(db, "Who drops to the bottom?")
+    db.set_hook_template(queued, "which_last", "Who drops to the bottom?")
+    actions.approve(queued, "telegram")
+    waiting = reel(db, "Which country loses the lead?")
+    db.set_hook_template(waiting, "which_last", "Which country loses the lead?")
+    other = reel(db, "Who overtakes who?")
+    db.set_hook_template(other, "who_overtakes")
+    assert hooks.phrase_history() == ["Which country ends up last?", "Which country finishes last?",
+                                      "Who drops to the bottom?", "Which country loses the lead?", None]
+    assert hooks.phrase_history(exclude=queued) == ["Which country ends up last?", "Which country finishes last?",
+                                                    "Which country loses the lead?", None]
 
 
 # ------------------------------------------------------------------ re-branding unposted reels
@@ -201,7 +411,7 @@ def test_rebrand_rerenders_unposted_reels_and_keeps_the_old_files(env, fake_rend
     second = reel(db, "Who overtakes who?")
     actions.approve(second, "telegram")
     waiting = reel(db, "Which country ends up last?")
-    tie = reel(db, "Who overtakes who?", series={**SERIES, "JPN": SERIES["JPN"][:-1] + [(2010, 5.0)]})
+    kept = reel(db, "Who overtakes who?", series=NO_LOSER)
     posted = reel(db, "Who overtakes who?")
     db.transition(posted, "approved")
     db.transition(posted, "publishing")
@@ -212,18 +422,22 @@ def test_rebrand_rerenders_unposted_reels_and_keeps_the_old_files(env, fake_rend
     res = {r["run_id"]: r for r in rebrand.rebrand_all(send=False)}
     assert posted not in res                                                    # never touched
     assert (run_dir(posted) / "video.mp4").read_bytes() == b"old video"
-    assert res[tie]["action"] == "kept" and res[tie]["why"].startswith("tie")   # its old hook stays
-    assert (run_dir(tie) / "video.mp4").read_bytes() == b"old video" and not (run_dir(tie) / "video_oldhook.mp4").exists()
-    for rid in (first, second, waiting):
+    assert res[kept]["action"] == "kept" and res[kept]["why"].startswith("no which_last phrasing")
+    assert (run_dir(kept) / "video.mp4").read_bytes() == b"old video" and not (run_dir(kept) / "video_oldhook.mp4").exists()
+    p = P()
+    # each rotates against the reels before it: "loses the lead" (p[2]) is not true of SERIES, so the third is p[3]
+    for rid, phrase in ((first, p[0]), (second, p[1]), (waiting, p[3])):
         d = run_dir(rid)
         assert res[rid]["action"] == "rebranded"
         assert (d / "video_oldhook.mp4").read_bytes() == b"old video" and (d / "thumb_oldhook.jpg").read_bytes() == b"old cover"
         assert (d / "video.mp4").read_bytes() == b"new video old video"         # audio stream copied from the old file
         meta = json.loads((d / "meta.json").read_text())
-        assert meta["opening"]["question"] == "Which country ends up last?" and meta["hook_template"] == "which_last"
+        assert meta["opening"]["question"] == phrase and meta["hook_template"] == "which_last"
+        assert meta["hook_phrase"] == phrase and res[rid]["truth"]
         assert json.loads((d / "meta_oldhook.json").read_text())["opening"]["question"] in (
             "Who overtakes who?", "Which country ends up last?")
-        assert db.get_run(rid)["stage"] == "awaiting_approval" and db.get_run(rid)["hook_template"] == "which_last"
+        run = db.get_run(rid)
+        assert run["stage"] == "awaiting_approval" and (run["hook_template"], run["hook_phrase"]) == ("which_last", phrase)
     assert {c["audio_from"] for c in fake_render} == {"video_oldhook.mp4"}
     assert all(c["countries"] == ["IND", "USA", "FRA", "JPN"] for c in fake_render)     # same data, same order
 

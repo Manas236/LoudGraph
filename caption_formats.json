@@ -16,7 +16,9 @@
   "The first openers whose fact exists in a video are preferred. Keep questions free of numbers.",
   "A hook or question with 'opener' is written for the video that opens with that question: such a video",
   "uses ONLY those (they tease the answer the end card reveals, so they never name it), and no other video",
-  "uses them. config.yaml opening.hook_template picks the opener every new video starts with."
+  "uses them. config.yaml opening.hook_template picks the opener every new video starts with.",
+  "'which_last' is every guess-the-loser question (config.yaml opening.phrasings, worded per video): in its",
+  "hooks {question} is the exact question the video shows, so the caption's line 1 always matches the screen."
  ],
  "hooks": [
   {"id": "wait_for", "text": "Wait for [Country]",
@@ -79,16 +81,13 @@
   {"id": "from_to_watch", "text": "From [x] to [y]. Watch [Country]",
    "facts": ["biggest_rise", "biggest_fall", "surprising", "sharpest"],
    "fill": "From {from} to {to}. Watch {country}"},
-  {"id": "last_guess", "opener": "ends_last", "text": "Guess which country ends up last",
-   "facts": ["final_low"], "fill": "Guess which country ends up last"},
-  {"id": "last_in_year", "opener": "ends_last", "text": "Only one of these countries ends up last in [year]",
-   "facts": ["final_low"], "fill": "Only one of these countries ends up last in {year}"},
-  {"id": "last_dont_scroll", "opener": "ends_last", "text": "Don't scroll before you see who ends up last",
-   "facts": ["final_low"], "fill": "Don't scroll before you see who ends up last"},
-  {"id": "last_bet", "opener": "ends_last", "text": "Bet you can't guess who ends up last",
-   "facts": ["final_low"], "fill": "Bet you can't guess who ends up last"},
-  {"id": "last_wait", "opener": "ends_last", "text": "Wait for the end to see who ends up last",
-   "facts": ["final_low"], "fill": "Wait for the end to see who ends up last"}
+  {"id": "wl_question", "opener": "which_last", "text": "{question}", "facts": ["any"], "fill": "{question}"},
+  {"id": "wl_guess", "opener": "which_last", "text": "{question} Guess before the end", "facts": ["any"],
+   "fill": "{question} Guess before the end"},
+  {"id": "wl_watch", "opener": "which_last", "text": "{question} Watch till the end", "facts": ["any"],
+   "fill": "{question} Watch till the end"},
+  {"id": "wl_dont_scroll", "opener": "which_last", "text": "{question} Don't scroll before the end", "facts": ["any"],
+   "fill": "{question} Don't scroll before the end"}
  ],
  "openers": [
   {"id": "overtakes", "fact": "crossover", "question": "Who overtakes who?",
@@ -115,9 +114,9 @@
   {"id": "guess_match", "text": "Did your guess match the ending?"},
   {"id": "rooting_for", "text": "Which country were you rooting for?"},
   {"id": "would_guess", "text": "Would you have guessed [Country]?"},
-  {"id": "last_your_guess", "opener": "ends_last", "text": "Which country did you guess would end up last?"},
-  {"id": "last_called_it", "opener": "ends_last", "text": "Did you call last place before the end?"},
-  {"id": "last_match", "opener": "ends_last", "text": "Did your guess for last place match the ending?"},
-  {"id": "last_surprise", "opener": "ends_last", "text": "Did last place surprise you?"}
+  {"id": "wl_your_guess", "opener": "which_last", "text": "Who was your guess?"},
+  {"id": "wl_called_it", "opener": "which_last", "text": "Did you call it before the reveal?"},
+  {"id": "wl_match", "opener": "which_last", "text": "Did your guess match the ending?"},
+  {"id": "wl_surprise", "opener": "which_last", "text": "Did the ending surprise you?"}
  ]
 }

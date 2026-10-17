@@ -378,15 +378,33 @@ def load_formats() -> dict:
             "openers": [o for o in d.get("openers", []) if o.get("id") and o.get("question") and o.get("answer")]}
 
 
-def for_opener(formats: dict, opener: str | None) -> dict:
+def for_opener(formats: dict, opener: str | None, question: str | None = None) -> dict:
     """The hooks and questions for a video that opens with `opener`: the ones written for it (their
     "opener" field) when there are any, so the caption teases the answer the end card reveals;
-    otherwise the general ones. Hooks and questions written for an opener are never used elsewhere."""
+    otherwise the general ones. Hooks and questions written for an opener are never used elsewhere.
+    "{question}" in their text and fill becomes `question`, the exact question the video shows."""
+    def own_question(x: dict) -> dict:
+        x = dict(x)
+        for k in ("text", "fill"):
+            if isinstance(x.get(k), str):
+                x[k] = x[k].replace("{question}", question)
+        return x
+
     out = dict(formats)
     for key in ("hooks", "questions"):
         own = [x for x in formats[key] if opener and x.get("opener") == opener]
+        if question:
+            own = [own_question(x) for x in own]
         out[key] = own or [x for x in formats[key] if not x.get("opener")]
     return out
+
+
+def opener_style(opening: dict | None) -> str | None:
+    """The opener whose hooks and questions a video's caption uses: "which_last" for every guess-the-loser
+    phrasing (hooks.classify), else the opening's own id."""
+    from .hooks import WHICH_LAST, classify
+    opening = opening or {}
+    return WHICH_LAST if classify(opening.get("question")) == WHICH_LAST else opening.get("id")
 
 
 def clean(text) -> str:
@@ -460,7 +478,10 @@ class Context:
         self.topic, self.facts, self.x_start, self.x_end = topic, facts, x_start, x_end
         self.s = s or settings()
         self.opening = opening or {}   # the video's opening question ({"id", "question"}), when known
-        self.formats = for_opener(formats or load_formats(), self.opening.get("id"))
+        self.style = opener_style(self.opening)
+        # a which_last video: line 1 starts with the very question on screen, so no LLM is asked to word it
+        self.fixed = self.style == "which_last"
+        self.formats = for_opener(formats or load_formats(), self.style, clean(self.opening.get("question")) or None)
         self.names = [n for _, n in countries]
         self.by_lower = {n.lower(): n for n in self.names}
         self.others = [c["name"] for c in config_countries() if c["name"] not in self.names]
@@ -952,7 +973,7 @@ def generate(topic: dict, countries: list[tuple[str, str]], series: dict, x_star
     ctx = Context(topic, countries, facts, x_start, x_end, s=s, opening=opening)
     n = int(s["variants"])
     notes, accepted = [], []
-    use_llm = s["llm"] if llm is None else llm
+    use_llm = (s["llm"] if llm is None else llm) and not ctx.fixed
     if use_llm and facts:
         if ask is None and not secret("GEMINI_API_KEY"):
             notes.append("no GEMINI_API_KEY: plain template fills")
@@ -974,7 +995,7 @@ def generate(topic: dict, countries: list[tuple[str, str]], series: dict, x_star
     tags, tag_notes = pick_hashtags(topic, facts, seed, s, trending=trending, get=get)
     model = ", ".join(sorted({v["model"] for v in accepted if v.get("model")})) or None   # the model(s) that served
     return {"generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "model": model,
-            "opener": ctx.opening.get("id"), "facts": facts, "metric_line": ctx.metric, "variants": variants,
+            "opener": ctx.style, "facts": facts, "metric_line": ctx.metric, "variants": variants,
             "hashtags": tags, "chosen": 0, "notes": notes + tag_notes}
 
 

@@ -225,8 +225,8 @@ def cmd_rebrand(a):
 
 
 def cmd_hooks(a):
-    """Fill in hook_template for every reel (from the question its video shows) and print it, with the
-    average views and the weight per hook template."""
+    """Fill in hook_template and hook_phrase for every reel (from the question its video shows) and print them,
+    with the average views and the weight per hook template."""
     from pipeline import analytics, db, hooks
     from pipeline.config import get_config
     db.init()
@@ -235,7 +235,7 @@ def cmd_hooks(a):
         s = posted.get(r["run_id"])
         views = f"{s['views']} views" if s and s["views"] is not None else ""
         print(f"{r['run_id']}  {r['topic_id']:<28} {r['stage']:<18} {r['hook_template']:<14} "
-              f"{r['question'] or '(no on-screen hook)'}  {views}")
+              f"{r['question'] or '(no on-screen hook)'}{'' if r['hook_phrase'] else ' (no hook_phrase)'}  {views}")
     for tpl, w in analytics.update_hook_weights().items():
         print(f"weight {tpl}: {w['weight']:+.3f} over {w['n_posts']} post(s) at least "
               f"{get_config()['analytics']['min_age_hours']} h old")

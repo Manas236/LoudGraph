@@ -44,8 +44,8 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py go-live [--check-only]` | read-only Instagram + Facebook checks; for those that pass, turn posting on and test mode off (old test-mode approvals go back to review first) |
 | `python run.py publish [--run ID]` | publish approved runs now, outside the posting queue (the bot's queue posts one a day by itself) |
 | `python run.py stats [--no-summary]` | pull Instagram + Facebook insights for every posted reel now, recompute topic and hook weights, send the summary (the bot also does this when it starts and every 6 h; two pulls never overlap) |
-| `python run.py hooks` | fill in and list each reel's hook template (`which_last`, `who_overtakes`, `other`, from the question its video shows), with the hook weights |
-| `python run.py rebrand [--run ID ...] [--dry-run] [--no-send]` | re-render reels that are made but not posted with the configured opening question (`opening.hook_template`): same data, countries and audio track (copied from the old file), old files kept as `*_oldhook.*`, approved ones back to review keeping their posting-queue place |
+| `python run.py hooks` | fill in and list each reel's hook template (`which_last`, `who_overtakes`, `other`, from the question its video shows) and its `hook_phrase`, with the hook weights |
+| `python run.py rebrand [--run ID ...] [--dry-run] [--no-send]` | re-render reels that are made but not posted with the configured opening question (`opening.hook_template`, the which_last wording rotating from reel to reel): same data, countries and audio track (copied from the old file), old files kept as `*_oldhook.*`, approved ones back to review keeping their posting-queue place |
 | `python run.py dashboard` | local web UI on http://127.0.0.1:5055 (Review, Posting queue, Library, Settings) |
 | `python run.py verify [--run ID ...]` | ffprobe, loudness, A/V sync, stem balance, pitch-vs-data, pixel centring, contact sheet |
 | `python run.py crash-test` | `out/crash_test.mp4`: a synthetic flat-crash-recover series, to hear the event treatment |
@@ -73,7 +73,7 @@ queued -> data_ready -> picked -> labelled -> rendered -> awaiting_approval -> a
 
 All state lives in SQLite (`pipeline.db`, WAL): `runs` (incl. live render `progress` and the review
 `queue_pos`), `make_jobs` (the make queue: New reel, batches, retries), `stage_log`,
-`posts` (each with its `hook_template`), `stats` (one row per post per pull, never overwritten),
+`posts` (each with its `hook_template` and `hook_phrase`), `stats` (one row per post per pull, never overwritten),
 `topic_weights`, `hook_weights`, plus `kv` (the Telegram `getUpdates` offset, so a bot restart never
 re-delivers a button press; the bot heartbeat; cached health checks). The dashboard and the bot only
 read/write that state, and their buttons call the same functions (`pipeline/actions.py`).
@@ -253,18 +253,31 @@ two batches. Settings changes are picked up by running processes without restart
 - **Opening** (`render.py`, `captions.opening`): from frame 0 the video asks a question built from a
   computed fact (`openers` in `caption_formats.json`), big for `timing.hook_hold` (2.5 s), then
   shrinking into the header that stays to the end. The metric with its unit sits under it in readable
-  type, and the first chart is already drawing. Every reel opens with `opening.hook_template`
-  ("Which country ends up last?", the hook of the 2,000-view breakout reel; "last" = the lowest final
-  value) when that is true of the rendered data: the last country reaches the final year and ends
-  strictly below the others, also as shown on screen (no tie), with at least 3 countries
-  (`captions.check_ends_last`). Otherwise, and for `opening.hook_explore_pct` % of reels (0 by
-  default), the old choice between the two strongest openers is made among the others; the run's log
-  says why. Its captions use only the hooks and questions written for that opener (`"opener":
-  "ends_last"` in `caption_formats.json`): they tease who ends up last and never name it.
+  type, and the first chart is already drawing. With `opening.hook_template: which_last` (the default,
+  the style of the 2,000-view breakout reel) every reel asks a guess-the-loser question, worded per reel
+  from `opening.phrasings` in `config.yaml` (10 wordings: "Which country ends up last?", "Which country
+  falls the most?", "Who drops to the bottom?", "Which country loses the lead?", ...). Each wording has a
+  truth check computed from the rendered series (`hooks.truths`: ends_last, falls_most, drops_to_last,
+  loses_lead, overtaken_most, loses_ground), comparing values as shown on screen (a tie is no answer),
+  and is used only when it is true and is drawn exactly like the first wording (same size and lines, so
+  the chart never moves). "Last" follows the topic's direction (`rank: lower_first` in `topics.yaml`
+  for child mortality, homicides and unemployment); up/down wordings (`spatial: true`) are left out for
+  those. Rotation: never a wording shown by one of the last `opening.recent_block` (3) reels (posted, then
+  the posting queue, then Ready for review); among the rest the least used, then list order. When all
+  true wordings were just used, "Which country ends up last?" is the fallback. When none is true (and
+  for `opening.hook_explore_pct` % of reels, 0 by default), the old choice among the other openers in
+  `caption_formats.json`; the run's log says why. Its captions use only the which_last hooks and
+  questions in `caption_formats.json`: line 1 starts with the very question on screen, and none names
+  the answer.
 - **Hook template** (`pipeline/hooks.py`): each run and post records which question its video opens
-  with (`which_last`, `who_overtakes`, `other`), apart from the topic, so the stats can compare hooks.
-- **End card** (`timing.end_card`, 2.5 s): the answer to the opening question (filled in code from the
-  same fact), every country ranked by where it ends, the countries in the answer highlighted.
+  with (`which_last`, `who_overtakes`, `other`), apart from the topic, so the stats can compare hooks;
+  every which_last wording counts toward the one `which_last` weight, and `hook_phrase` keeps the exact
+  wording (shown next to the template on the Telegram Stats screen).
+- **End card** (`timing.end_card`, 2.5 s): the answer to the opening question (the wording's own
+  `answer`, filled in code from its truth check), every country ranked by where it ends (first place
+  first), the countries in the answer highlighted.
+- **Subtitle** (the metric line, `subtitle` in `topics.yaml`): always one line (a test measures every
+  one with the video's font); a second line would push the chart about 57 px down.
 - **Layout** (`render.py`): one centre axis (x = 540) with symmetric 130 px margins; top to bottom from
   y = 250 (below the Reels top bar, inside the profile grid's 3:4 crop) to y = 1440 (clear of the
   caption overlay): question, metric + unit, progress dots, flag + country, chart (tick labels inside

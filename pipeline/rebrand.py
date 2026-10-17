@@ -1,5 +1,6 @@
 """Re-brand reels that are made but not posted yet: the video opens with the configured hook
-(config.yaml opening.hook_template, "Which country ends up last?"), and the cover and the caption follow.
+(config.yaml opening.hook_template: which_last, a guess-the-loser phrasing chosen per reel by hooks.py), and the
+cover, the end card answer and the caption follow.
 
     python run.py rebrand [--run RUN_ID ...] [--dry-run]
 
@@ -9,9 +10,10 @@ timeline.json, and the new video.mp4 COPIES the audio stream of the old file (no
 encoded again). The old files are kept next to the new ones as video_oldhook.mp4, thumb_oldhook.jpg,
 meta_oldhook.json and captions_oldhook.json (a second re-brand keeps the first originals).
 
-A reel whose data does not make the hook true (captions.check_ends_last: a tie, fewer than 3 countries,
-a last country whose data stops early) keeps its old video and is reported. Published reels, and reels
-with a live post, are never touched. An approved reel goes back to Ready for review (a fresh approval is
+A reel whose data makes no which_last phrasing true (hooks.truths: a tie, fewer than 3 countries, a last
+country whose data stops early, ...) keeps its old video and is reported. Reels are done in posting order and
+each one's phrasing rotates against the reels before it (hooks.phrase_history, or the history passed in).
+Published reels, and reels with a live post, are never touched. An approved reel goes back to Ready for review (a fresh approval is
 needed for what will really be posted) and gets its place in the posting queue back when it is approved.
 """
 from __future__ import annotations
@@ -43,8 +45,9 @@ def _read(run_id: str, name: str):
     return json.loads((run_dir(run_id) / name).read_text(encoding="utf-8"))
 
 
-def plan(run_id: str) -> dict:
-    """What re-branding would do (nothing is written): the new opening, or why the reel keeps its old one."""
+def plan(run_id: str, history: list | None = None) -> dict:
+    """What re-branding would do (nothing is written): the new opening, or why the reel keeps its old one.
+    history: the hook_phrase of the reels before this one, in posting order (default: hooks.phrase_history())."""
     from . import render
     from .orchestrator import rerun_blocker
     from .timeline import Timeline
@@ -61,25 +64,27 @@ def plan(run_id: str) -> dict:
         _read(run_id, "meta.json")
     tl = Timeline.load(d / "timeline.json")
     views = render.build_views(topic, pick, data, labels, tl)
-    opening = render.opening_for(topic, views, pick["x_start"], pick["x_end"], seed=zlib.crc32(run_id.encode()))
+    opening = render.opening_for(topic, views, pick["x_start"], pick["x_end"], seed=zlib.crc32(run_id.encode()),
+                                 history=history, run_id=run_id)
     old = meta.get("opening") or {}
     want = hooks.settings()["hook_template"]
     out = {"run_id": run_id, "topic_id": run["topic_id"], "stage": run["stage"], "old_question": old.get("question"),
            "old_answer": old.get("answer"), "question": opening["question"], "answer": opening["answer"],
-           "hook_template": opening["hook_template"], "countries": [v.name for v in views],
+           "hook_template": opening["hook_template"], "hook_phrase": opening.get("hook_phrase"),
+           "truth": opening.get("truth"), "choice": opening.get("choice"), "countries": [v.name for v in views],
            "_ctx": (topic, tl, views, opening, meta)}
     if opening["hook_template"] != want:
         return {**out, "action": "kept", "why": opening.get("fallback") or f"opens with {opening['question']!r}"}
     return {**out, "action": "rebrand"}
 
 
-def rebrand_run(run_id: str, by: str = "rebrand") -> dict:
+def rebrand_run(run_id: str, by: str = "rebrand", history: list | None = None) -> dict:
     """Re-render one reel with the configured hook (see the module doc). Returns plan()'s dict plus what
     was done; never raises for a reel that is kept."""
     from . import captions, render
     from .lock import exclusive, run_lock, single_instance
     from .review import back_to_review
-    p = plan(run_id)
+    p = plan(run_id, history)
     if p["action"] != "rebrand":
         if p["action"] == "kept":
             db.log(run_id, p["stage"], f"re-brand: keeps its old hook ({p['why']})")
@@ -99,13 +104,14 @@ def rebrand_run(run_id: str, by: str = "rebrand") -> dict:
         with exclusive("render", on_wait=lambda: db.log(run_id, "awaiting_approval", "waiting for another render")):
             info = render.render_video(topic, tl, views, d / "audio.wav", d / "video.mp4", thumb=d / "thumb.jpg",
                                        opening=opening, audio_from=d / BACKUPS["video.mp4"])
-        meta = {**meta, "opening": opening, "hook_template": opening["hook_template"], "render": info,
+        meta = {**meta, "opening": opening, "hook_template": opening["hook_template"],
+                "hook_phrase": opening.get("hook_phrase"), "render": info,
                 "cover_seconds": info["cover_seconds"], "rebranded": {"by": by, "at": db.now(),
                                                                        "old_opening": p["old_question"]}}
         tmp = d / "meta.json.tmp"
         tmp.write_text(json.dumps(meta, indent=1, default=str), encoding="utf-8")
         tmp.replace(d / "meta.json")
-        db.set_hook_template(run_id, opening["hook_template"])
+        db.set_hook_template(run_id, opening["hook_template"], opening.get("hook_phrase"))
         try:
             c = captions.generate_for_run(run_id, fresh=True)
             p["captions"] = [v["caption"].splitlines()[0] for v in c["variants"]]
