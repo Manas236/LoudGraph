@@ -1,5 +1,6 @@
 """Cold open (pipeline/coldopen.py): the race's most dramatic beat first, then a rewind cut to the start of the
-race; one A/B variable, so the length, the hook and the race's own mix stay as they are."""
+race. One A/B variable: the race itself is untouched (the cold open is added on top), the hook keeps its timing,
+the beat never shows the country that finishes last, and the cover is the same moment of the race."""
 import json
 import math
 
@@ -13,23 +14,33 @@ from pipeline.timeline import build
 
 YEARS = list(range(1990, 2024))
 T = np.arange(len(YEARS))
-NAMES = ("GBR", "SAU", "ZAF", "USA", "KOR")
+NAMES = ("GBR", "SAU", "ZAF", "USA")   # 4 countries: about 20 s, so the 1.7 s cold open stays under 25 s
 TOPIC = {"id": "t", "title": "What your carbon footprint sounds like",
          "subtitle": "CO2 from fossil fuels & industry, tonnes per person", "unit_format": "{:,.0f}",
          "source": "owid", "start_year": 1990}
-OPENING = {"id": "which_last", "question": "Which country ends up last?", "answer": "Saudi Arabia ends up last: 1 in 2023",
-           "highlight": ["Saudi Arabia"], "hook_template": "which_last"}
+OPENING = {"id": "which_last", "question": "Which country ends up last?", "answer": "United Kingdom ends up last: 1,030 in 2023",
+           "highlight": ["United Kingdom"], "hook_template": "which_last"}
 WANT = {"want": True, "why": "", "counts": False}
+LEAD = 1.7
 
 
-def _series(crash_at=12, crash_country=2):
-    """Five gentle waves (no year moves 25% of its range); one country crashes for good at `crash_at`."""
+def _series(crash_at=12, crash_country=2, lift=2000, names=NAMES):
+    """Gentle waves (no year moves 25% of its range); one country drops 1,500 for good at `crash_at`. `lift` raises
+    that country first, so by default it does NOT finish last (the United Kingdom does, at 1,030); lift=0 makes the
+    crash country the last one."""
     rows = []
-    for i, c in enumerate(NAMES):
+    for i, c in enumerate(names):
         vals = [float(v) for v in 1000 + 300 * np.sin(T / (3 + i)) + 10 * T]
         if i == crash_country and crash_at is not None:
-            vals = [v - (1500 if k >= crash_at else 0) for k, v in enumerate(vals)]
+            vals = [v + lift - (1500 if k >= crash_at else 0) for k, v in enumerate(vals)]
         rows.append((c, YEARS, vals))
+    return rows
+
+
+def _drop(rows, i, at=10, by=900):
+    """rows with country i dropping `by` for good from year index `at` (a second, smaller crash)."""
+    rows = list(rows)
+    rows[i] = (rows[i][0], YEARS, [v - (by if k >= at else 0) for k, v in enumerate(rows[i][2])])
     return rows
 
 
@@ -40,14 +51,19 @@ def _views(rows):
             for i, (c, ys, vs) in enumerate(rows)]
 
 
-def _cold(rows):
+def _cold(rows, exclude=None):
     s = coldopen.settings()
     tl = build(rows, 1990, 2023, cold_open=s["seconds"], snap=s["snap_seconds"])
     views = _views(rows)
-    beat, why = coldopen.pick_beat(TOPIC, views, tl)
+    beat, why = coldopen.pick_beat(TOPIC, views, tl, exclude)
     if beat:
         tl.cold_open_from = beat["window"][0]
     return tl, views, beat, why
+
+
+def _timeline_for(rows, opening=None, decision=WANT):
+    data = {"series": {c: [[y, v] for y, v in zip(ys, vs)] for c, ys, vs in rows}}
+    return coldopen.timeline_for(TOPIC, {"x_start": 1990, "x_end": 2023}, data, {}, rows, decision, opening)
 
 
 @pytest.fixture
@@ -73,20 +89,31 @@ def test_settings_are_whole_frames_and_the_rewind_stays_under_0_3_s(pinned_confi
     assert coldopen.settings()["mode"] == "never"
 
 
-def test_the_cold_open_comes_out_of_the_race_time():
+def test_the_cold_open_is_added_on_top_of_an_untouched_race():
     rows = _series()
     plain = build(rows, 1990, 2023)
     tl = build(rows, 1990, 2023, cold_open=1.5, snap=0.2)
-    assert tl.duration == pytest.approx(plain.duration, abs=1e-5) and tl.n_frames == plain.n_frames
-    assert tl.end_start == pytest.approx(plain.end_start, abs=1e-5)
-    assert tl.lead == pytest.approx(1.7)
-    assert tl.slots[0].start == pytest.approx(1.7) and tl.slots[0].onsets[0] == pytest.approx(1.7)
-    for a, b in zip(tl.slots, plain.slots):   # only the year steps are shorter: transitions, holds, events stay
-        assert a.trans_end - a.start == pytest.approx(b.trans_end - b.start)
-        assert a.end - a.draw_end == pytest.approx(b.end - b.draw_end)
-        assert [e["year"] for e in a.events] == [e["year"] for e in b.events]
-        assert a.draw_end - a.draw_start < b.draw_end - b.draw_start
-    assert plain.cold_open_time(0.0) is None and tl.cold_open_time(1.7) is None
+    assert tl.lead == pytest.approx(LEAD)
+    assert tl.duration == pytest.approx(plain.duration + LEAD, abs=1e-5) and tl.n_frames == plain.n_frames + 51
+    assert tl.end_start == pytest.approx(plain.end_start + LEAD, abs=1e-5) and tl.per_country == plain.per_country
+    for a, b in zip(tl.slots, plain.slots):   # every time of the race, LEAD later: same lengths, same notes
+        for k in ("start", "end", "trans_end", "draw_start", "draw_end"):
+            assert getattr(a, k) == pytest.approx(getattr(b, k) + LEAD, abs=1e-5)
+        assert a.onsets == pytest.approx([o + LEAD for o in b.onsets], abs=1e-5)
+        assert a.knots == pytest.approx([k + LEAD for k in b.knots], abs=1e-5)
+        assert [(e["year"], e["t_to"]) for e in a.events] == \
+            pytest.approx([(e["year"], e["t_to"] + LEAD) for e in b.events], abs=1e-5)
+    assert plain.cold_open_time(0.0) is None and tl.cold_open_time(LEAD) is None
+
+
+def test_a_reel_that_would_pass_25_s_is_made_without_one():
+    rows = _series(names=NAMES + ("KOR",))   # 5 countries: about 23.7 s, so 25.4 s with the cold open
+    plain = build(rows, 1990, 2023)
+    assert plain.duration + LEAD > 25 >= plain.duration
+    tl, _, state = _timeline_for(rows)
+    assert state["cold_open"] is False and tl.cold_open == 0 and tl.duration == pytest.approx(plain.duration)
+    assert state["cold_open_beat"].startswith("skipped: would exceed 25s (")
+    assert coldopen.summary(False, state["cold_open_beat"]) == "no · skipped: would exceed 25s"
 
 
 def test_the_clip_then_the_rewind_back_to_the_start_of_its_line():
@@ -98,6 +125,19 @@ def test_the_clip_then_the_rewind_back_to_the_start_of_its_line():
     assert all(a > b for a, b in zip(rewind, rewind[1:])) and rewind[0] < end   # backwards, never past the clip
     assert rewind[-1] == pytest.approx(tl.slot_at(start).draw_start)
     assert tl.cold_open_time(51 / 30) is None
+
+
+def test_the_cover_is_the_same_moment_of_the_race():
+    rows = _series()
+    plain = build(rows, 1990, 2023)
+    tl, views, _, _ = _cold(rows)
+    off, on = R.cover_seconds(plain), R.cover_seconds(tl)
+    assert off == 2.35                                         # a reel without one: unchanged
+    assert on == pytest.approx(off + tl.lead) and tl.cold_open_time(on) is None
+    a, _, _, L = _drawn(plain, views, off)
+    b, _, _, _ = _drawn(tl, views, on)
+    race = slice(int(L["dots_band"][0]), int(math.ceil(L["value_band"][1])))   # dots, country, chart, year, value
+    assert np.abs(a[race].astype(int) - b[race]).max() <= 3
 
 
 # ------------------------------------------------------------------ the beat
@@ -125,18 +165,48 @@ def test_ranked_moves_is_still_the_sharpest_fact():
 
 
 def test_a_beat_too_close_to_the_end_gives_way_to_the_next_one():
-    rows = _series(crash_at=32, crash_country=1)   # the biggest crash lands one year before its line ends
-    rows[3] = (rows[3][0], YEARS, [v - (900 if k >= 10 else 0) for k, v in enumerate(rows[3][2])])
+    rows = _drop(_series(crash_at=32, crash_country=1), 3)   # the biggest crash lands one year before its line ends
     tl, _, beat, _ = _cold(rows)
     assert beat["rank"] > 1 and beat["iso3"] == "USA"
     assert any("Saudi Arabia" in p and "too close to the end" in p for p in beat["passed_over"])
     assert coldopen.window_check(tl)["ok"]
 
 
+def test_the_country_that_finishes_last_is_never_the_beat():
+    rows = _drop(_series(lift=0), 1)          # South Africa's crash (the biggest) leaves it last; Saudi Arabia drops too
+    views = _views(rows)
+    assert coldopen.spoilers(TOPIC, views) == {"ZAF": "finishes last"}
+    lower_first = {**TOPIC, "rank": "lower_first"}   # last = the highest final value
+    assert coldopen.spoilers(lower_first, views) == {"USA": "finishes last"}   # 1,118: the highest final value
+    falls = {"highlight": ["Saudi Arabia"]}   # a question whose answer names another country: that one too
+    assert coldopen.spoilers(TOPIC, views, falls) == {"ZAF": "finishes last",
+                                                      "SAU": "is in the answer to the opening question"}
+    _, _, beat, _ = _cold(rows, coldopen.spoilers(TOPIC, views))
+    assert beat["iso3"] != "ZAF" and beat["excluded"] == {"South Africa": "finishes last"}
+    assert beat["passed_over"][0] == "#1 South Africa 2001-2002: South Africa finishes last"
+
+
+def test_the_next_country_takes_over_when_the_loser_has_the_top_beat():
+    rows = _drop(_series(lift=0), 1)
+    tl, _, state = _timeline_for(rows, OPENING)
+    beat = state["beat"]
+    assert state["cold_open"] is True and (beat["iso3"], beat["rank"]) == ("SAU", 2)
+    assert state["cold_open_beat"].startswith("Saudi Arabia crashes ") and "move #2 of" in state["cold_open_beat"]
+    assert tl.cold_open_from == beat["window"][0] and coldopen.window_check(tl)["ok"]
+
+
+def test_no_cold_open_when_only_the_loser_has_a_beat():
+    rows = _series(lift=0)                    # South Africa has the only crash, and finishes last
+    tl, _, state = _timeline_for(rows, OPENING)
+    assert state["cold_open"] is False and state["beat"] is None and tl.cold_open == 0
+    assert state["cold_open_beat"] == ("no beat fits: #1 South Africa 2001-2002 and its other moves: South Africa "
+                                       "finishes last")   # no other move scores the sharpest fact's bar
+    assert tl.duration == pytest.approx(build(rows, 1990, 2023).duration)
+
+
 def test_no_beat_no_cold_open_and_the_reason_is_kept():
     rows = _series(crash_at=None)
-    data = {"series": {c: [[y, v] for y, v in zip(ys, vs)] for c, ys, vs in rows}}
-    tl, _, state = coldopen.timeline_for(TOPIC, {"x_start": 1990, "x_end": 2023}, data, {}, rows, WANT)
+    tl, _, state = _timeline_for(rows)
     assert state["cold_open"] is False and state["beat"] is None
     assert state["cold_open_beat"].startswith("no beat fits: #1 ") and "not an event on screen" in state["cold_open_beat"]
     assert tl.cold_open == 0 and tl.duration == pytest.approx(build(rows, 1990, 2023).duration)
@@ -171,15 +241,18 @@ def test_frame_0_is_the_beat_in_motion_under_the_same_opening_question():
 def test_the_cold_open_sound_has_a_stab_at_frame_0_and_the_race_keeps_its_notes():
     rows = _series()
     tl, _, beat, _ = _cold(rows)
+    plain = build(rows, 1990, 2023)
     values = {s.iso3: [dict(zip(r[1], r[2]))[y] for y in s.years] for s, r in zip(tl.slots, rows)}
     mix, stems, info = audio.synthesize(tl, values, seed=1)
+    _, _, without = audio.synthesize(plain, values, seed=1)
     sr = info["sample_rate"]
     assert len(mix) == int(round(tl.n_frames / tl.fps * sr))
     first = mix[: int(0.05 * sr)]
     assert 20 * math.log10(float(np.sqrt(np.mean(first ** 2))) + 1e-12) > -30   # audible in the first 50 ms
     assert info["cold_open"]["source_from"] == pytest.approx(beat["window"][0])
     assert info["cold_open"]["slot"] == beat["slot"] == 2
-    assert min(n["t"] for n in info["notes"]) == pytest.approx(tl.lead)       # every year's note is in the race
+    assert [(n["kind"], n["midi"]) for n in info["notes"]] == [(n["kind"], n["midi"]) for n in without["notes"]]
+    assert [n["t"] for n in info["notes"]] == pytest.approx([n["t"] + LEAD for n in without["notes"]], abs=1e-5)
     assert info["pluck_minus_pad_lu"] >= 6
 
 
@@ -298,6 +371,8 @@ def test_the_review_card_says_it_in_one_line(env):
     assert line() == "🎞 Cold open: yes · Mexico jumps 20.1 to 26.0 (2016-2017), move #1 of 9"
     db.set_cold_open(rid, False, "control side of the A/B: the last new reel had a cold open")
     assert line() == "🎞 Cold open: no · control side of the A/B"
+    db.set_cold_open(rid, False, "skipped: would exceed 25s (23.71 s + 1.70 s cold open and cut = 25.41 s)")
+    assert line() == "🎞 Cold open: no · skipped: would exceed 25s"
 
 
 def test_render_reel_tags_meta_and_run_and_alternates(env, monkeypatch):
@@ -305,7 +380,7 @@ def test_render_reel_tags_meta_and_run_and_alternates(env, monkeypatch):
     from pipeline.config import run_dir
     from pipeline.topics import get_topic
     db = env
-    topic = get_topic("homicide_rate")
+    topic = get_topic("gdp_per_capita")   # ranks the highest value first: the United Kingdom finishes last
     rows = _series()
     seen = []
 
@@ -314,7 +389,8 @@ def test_render_reel_tags_meta_and_run_and_alternates(env, monkeypatch):
         seen.append(tl)
         out_mp4.write_bytes(b"v")
         thumb.write_bytes(b"c")
-        return {"cover_seconds": 2.35, "render_seconds": 0.1, "backend": "fake", "backend_note": "", "opening": {}}
+        return {"cover_seconds": R.cover_seconds(tl), "render_seconds": 0.1, "backend": "fake", "backend_note": "",
+                "opening": {}}
 
     monkeypatch.setattr(R, "render_video", fake_render_video)
     monkeypatch.setattr(audio, "synthesize", lambda tl, values, seed=0: (
@@ -322,9 +398,9 @@ def test_render_reel_tags_meta_and_run_and_alternates(env, monkeypatch):
         {"sample_rate": 48000, "lufs": -14, "true_peak_db": -2, "pluck_minus_pad_lu": 9}))
     ids = []
     for _ in range(2):
-        rid = db.create_run("homicide_rate")
+        rid = db.create_run("gdp_per_capita")
         d = run_dir(rid)
-        (d / "data.json").write_text(json.dumps({"topic_id": "homicide_rate",
+        (d / "data.json").write_text(json.dumps({"topic_id": "gdp_per_capita",
                                                  "series": {c: [[y, v] for y, v in zip(ys, vs)] for c, ys, vs in rows}}))
         (d / "pick.json").write_text(json.dumps({"countries": list(NAMES), "x_start": 1990, "x_end": 2023,
                                                  "scores": {c: {"score": 50} for c in NAMES}}))
@@ -333,10 +409,13 @@ def test_render_reel_tags_meta_and_run_and_alternates(env, monkeypatch):
         ids.append(rid)
     metas = [json.loads((run_dir(r) / "meta.json").read_text()) for r in ids]
     assert [m["cold_open"] for m in metas] == [True, False]
+    assert "South Africa" not in metas[0]["opening"]["highlight"]
     assert metas[0]["cold_open_detail"]["iso3"] == "ZAF" and metas[0]["cold_open_beat"].startswith("South Africa crashes")
+    assert metas[0]["cold_open_detail"]["excluded"] == {"United Kingdom": "finishes last"}
     assert metas[1]["cold_open_beat"].startswith("control side")
     assert [db.get_run(r)["cold_open"] for r in ids] == [1, 0]
     assert seen[0].cold_open == 1.5 and seen[1].cold_open == 0
-    assert seen[0].duration == pytest.approx(seen[1].duration)            # the same length either way
-    assert metas[0]["duration_seconds"] == metas[1]["duration_seconds"]
+    assert seen[0].duration == pytest.approx(seen[1].duration + LEAD)   # added on top of the same race
+    assert metas[0]["duration_seconds"] == pytest.approx(metas[1]["duration_seconds"] + LEAD)
+    assert metas[0]["cover_seconds"] == pytest.approx(metas[1]["cover_seconds"] + LEAD)
     assert db.has_log(ids[0], "cold open: South Africa crashes") and db.has_log(ids[1], "no cold open: control side")

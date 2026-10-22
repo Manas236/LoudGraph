@@ -92,11 +92,14 @@ def render_reel(run_id: str, topic: dict, opening: dict | None = None, decision:
     """The render step's work; the caller holds the render lock. opening: keep this opening question (a re-render)
     instead of choosing one; decision: coldopen.decide()'s answer, made here when not given."""
     from . import audio, coldopen, render
-    from .timeline import fits
+    from .timeline import build, fits
     d = run_dir(run_id)
     data, p, labels, countries = reel_inputs(run_id)
     decision = decision or coldopen.decide(run_id)
-    tl, views, cold = coldopen.timeline_for(topic, p, data, labels, countries, decision)
+    chosen = opening is None   # first the question: the cold open never shows a country its answer names
+    opening = opening or render.opening_for(topic, render.build_views(topic, p, data, labels, build(
+        countries, p["x_start"], p["x_end"])), p["x_start"], p["x_end"], seed=zlib.crc32(run_id.encode()), run_id=run_id)
+    tl, views, cold = coldopen.timeline_for(topic, p, data, labels, countries, decision, opening)
     if not fits(tl):
         raise RuntimeError(f"timeline is {tl.duration:.1f}s with slow-mo events, outside "
                            f"{get_config()['video']['min_seconds']}-{get_config()['video']['max_seconds']}s; re-pick")
@@ -108,9 +111,6 @@ def render_reel(run_id: str, topic: dict, opening: dict | None = None, decision:
     for name, x in stems.items():
         audio.write_wav(d / f"{name}.wav", x, ainfo["sample_rate"])
     _write(run_id, "audio.json", ainfo)
-    chosen = opening is None
-    opening = opening or render.opening_for(topic, views, p["x_start"], p["x_end"], seed=zlib.crc32(run_id.encode()),
-                                            run_id=run_id)
     info = render.render_video(topic, tl, views, d / "audio.wav", d / "video.mp4", thumb=d / "thumb.jpg",
                                on_progress=_progress_writer(run_id), opening=opening)
     meta = render.build_meta(run_id, topic, data, p, labels, views, tl, ainfo)

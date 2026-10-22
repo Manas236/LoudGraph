@@ -279,13 +279,16 @@ two batches. Settings changes are picked up by running processes without restart
   most dramatic beat already moving at frame 0, a stab built from the reel's own voices (the clip
   country's root, fifth and octave plucks, the sub hit, a pad chord) over the race's own sound at that
   moment, then a 0.2 s rewind cut to the start of the race. The beat is the first move in
-  `captions.ranked_moves` (the list the "sharpest" fact comes from) that the video plays as an event and
+  `captions.ranked_moves` (the list the "sharpest" fact comes from) that is not by the country that
+  finishes last (nor by one the opening question's answer names), that the video plays as an event, and
   that lets the clip end before its line starts its final year step, so no final value and nothing of
-  the final ranking is ever in it; no such beat, no cold open (the run's log says why). The clip comes
-  out of the race (every year step is a little shorter), so the length is unchanged; the opening
-  question, its timing, the music and the look are unchanged. Runs and posts record `cold_open` and
-  `cold_open_beat` like the hook; the Review page, the Library and the Telegram review card show it.
-  Reels already made are left as they are unless `apply_to_existing_queue` is true.
+  the final ranking is ever in it; no such beat, no cold open (the run's log says why). The cold open
+  is added before the race, which stays exactly as it is without one (every frame and note 1.7 s
+  later), so the reel is 1.7 s longer; one that would pass 25 s is made without a cold open ("skipped:
+  would exceed 25s"). The cover moves by the same 1.7 s, to the same moment of the race. The opening
+  question keeps its timing from frame 0; the music and the look are unchanged. Runs and posts record
+  `cold_open` and `cold_open_beat` like the hook; the Review page, the Library and the Telegram review
+  card show it. Reels already made are left as they are unless `apply_to_existing_queue` is true.
 - **End card** (`timing.end_card`, 2.5 s): the answer to the opening question (the wording's own
   `answer`, filled in code from its truth check), every country ranked by where it ends (first place
   first), the countries in the answer highlighted.
@@ -296,7 +299,8 @@ two batches. Settings changes are picked up by running processes without restart
   caption overlay): question, metric + unit, progress dots, flag + country, chart (tick labels inside
   the plot, height adapts to the text above), year, value.
 - **Cover**: Instagram gets `thumb_offset` = the frame just before the question shrinks (question big
-  over a well-drawn first line, `render.cover_before_shrink`); `thumb.jpg` is that same frame. A custom
+  over a well-drawn first line, `render.cover_before_shrink`); `thumb.jpg` is that same frame. A reel
+  with a cold open gets the same moment of the race, 1.7 s later (its question is the header by then). A custom
   cover image (`cover_url`) would need a public file host, which the resumable upload does not have.
 - **Labels**: code finds the turning point; Gemini may only name the event (2–4 words) and is
   rejected unless confident, short, within ±1 year and free of numbers. No label is fine.

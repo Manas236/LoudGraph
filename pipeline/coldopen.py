@@ -1,10 +1,15 @@
 """Cold open: a reel opens with cold_open.seconds of its most dramatic beat, already moving at frame 0 under a
 hard stab, then a quick rewind cut (cold_open.snap_seconds) back to the start of the race (config.yaml
-cold_open). It is ONE variable for an A/B test on retention: the hook question and its timing, the music, the
-colours, the fonts and the reel's length stay as they are (the clip comes out of the race time: timeline.build).
+cold_open). It is ONE variable for an A/B test on retention: the race is exactly the reel it would be without
+one (every frame and note at the same race time, timeline.build), only cold_open + snap seconds later; the hook
+question keeps its timing from frame 0, and the music, colours and fonts stay as they are. The reel gets longer
+by that much, so one that would pass video.max_seconds (25 s) is made without a cold open ("skipped: would
+exceed 25s").
 
 The beat. captions.ranked_moves, the list the "sharpest" story fact takes its first move from, ranks every
 one-year move by how dramatic it is. The cold open shows the first move that
+  * is not by the country that finishes last (the end card's last row: the answer to the loser question), nor
+    by a country the opening question's answer names (spoilers()),
   * scores at least captions.SHARPEST_MIN (the sharpest fact's own bar),
   * is an EVENT on screen (timeline.find_events: at least timing.event_threshold of its country's own range),
     so the video itself plays it in slow motion with the ring and the hit, and it reads with the sound off,
@@ -128,11 +133,30 @@ def record(run_id: str, decision: dict, state: dict) -> None:
 
 # ------------------------------------------------------------------ the beat
 
-def pick_beat(topic: dict, views: list, tl) -> tuple[dict | None, str]:
+def spoilers(topic: dict, views: list, opening: dict | None = None) -> dict[str, str]:
+    """{iso3: why} of the countries a cold open must not show: the one that finishes last (the end card's last
+    row, in the topic's rank direction, and any that ends level with it on screen), and any country the opening
+    question's answer names."""
+    from .render import end_order
+    from .topics import format_value
+    out = {}
+    if views:
+        last = format_value(topic, views[end_order(topic, views)[-1]].values[-1])
+        out = {v.iso3: "finishes last" for v in views if format_value(topic, v.values[-1]) == last}
+    by_name = {v.name: v.iso3 for v in views}
+    for name in (opening or {}).get("highlight") or []:
+        if name in by_name and by_name[name] not in out:
+            out[by_name[name]] = "is in the answer to the opening question"
+    return out
+
+
+def pick_beat(topic: dict, views: list, tl, exclude: dict[str, str] | None = None) -> tuple[dict | None, str]:
     """(the beat and the clip's place in the race, "") or (None, why no move qualifies); see the module doc.
-    tl: the reel's timeline built with the cold open (its race times are the ones the clip shows)."""
+    tl: the reel's timeline built with the cold open (its race times are the ones the clip shows); exclude:
+    spoilers(), the countries whose moves are never the beat."""
     from .captions import SHARPEST_MIN, ranked_moves
     from .topics import format_value
+    exclude = exclude or {}
     seconds = tl.cold_open
     rows = {v.iso3: list(zip(v.years, v.values)) for v in views}
     names = {v.iso3: v.name for v in views}
@@ -141,20 +165,26 @@ def pick_beat(topic: dict, views: list, tl) -> tuple[dict | None, str]:
     moves = [m for m in ranked_moves(rows) if m["score"] >= SHARPEST_MIN]
     if not moves:
         return None, f"no beat fits: no one-year move scores {SHARPEST_MIN} or more"
-    passed = []
+    passed, left_out, why_not = [], {}, []   # every move passed over; the excluded countries' first; the others
     for rank, m in enumerate(moves, 1):
         s, name = slots[m["iso3"]], names[m["iso3"]]
         what = f"#{rank} {name} {m['from_year']}-{m['to_year']}"
-        event = s.event_for(m["to_year"])
-        if not event:
-            passed.append(f"{what} is not an event on screen")
+        if m["iso3"] in exclude:
+            passed.append(f"{what}: {name} {exclude[m['iso3']]}")
+            left_out.setdefault(m["iso3"], f"{what} and its other moves: {name} {exclude[m['iso3']]}")
             continue
+        event, reason = s.event_for(m["to_year"]), None
         land = s.onset_of(m["to_year"])
         final_step = s.onsets[-2] if len(s.onsets) > 1 else s.onsets[-1]
         limit = min(final_step, settled, tl.end_start)
         start = min(max(s.draw_start, land - ARRIVE), limit - seconds)
-        if start < s.draw_start - 1e-9 or land - start > seconds - LAND_ROOM:
-            passed.append(f"{what} is too close to the end of {name}'s line")
+        if not event:
+            reason = f"{what} is not an event on screen"
+        elif start < s.draw_start - 1e-9 or land - start > seconds - LAND_ROOM:
+            reason = f"{what} is too close to the end of {name}'s line"
+        if reason:
+            passed.append(reason)
+            why_not.append(reason)
             continue
         fmt = lambda x: format_value(topic, x)  # noqa: E731
         verb = "crashes" if event["kind"] == "fall" else "jumps"
@@ -165,27 +195,34 @@ def pick_beat(topic: dict, views: list, tl) -> tuple[dict | None, str]:
                 "from_year": m["from_year"], "to_year": m["to_year"], "from": fmt(m["from"]), "to": fmt(m["to"]),
                 "score": round(m["score"], 4), "slot": s.index, "window": [round(start, 6), round(end, 6)],
                 "lands_at": round(land - start, 3), "final_step_at": final_step, "settled_at": settled,
-                "end_card_at": tl.end_start, "passed_over": passed, "text": text}, ""
-    more = f"; {len(passed) - 3} more like these" if len(passed) > 3 else ""
-    return None, "no beat fits: " + "; ".join(passed[:3]) + more
+                "end_card_at": tl.end_start, "excluded": {names[i]: why for i, why in exclude.items() if i in names},
+                "passed_over": passed, "text": text}, ""
+    more = f"; {len(why_not) - 3} more moves that do not fit either" if len(why_not) > 3 else ""
+    return None, "no beat fits: " + "; ".join(list(left_out.values()) + why_not[:3]) + more
 
 
-def timeline_for(topic: dict, pick: dict, data: dict, labels: dict, countries: list[tuple], decision: dict):
-    """(timeline, views, state) for a render: with a cold open when the decision wants one and a beat qualifies,
-    else the reel as it would be without (state: {"cold_open", "cold_open_beat", "beat"})."""
+def timeline_for(topic: dict, pick: dict, data: dict, labels: dict, countries: list[tuple], decision: dict,
+                 opening: dict | None = None):
+    """(timeline, views, state) for a render: with a cold open when the decision wants one, the reel stays within
+    video.max_seconds with it and a beat qualifies (never one by a spoilers() country of this opening); else the
+    reel as it would be without (state: {"cold_open", "cold_open_beat", "beat"})."""
     from .render import build_views
     from .timeline import build
+    plain = build(countries, pick["x_start"], pick["x_end"])
+    views = build_views(topic, pick, data, labels, plain)
     why = decision["why"]
     if decision["want"]:
-        s = settings()
+        s, cap = settings(), float(get_config()["video"]["max_seconds"])
         tl = build(countries, pick["x_start"], pick["x_end"], cold_open=s["seconds"], snap=s["snap_seconds"])
-        views = build_views(topic, pick, data, labels, tl)
-        beat, why = pick_beat(topic, views, tl)
-        if beat:
-            tl.cold_open_from = beat["window"][0]
-            return tl, views, {"cold_open": True, "cold_open_beat": beat["text"], "beat": beat}
-    tl = build(countries, pick["x_start"], pick["x_end"])
-    return tl, build_views(topic, pick, data, labels, tl), {"cold_open": False, "cold_open_beat": why, "beat": None}
+        if tl.duration > cap + 1e-6:
+            why = (f"skipped: would exceed {cap:g}s ({plain.duration:.2f} s + {tl.lead:.2f} s cold open and cut = "
+                   f"{tl.duration:.2f} s)")
+        else:
+            beat, why = pick_beat(topic, views, tl, spoilers(topic, views, opening))
+            if beat:
+                tl.cold_open_from = beat["window"][0]
+                return tl, views, {"cold_open": True, "cold_open_beat": beat["text"], "beat": beat}
+    return plain, views, {"cold_open": False, "cold_open_beat": why, "beat": None}
 
 
 def window_check(tl, fps: int | None = None) -> dict:
@@ -210,7 +247,10 @@ def window_check(tl, fps: int | None = None) -> dict:
 
 def detail(on: bool | None, beat: str | None) -> str:
     """The beat without its race times, or why there is none in a few words."""
-    return (beat or "").split(";" if on else ":")[0].strip()
+    text = beat or ""
+    if on:
+        return text.split(";")[0].strip()
+    return (text.split(" (")[0] if text.startswith("skipped:") else text.split(":")[0]).strip()
 
 
 def summary(on: bool | None, beat: str | None) -> str:
@@ -385,7 +425,7 @@ def rerender(run_id: str, by: str = "run.py coldopen") -> dict:
         with exclusive("render", on_wait=lambda: db.log(run_id, run["stage"], "waiting for another render")):
             decision = decide(run_id, fresh=True)
             data, pick, labels, countries = reel_inputs(run_id)
-            cold = timeline_for(topic, pick, data, labels, countries, decision)[2]
+            cold = timeline_for(topic, pick, data, labels, countries, decision, meta["opening"])[2]
             if not cold["cold_open"]:   # the control side, or no beat fits: the video stays exactly as it is
                 record(run_id, decision, cold)
                 return {"run_id": run_id, "action": "kept", "why": cold["cold_open_beat"]}

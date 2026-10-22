@@ -18,7 +18,8 @@ audio.py places note onsets (and event runs) at these times; render.py moves the
 year_pos(t), which inverts the same knots. Nothing else computes timing.
 
 A cold open (coldopen.py) puts `cold_open` seconds of the race's most dramatic beat, then a `snap` second
-rewind cut, before the intro; the race is shortened by the same amount, so the length does not change:
+rewind cut, before the intro. The race keeps every time it has without one, shifted by the cold open and
+the cut, so the video is that much longer:
 
     | cold open | snap | intro | country 1 | ... | end card |
 """
@@ -197,9 +198,9 @@ def build(countries: list[tuple], x_start: int, x_end: int, cfg: dict | None = N
           snap: float = 0.0) -> Timeline:
     """countries: [(iso3, [years]) or (iso3, [years], [values])] in play order.
     Values enable event slow-mo; without them every step has normal length.
-    cold_open, snap: seconds of a cold open clip and of the rewind cut after it (coldopen.py), before the race. They
-    come out of the race: every year step is shortened by the same share, so the video keeps the length it has
-    without them. The clip's place in the race (cold_open_from) is set once its beat is chosen."""
+    cold_open, snap: seconds of a cold open clip and of the rewind cut after it (coldopen.py), added before the race.
+    The race is not touched: every slot, knot and note keeps its length and comes `cold_open + snap` later, so the
+    video is that much longer. The clip's place in the race (cold_open_from) is set once its beat is chosen."""
     cfg = cfg or get_config()
     t, v = _timing(cfg)
     if x_end <= x_start:
@@ -219,13 +220,9 @@ def build(countries: list[tuple], x_start: int, x_end: int, cfg: dict | None = N
         events = find_events(ys, vs, thr)
         slow_years = {y for e in events for y in range(e["prev_year"] + 1, e["year"] + 1)}
         prepared.append((iso3, ys, events, slow_years))
-    lead = cold_open + snap
-    if lead > 0:   # every slot's drawn length is (per - fixed part) * its weighted steps / n_steps: take `lead` off the sum
-        weighted = sum(slow if y in sy else 1.0 for _, _, _, sy in prepared for y in range(x_start + 1, x_end + 1))
-        per -= lead * n_steps / weighted
     d = (per - t["transition"] - t["hold"]) / n_steps
     slots = []
-    cursor = t["intro"] + lead
+    cursor = t["intro"] + cold_open + snap
     for i, (iso3, ys, events, slow_years) in enumerate(prepared):
         start = cursor
         trans = t["transition"] if i else 0.0      # nothing to cross-fade from before the first country

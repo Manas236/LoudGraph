@@ -15,7 +15,8 @@ first country's chart and line are there from frame 0 as well. The end card reve
 No title pill, no source line, no channel name (the data credit lives in the post).
 
 A reel with a cold open (coldopen.py, timeline.cold_open_time) shows its most dramatic beat first, under the same
-opening question on the same timing, then rewinds to the first country and the race starts.
+opening question on the same timing, then rewinds to the first country and the race starts, exactly as it would
+without one, only later; the cover moves with it.
 """
 from __future__ import annotations
 
@@ -296,9 +297,11 @@ def end_order(topic: dict, views: list[CountryView]) -> list[int]:
 
 
 def cover_seconds(tl: Timeline, cfg: dict | None = None) -> float:
-    """The cover frame: the opening question still big over a well-drawn first line (just before it shrinks)."""
+    """The cover frame: the opening question still big over a well-drawn first line (just before it shrinks).
+    With a cold open it is the same moment of the race, tl.lead later (the question keeps its own timing from
+    frame 0, so by then it is the header)."""
     cfg = cfg or get_config()
-    t = tl.hook_hold - float(cfg["render"].get("cover_before_shrink", 0.15))
+    t = tl.lead + tl.hook_hold - float(cfg["render"].get("cover_before_shrink", 0.15))
     return round(max(0.0, min(t, tl.slots[0].end - 0.05)), 3)
 
 
