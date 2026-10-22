@@ -10,6 +10,7 @@ Three stems, mixed at the end and also written out for verification:
          on falls, a short bright accent on jumps
 The pad and fx stems are balanced by measured loudness relative to the pluck stem, so the plucks
 always lead. All onsets come from the Timeline.
+A cold open (timeline.cold_open > 0) gets its sound after that balance: cold_open_layer().
 """
 from __future__ import annotations
 
@@ -390,10 +391,12 @@ def synthesize(tl: Timeline, values: dict[str, list[float]], seed: int = 0, cfg:
     for k in stems:
         stems[k] = stems[k][:n_total]
     l_pluck = lufs(stems["pluck"], sr)
+    gains = {"pluck": 1.0}
     for k, below in (("pad", ac["pad_below_pluck_lu"]), ("fx", ac["fx_below_pluck_lu"])):
         lk = lufs(stems[k], sr)
-        if lk > -120:
-            stems[k] *= 10 ** ((l_pluck - below - lk) / 20)
+        gains[k] = 10 ** ((l_pluck - below - lk) / 20) if lk > -120 else 1.0
+        stems[k] *= gains[k]
+    cold = cold_open_layer(tl, stems, roots, gains, sr, ac, rng) if tl.cold_open > 0 else None
     mix = stems["pluck"] + stems["pad"] + stems["fx"]
     out, stats = master(mix, sr, ac["target_lufs"], ac["true_peak_db"] - ac.get("aac_headroom_db", 0.0),
                         ac.get("master_lowpass_hz"))
@@ -403,7 +406,54 @@ def synthesize(tl: Timeline, values: dict[str, list[float]], seed: int = 0, cfg:
     info = {"sample_rate": sr, "notes": notes_log, "events": events_log, "roots": roots, "chord": chord_notes,
             "stem_lufs": stem_lufs, "pluck_minus_pad_lu": round(stem_lufs["pluck"] - stem_lufs["pad"], 2),
             **{k: v for k, v in stats.items() if k != "gain"}}
+    if cold:
+        info["cold_open"] = cold
     return out.astype(np.float32), stems, info
+
+
+STAB_PLUCK_GAIN = 0.8   # each of the stab's three plucks (a year's pluck is 1.0)
+
+
+def cold_open_layer(tl: Timeline, stems: dict, roots: list[int], gains: dict, sr: int, ac: dict, rng) -> dict:
+    """The cold open's sound (coldopen.py), added once the stems are balanced, so the race keeps its own mix.
+    Under the clip: the race's own three stems at the moment it shows (copied, so sound and picture match frame
+    by frame), faded out over the rewind cut. On frame 0, a stab from the same voices: the clip country's root,
+    fifth and octave as plucks that ring through the clip, the sub hit, and a pad chord on the country's root
+    whose filter closes over the clip. Over the cut, the whoosh between countries, played backwards. Returns
+    what was added (for audio.json)."""
+    slot = tl.slot_at(tl.cold_open_from)
+    n_clip, n_lead = int(round(tl.cold_open * sr)), int(round(tl.lead * sr))
+    i0 = int(round(tl.cold_open_from * sr))
+    env = np.ones(n_lead)
+    env[n_clip:] = np.cos(np.linspace(0, np.pi / 2, n_lead - n_clip)) ** 2
+    for buf in stems.values():   # the race starts at tl.lead, so the first n_lead samples are still silent
+        seg = buf[i0:i0 + n_lead].copy()
+        buf[:len(seg)] += seg * env[:len(seg), None]
+
+    def put(stem: str, sig: np.ndarray, t0: float, gain: float, pan: float = 0.5):
+        if sig.ndim == 1:
+            sig = np.stack([sig * np.sqrt(1 - pan), sig * np.sqrt(pan)], axis=1)
+        buf, i = stems[stem], int(round(max(0.0, t0) * sr))
+        j = min(i + len(sig), len(buf))
+        buf[i:j] += sig[: j - i] * gain
+
+    root = roots[slot.index]
+    base = scale_notes(root, ac["scale"], ac["scale_octaves"], tuple(ac["pluck_register"]))[0]
+    stab = [base, base + 7, base + 12]   # root, fifth, octave: in every scale of SCALES
+    for m, pan in zip(stab, (0.5, 0.3, 0.7)):
+        sig = pluck(midi_to_hz(m), tl.cold_open, sr, tl.cold_open, rng, ac["pluck_brightness"], ac["pluck_click"])
+        put("pluck", sig, 0.0, STAB_PLUCK_GAIN, pan)
+    put("fx", sub_hit(sr, 0.6), 0.0, ac["sub_hit_gain"] * gains["fx"])
+    pad_notes = [root + 12, root + 19]
+    blocks = n_clip // 240 + 1
+    cutoff = ac["pad_cutoff_max_hz"] * (ac["pad_cutoff_min_hz"] / ac["pad_cutoff_max_hz"]) ** np.linspace(0, 1, blocks)
+    env = adsr(n_clip, sr, 0.005, 0.85 * tl.cold_open)
+    chord = sum(pad_voice(m, n_clip, sr, cutoff, env, ac, rng) for m in pad_notes) / np.sqrt(len(pad_notes))
+    put("pad", chord, 0.0, ac["end_chord_gain"] * gains["pad"])
+    rewind = whoosh(tl.snap + 0.15, sr, rng)[::-1]
+    put("fx", rewind, tl.lead - len(rewind) / sr, ac["whoosh_gain"] * gains["fx"])
+    return {"source_from": tl.cold_open_from, "seconds": tl.cold_open, "snap": tl.snap, "slot": slot.index,
+            "stab_midi": stab, "pad_midi": pad_notes}
 
 
 def write_wav(path, x: np.ndarray, sr: int) -> None:

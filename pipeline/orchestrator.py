@@ -75,51 +75,73 @@ def step_label(run_id: str, topic: dict) -> tuple[str, dict]:
 
 
 def step_render(run_id: str, topic: dict) -> tuple[str, dict]:
-    from . import audio, render
     from .lock import exclusive
-    from .timeline import build, fits
-    d = run_dir(run_id)
-    data, p, labels = _read(run_id, "data.json"), _read(run_id, "pick.json"), _read(run_id, "labels.json")
     with exclusive("render", on_wait=lambda: db.log(run_id, "labelled", "waiting for another render to finish")):
-        series = data["series"]
-        rows = {c: [(y, v) for y, v in series[c] if p["x_start"] <= y <= p["x_end"]] for c in p["countries"]}
-        tl = build([(c, [y for y, _ in rows[c]], [v for _, v in rows[c]]) for c in p["countries"]],
-                   p["x_start"], p["x_end"])
-        if not fits(tl):
-            raise RuntimeError(f"timeline is {tl.duration:.1f}s with slow-mo events, outside "
-                               f"{get_config()['video']['min_seconds']}-{get_config()['video']['max_seconds']}s; re-pick")
-        tl.save(d / "timeline.json")
-        values = {s.iso3: [dict(rows[s.iso3])[y] for y in s.years] for s in tl.slots}
-        wav, stems, ainfo = audio.synthesize(tl, values, seed=zlib.crc32(run_id.encode()))
-        audio.write_wav(d / "audio.wav", wav, ainfo["sample_rate"])
-        for name, x in stems.items():
-            audio.write_wav(d / f"{name}.wav", x, ainfo["sample_rate"])
-        _write(run_id, "audio.json", ainfo)
-        views = render.build_views(topic, p, data, labels, tl)
-        opening = render.opening_for(topic, views, p["x_start"], p["x_end"], seed=zlib.crc32(run_id.encode()),
-                                     run_id=run_id)
-        info = render.render_video(topic, tl, views, d / "audio.wav", d / "video.mp4", thumb=d / "thumb.jpg",
-                                   on_progress=_progress_writer(run_id), opening=opening)
-        meta = render.build_meta(run_id, topic, data, p, labels, views, tl, ainfo)
-        meta["render"] = info
-        meta["opening"] = opening              # the question the video opens with + the end card's answer
-        meta["hook_template"] = opening["hook_template"]   # hooks.py: tracked apart from the topic
-        meta["hook_phrase"] = opening.get("hook_phrase")   # ... and the exact which_last wording
-        meta["cover_seconds"] = info["cover_seconds"]   # publish_instagram sends it as thumb_offset
-        _write(run_id, "meta.json", meta)
-        db.set_hook_template(run_id, opening["hook_template"], opening.get("hook_phrase"))
-        if db.get_run(run_id):   # (a TEST video has no run row)
-            if opening.get("fallback"):
-                db.log(run_id, "labelled", f"opens with \"{opening['question']}\" instead of the configured hook: "
-                                           f"{opening['fallback']}"[:1500])
-            elif opening.get("choice"):
-                db.log(run_id, "labelled", f"opens with \"{opening['question']}\" ({opening['choice']}; true because: "
-                                           f"{opening['truth']})"[:1500])
+        return render_reel(run_id, topic)
+
+
+def reel_inputs(run_id: str) -> tuple[dict, dict, dict, list[tuple]]:
+    """(data, pick, labels, [(iso3, years, values)] in play order) of a run, as the render step reads them."""
+    data, p, labels = _read(run_id, "data.json"), _read(run_id, "pick.json"), _read(run_id, "labels.json")
+    series = data["series"]
+    rows = {c: [(y, v) for y, v in series[c] if p["x_start"] <= y <= p["x_end"]] for c in p["countries"]}
+    return data, p, labels, [(c, [y for y, _ in rows[c]], [v for _, v in rows[c]]) for c in p["countries"]]
+
+
+def render_reel(run_id: str, topic: dict, opening: dict | None = None, decision: dict | None = None) -> tuple[str, dict]:
+    """The render step's work; the caller holds the render lock. opening: keep this opening question (a re-render)
+    instead of choosing one; decision: coldopen.decide()'s answer, made here when not given."""
+    from . import audio, coldopen, render
+    from .timeline import fits
+    d = run_dir(run_id)
+    data, p, labels, countries = reel_inputs(run_id)
+    decision = decision or coldopen.decide(run_id)
+    tl, views, cold = coldopen.timeline_for(topic, p, data, labels, countries, decision)
+    if not fits(tl):
+        raise RuntimeError(f"timeline is {tl.duration:.1f}s with slow-mo events, outside "
+                           f"{get_config()['video']['min_seconds']}-{get_config()['video']['max_seconds']}s; re-pick")
+    tl.save(d / "timeline.json")
+    rows = {c: dict(zip(years, vals)) for c, years, vals in countries}
+    values = {s.iso3: [rows[s.iso3][y] for y in s.years] for s in tl.slots}
+    wav, stems, ainfo = audio.synthesize(tl, values, seed=zlib.crc32(run_id.encode()))
+    audio.write_wav(d / "audio.wav", wav, ainfo["sample_rate"])
+    for name, x in stems.items():
+        audio.write_wav(d / f"{name}.wav", x, ainfo["sample_rate"])
+    _write(run_id, "audio.json", ainfo)
+    chosen = opening is None
+    opening = opening or render.opening_for(topic, views, p["x_start"], p["x_end"], seed=zlib.crc32(run_id.encode()),
+                                            run_id=run_id)
+    info = render.render_video(topic, tl, views, d / "audio.wav", d / "video.mp4", thumb=d / "thumb.jpg",
+                               on_progress=_progress_writer(run_id), opening=opening)
+    meta = render.build_meta(run_id, topic, data, p, labels, views, tl, ainfo)
+    meta["render"] = info
+    meta["opening"] = opening              # the question the video opens with + the end card's answer
+    meta["hook_template"] = opening["hook_template"]   # hooks.py: tracked apart from the topic
+    meta["hook_phrase"] = opening.get("hook_phrase")   # ... and the exact which_last wording
+    meta["cover_seconds"] = info["cover_seconds"]   # publish_instagram sends it as thumb_offset
+    meta["cold_open"] = cold["cold_open"]            # coldopen.py: the A/B variable, stored like the hook
+    meta["cold_open_beat"] = cold["cold_open_beat"]   # ... the beat it shows, or why it has none
+    if cold["beat"]:
+        meta["cold_open_detail"] = cold["beat"]
+    _write(run_id, "meta.json", meta)
+    db.set_hook_template(run_id, opening["hook_template"], opening.get("hook_phrase"))
+    run = db.get_run(run_id)
+    if run:   # (a TEST video has no run row)
+        coldopen.record(run_id, decision, cold)
+        if chosen and opening.get("fallback"):
+            db.log(run_id, run["stage"], f"opens with \"{opening['question']}\" instead of the configured hook: "
+                                         f"{opening['fallback']}"[:1500])
+        elif chosen and opening.get("choice"):
+            db.log(run_id, run["stage"], f"opens with \"{opening['question']}\" ({opening['choice']}; true because: "
+                                         f"{opening['truth']})"[:1500])
+        db.log(run_id, run["stage"], (f"cold open: {cold['cold_open_beat']}" if cold["cold_open"] else
+                                      f"no cold open: {cold['cold_open_beat']}")[:1500])
     n_ev = sum(len(s.events) for s in tl.slots)
     msg = (f"rendered {tl.n_frames} frames ({tl.n_frames / tl.fps:.1f}s, {n_ev} slow-mo events) with "
            f"{info['backend']} backend [{info['backend_note']}] in {info['render_seconds']}s; audio "
            f"{ainfo['lufs']} LUFS, true peak {ainfo['true_peak_db']} dBTP, pluck stem "
-           f"{ainfo['pluck_minus_pad_lu']} LU above pad")
+           f"{ainfo['pluck_minus_pad_lu']} LU above pad; " +
+           ("cold open: " + cold["cold_open_beat"].split(";")[0] if cold["cold_open"] else "no cold open"))
     return msg, {}
 
 

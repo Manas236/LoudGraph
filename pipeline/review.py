@@ -186,6 +186,8 @@ def card_text(run: dict, skipped=()) -> str:
     lines = [f"🎬 Reel {pos} of {max(len(waiting), pos)} for review: {topic.get('name') or video_title(run)}"]
     question = (meta.get("opening") or {}).get("question")
     lines.append(f"❓ Hook question: {question}" if question else f"❓ Title: {video_title(run)}")
+    from .coldopen import side_of, summary
+    lines.append(f"🎞 Cold open: {summary(*side_of(run))}")
     if topic.get("subtitle"):
         lines.append(f"📈 {topic['subtitle']}")
     facts = []

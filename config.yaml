@@ -182,6 +182,15 @@ opening:                        # the question every video opens with (on screen
     - {text: "Who comes last in the end?", check: ends_last, answer: "{country} comes last: {value} in {year}"}
     - {text: "Who ends up at the bottom?", check: ends_last, spatial: true, answer: "{country} ends up at the bottom: {value} in {year}"}
 
+cold_open:                      # pipeline/coldopen.py: the reel opens on its most dramatic beat, then rewinds to the start
+  mode: alternate               # COLD_OPEN_MODE: alternate | always | never. alternate = every other NEW reel gets one (by
+                                # render order, kept in the database so it survives restarts): an A/B test on retention
+  seconds: 1.5                  # COLD_OPEN_SECONDS: the clip's length. It comes out of the race (every year step is a
+                                # little shorter), so the reel keeps the length it has without one (video.min/max_seconds)
+  snap_seconds: 0.2             # the rewind cut from the clip back to the start of the race; must be under 0.3
+  apply_to_existing_queue: false   # COLD_OPEN_APPLY_TO_EXISTING_QUEUE: false = reels already made are never re-rendered;
+                                # true = `python run.py coldopen --apply-queue` may re-render the unposted ones
+
 labels:
   enabled: true
   max_words: 4

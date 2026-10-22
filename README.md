@@ -45,6 +45,7 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py publish [--run ID]` | publish approved runs now, outside the posting queue (the bot's queue posts one a day by itself) |
 | `python run.py stats [--no-summary]` | pull Instagram + Facebook insights for every posted reel now, recompute topic and hook weights, send the summary (the bot also does this when it starts and every 6 h; two pulls never overlap) |
 | `python run.py hooks` | fill in and list each reel's hook template (`which_last`, `who_overtakes`, `other`, from the question its video shows) and its `hook_phrase`, with the hook weights |
+| `python run.py coldopen [--baseline] [--apply-queue]` | the cold open A/B: settings, the alternation, the baseline (the last 6 reels posted without one; `--baseline` saves it the first time) and the average views, reach, watch time and skip rate with vs without; `--apply-queue` gives the unposted reels one, only when `cold_open.apply_to_existing_queue` is true |
 | `python run.py rebrand [--run ID ...] [--dry-run] [--no-send]` | re-render reels that are made but not posted with the configured opening question (`opening.hook_template`, the which_last wording rotating from reel to reel): same data, countries and audio track (copied from the old file), old files kept as `*_oldhook.*`, approved ones back to review keeping their posting-queue place |
 | `python run.py dashboard` | local web UI on http://127.0.0.1:5055 (Review, Posting queue, Library, Settings) |
 | `python run.py verify [--run ID ...]` | ffprobe, loudness, A/V sync, stem balance, pitch-vs-data, pixel centring, contact sheet |
@@ -73,8 +74,8 @@ queued -> data_ready -> picked -> labelled -> rendered -> awaiting_approval -> a
 
 All state lives in SQLite (`pipeline.db`, WAL): `runs` (incl. live render `progress` and the review
 `queue_pos`), `make_jobs` (the make queue: New reel, batches, retries), `stage_log`,
-`posts` (each with its `hook_template` and `hook_phrase`), `stats` (one row per post per pull, never overwritten),
-`topic_weights`, `hook_weights`, plus `kv` (the Telegram `getUpdates` offset, so a bot restart never
+`posts` (each with its `hook_template`, `hook_phrase` and `cold_open`), `stats` (one row per post per pull, never
+overwritten), `topic_weights`, `hook_weights`, `cold_open_baseline`, plus `kv` (the Telegram `getUpdates` offset, so a bot restart never
 re-delivers a button press; the bot heartbeat; cached health checks). The dashboard and the bot only
 read/write that state, and their buttons call the same functions (`pipeline/actions.py`).
 
@@ -273,6 +274,18 @@ two batches. Settings changes are picked up by running processes without restart
   with (`which_last`, `who_overtakes`, `other`), apart from the topic, so the stats can compare hooks;
   every which_last wording counts toward the one `which_last` weight, and `hook_phrase` keeps the exact
   wording (shown next to the template on the Telegram Stats screen).
+- **Cold open** (`pipeline/coldopen.py`, `cold_open` in `config.yaml`): an A/B test on retention. With
+  `mode: alternate` every other new reel (by render order, kept in the database) opens with 1.5 s of its
+  most dramatic beat already moving at frame 0, a stab built from the reel's own voices (the clip
+  country's root, fifth and octave plucks, the sub hit, a pad chord) over the race's own sound at that
+  moment, then a 0.2 s rewind cut to the start of the race. The beat is the first move in
+  `captions.ranked_moves` (the list the "sharpest" fact comes from) that the video plays as an event and
+  that lets the clip end before its line starts its final year step, so no final value and nothing of
+  the final ranking is ever in it; no such beat, no cold open (the run's log says why). The clip comes
+  out of the race (every year step is a little shorter), so the length is unchanged; the opening
+  question, its timing, the music and the look are unchanged. Runs and posts record `cold_open` and
+  `cold_open_beat` like the hook; the Review page, the Library and the Telegram review card show it.
+  Reels already made are left as they are unless `apply_to_existing_queue` is true.
 - **End card** (`timing.end_card`, 2.5 s): the answer to the opening question (the wording's own
   `answer`, filled in code from its truth check), every country ranked by where it ends (first place
   first), the countries in the answer highlighted.

@@ -19,6 +19,7 @@
     python run.py batch [--count N] [--queue-only]
     python run.py rebrand [--run RUN_ID ...] [--dry-run] [--no-send]
     python run.py hooks
+    python run.py coldopen [--baseline] [--apply-queue]
 """
 from __future__ import annotations
 
@@ -242,6 +243,27 @@ def cmd_hooks(a):
     return 0
 
 
+def cmd_coldopen(a):
+    """The cold open A/B (pipeline/coldopen.py): fill in cold_open for older reels, then print the settings, the
+    alternation, the baseline and the average retention per side. --baseline saves (or refreshes) the baseline;
+    --apply-queue gives the unposted reels a cold open, only when cold_open.apply_to_existing_queue is true."""
+    import json
+    from pipeline import coldopen, db
+    db.init()
+    coldopen.backfill()
+    if a.apply_queue:
+        try:
+            res = coldopen.apply_to_queue()
+        except ValueError as e:
+            log.error("%s", e)
+            return 2
+        print(json.dumps(res, indent=1, ensure_ascii=False, default=str))
+    if a.baseline:
+        coldopen.save_baseline()
+    print("\n".join(coldopen.report_lines()))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="run.py", description="Graphony: data-sonification Shorts/Reels pipeline")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -309,6 +331,12 @@ def main(argv=None):
     s.set_defaults(fn=cmd_rebrand)
     sub.add_parser("hooks", help="fill in and list each reel's hook template, with the hook weights").set_defaults(
         fn=cmd_hooks)
+    s = sub.add_parser("coldopen", help="the cold open A/B: baseline and average retention with vs without")
+    s.add_argument("--baseline", action="store_true", help="save the baseline (the last 6 reels posted without a cold "
+                                                           "open), or refresh its numbers once saved")
+    s.add_argument("--apply-queue", action="store_true", help="give the unposted reels a cold open (needs "
+                                                              "cold_open.apply_to_existing_queue: true)")
+    s.set_defaults(fn=cmd_coldopen)
     a = p.parse_args(argv)
     setup_logging()
     return a.fn(a) or 0

@@ -88,6 +88,31 @@ def _sign(x: float, tol: float = 0.0) -> int:
     return 1 if x > tol else -1 if x < -tol else 0
 
 
+SHARPEST_MIN = 0.1   # a move's score must reach this to be the "sharpest" fact (or a cold open's beat)
+
+
+def ranked_moves(rows: dict[str, list[tuple[int, float]]]) -> list[dict]:
+    """Every one-year move (data years at most 2 apart) in the video's series, the most dramatic first: big for the
+    country itself AND on the scale all countries share (score = the geometric mean of the two shares, ties by the
+    shared one, then series order). The first is the "sharpest" fact; coldopen.py picks the cold open's beat from
+    the same list. Values are raw numbers here."""
+    allv = [v for r in rows.values() for _, v in r]
+    if not allv:
+        return []
+    span = (max(allv) - min(allv)) or 1.0
+    out = []
+    for iso, r in rows.items():
+        vals = [v for _, v in r]
+        own = (max(vals) - min(vals)) or 1.0
+        for (y0, v0), (y1, v1) in zip(r, r[1:]):
+            if y1 - y0 > 2:
+                continue
+            move_own, move_all = abs(v1 - v0) / own, abs(v1 - v0) / span
+            out.append({"iso3": iso, "from_year": y0, "to_year": y1, "from": v0, "to": v1,
+                        "score": math.sqrt(move_own * move_all), "move_own": move_own, "move_all": move_all})
+    return sorted(out, key=lambda m: (m["score"], m["move_all"]), reverse=True)   # stable: series order breaks ties
+
+
 def compute_facts(topic: dict, countries: list[tuple[str, str]], series: dict, x_start: int, x_end: int) -> list[dict]:
     """countries: [(iso3, name)] in play order; series: {iso3: [[year, value], ...]}. Values in the
     facts are display strings made by topics.format_value, exactly as the video shows them."""
@@ -153,20 +178,11 @@ def compute_facts(topic: dict, countries: list[tuple[str, str]], series: dict, x
         _, a, b, year, before = best
         add("crossover", a, {"up"}, country2=names[b], iso3_2=b, year=year, from_year=before)
 
-    best = None   # sharpest: a one-year move that is big for the country itself AND on the shared scale
-    for iso, r in rows.items():
-        vals = [v for _, v in r]
-        own = (max(vals) - min(vals)) or 1.0
-        for (y0, v0), (y1, v1) in zip(r, r[1:]):
-            if y1 - y0 > 2:
-                continue
-            move_own, move_all = abs(v1 - v0) / own, abs(v1 - v0) / span
-            key = (math.sqrt(move_own * move_all), move_all)
-            if best is None or key > best[0]:
-                best = (key, iso, y0, v0, y1, v1)
-    if best and best[0][0] >= 0.1:
-        _, iso, y0, v0, y1, v1 = best
-        add("sharpest", iso, {"up" if v1 > v0 else "down"}, year=y1, from_year=y0, to_year=y1, **{"from": v0, "to": v1})
+    moves = ranked_moves(rows)   # sharpest: a one-year move that is big for the country itself AND on the shared scale
+    if moves and moves[0]["score"] >= SHARPEST_MIN:
+        m = moves[0]
+        add("sharpest", m["iso3"], {"up" if m["to"] > m["from"] else "down"}, year=m["to_year"],
+            from_year=m["from_year"], to_year=m["to_year"], **{"from": m["from"], "to": m["to"]})
 
     best = None   # peak: a country's own high, followed by the biggest fall to the last year
     for iso, r in rows.items():

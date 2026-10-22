@@ -15,13 +15,16 @@ blue_reels_play_count, fb_reels_replay_count, post_video_avg_time_watched, post_
 post_video_social_actions, post_video_likes_by_reaction_type, post_video_followers
 (post_impressions_unique is refused for Page reels).
 A metric Meta refuses is dropped and the rest asked for again (_insights). Everything Meta returns is
-kept in stats.raw; views, reach, likes, comments, shares, saved and the average watch time (seconds,
-and as a % of the video's length) get their own columns.
+kept in stats.raw; views, reach, likes, comments, shares, saved, the average watch time (seconds, and as a
+% of the video's length), the total watch time (seconds) and Instagram's reels_skip_rate (% of views that
+skipped within the first 3 seconds; Facebook has none) get their own columns. Meta gives no retention curve
+or completion rate for reels.
 
 Then the topic weights and the hook-template weights are recomputed from the platforms in
-analytics.weight_platforms (views z-scored per platform). The Telegram summary goes out at most once
-per analytics.summary_every_hours. A failed pull is logged and tried again on the next cycle; it never
-stops the bot.
+analytics.weight_platforms (views z-scored per platform). Each post carries its run's hook and cold open
+(coldopen.py) next to its topic, so the stats can be grouped by any of them (`python run.py coldopen`).
+The Telegram summary goes out at most once per analytics.summary_every_hours. A failed pull is logged and
+tried again on the next cycle; it never stops the bot.
 """
 from __future__ import annotations
 
@@ -159,9 +162,12 @@ def fetch_instagram() -> int:
             log.warning("IG insights %s failed: %s", p["remote_id"], meta_api.redact(str(e))[:300])
             continue
         ms = vals.get("ig_reels_avg_watch_time")
+        skip = vals.get("reels_skip_rate")
         db.add_stats(p["id"], views=vals.get("views"), reach=vals.get("reach"), likes=vals.get("likes"),
                      comments=vals.get("comments"), shares=vals.get("shares"), saved=vals.get("saved"),
-                     avg_watch_s=_seconds(ms), avg_view_pct=_watch_pct(p["run_id"], ms), raw=vals)
+                     avg_watch_s=_seconds(ms), avg_view_pct=_watch_pct(p["run_id"], ms), raw=vals,
+                     total_watch_s=_seconds(vals.get("ig_reels_video_view_total_time")),
+                     skip_rate=skip if isinstance(skip, (int, float)) else None)
         n += 1
     return n
 
@@ -194,7 +200,8 @@ def fetch_facebook() -> int:
         db.add_stats(p["id"], views=vals.get("fb_reels_total_plays", vals.get("blue_reels_play_count")),
                      likes=sum(reactions.values()) if isinstance(reactions, dict) else None,
                      comments=_action(social, "comment"), shares=_action(social, "share"),
-                     avg_watch_s=_seconds(ms), avg_view_pct=_watch_pct(p["run_id"], ms), raw=vals)
+                     avg_watch_s=_seconds(ms), avg_view_pct=_watch_pct(p["run_id"], ms), raw=vals,
+                     total_watch_s=_seconds(vals.get("post_video_view_time")))
         n += 1
     return n
 
@@ -292,13 +299,17 @@ def collect() -> dict:
 
 
 def _collect() -> dict:
-    from . import hooks
+    from . import coldopen, hooks
     db.kv_set(K_LAST_RUN, db.now())
     out = {}
     try:
         hooks.backfill()   # reels made before hook_template existed
     except Exception as e:  # noqa: BLE001 - the pull itself matters more
         log.warning("hook_template backfill failed: %s", e)
+    try:
+        coldopen.backfill()   # reels made before cold opens existed: without one
+    except Exception as e:  # noqa: BLE001 - the pull itself matters more
+        log.warning("cold_open backfill failed: %s", e)
     for name, fn in (("youtube", fetch_youtube), ("instagram", fetch_instagram), ("facebook", fetch_facebook)):
         try:
             out[name] = fn()
@@ -310,6 +321,10 @@ def _collect() -> dict:
     out["topics_weighted"] = len(w)
     out["hooks_weighted"] = len(update_hook_weights())
     log.info("weights updated for %d topics and %d hook templates", len(w), out["hooks_weighted"])
+    try:
+        coldopen.refresh_baseline()   # the saved baseline reels get their newest numbers
+    except Exception as e:  # noqa: BLE001 - the pull itself matters more
+        log.warning("cold open baseline refresh failed: %s", e)
     return out
 
 

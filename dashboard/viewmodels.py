@@ -144,7 +144,15 @@ def video(run, topics=None, accounts=None, stats=None):
                                                  if c in names and isinstance(value, dict) and value.get("label")],
             "platforms": platforms, "connected": any(p["connected"] for p in platforms if p["enabled"]),
             "has_video": (path("out") / run["id"] / "video.mp4").exists(), "age": ago(run["created_at"]),
-            "replaced": bool(run.get("replaced")), "stage": run["stage"], "caption": caption(run)}
+            "replaced": bool(run.get("replaced")), "stage": run["stage"], "caption": caption(run),
+            "cold_open": cold_open(run)}
+
+
+def cold_open(run):
+    """Whether the video opens with a cold open (the A/B test, pipeline/coldopen.py) and the beat, or why not."""
+    from pipeline.coldopen import detail, side_of
+    on, beat = side_of(run)
+    return {"on": bool(on), "label": "Yes" if on else "No", "detail": detail(on, beat)}
 
 
 def caption(run):

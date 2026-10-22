@@ -16,6 +16,11 @@ times longer (slow motion), so the slot grows. Data-year onsets are the knots of
 
 audio.py places note onsets (and event runs) at these times; render.py moves the line head with
 year_pos(t), which inverts the same knots. Nothing else computes timing.
+
+A cold open (coldopen.py) puts `cold_open` seconds of the race's most dramatic beat, then a `snap` second
+rewind cut, before the intro; the race is shortened by the same amount, so the length does not change:
+
+    | cold open | snap | intro | country 1 | ... | end card |
 """
 from __future__ import annotations
 
@@ -96,6 +101,27 @@ class Timeline:
     event_slowmo: float = 3.0
     hook_hold: float = 0.0          # the opening question is big until here ...
     hook_shrink: float = 0.0        # ... and shrinks into the header over this long
+    cold_open: float = 0.0          # seconds of the cold open clip at the start (0 = none) ...
+    snap: float = 0.0               # ... then the rewind cut back to the start of the race ...
+    cold_open_from: float = 0.0     # ... and the race time the clip's first frame shows
+
+    @property
+    def lead(self) -> float:
+        """Seconds before the race starts: the cold open and its rewind cut (0 without a cold open)."""
+        return self.cold_open + self.snap
+
+    def cold_open_time(self, t: float) -> float | None:
+        """The race time the frame at video time t shows during the cold open: the clip (cold_open_from + t), then
+        the rewind cut, which runs the clip's line back to its first year in `snap` seconds (frame by frame, so its
+        last frame is the line's start). None from the start of the race on, and for a video without a cold open."""
+        if self.cold_open <= 0 or t >= self.lead:
+            return None
+        if t < self.cold_open:
+            return self.cold_open_from + t
+        top = self.cold_open_from + self.cold_open
+        n = max(1, round(self.snap * self.fps))
+        k = min(n, int(round((t - self.cold_open) * self.fps)) + 1)
+        return top - (top - self.slot_at(self.cold_open_from).draw_start) * k / n
 
     def slot_at(self, t: float) -> Slot | None:
         for s in self.slots:
@@ -167,9 +193,13 @@ def find_events(years: list[int], values: list[float] | None, threshold: float) 
     return out
 
 
-def build(countries: list[tuple], x_start: int, x_end: int, cfg: dict | None = None) -> Timeline:
+def build(countries: list[tuple], x_start: int, x_end: int, cfg: dict | None = None, cold_open: float = 0.0,
+          snap: float = 0.0) -> Timeline:
     """countries: [(iso3, [years]) or (iso3, [years], [values])] in play order.
-    Values enable event slow-mo; without them every step has normal length."""
+    Values enable event slow-mo; without them every step has normal length.
+    cold_open, snap: seconds of a cold open clip and of the rewind cut after it (coldopen.py), before the race. They
+    come out of the race: every year step is shortened by the same share, so the video keeps the length it has
+    without them. The clip's place in the race (cold_open_from) is set once its beat is chosen."""
     cfg = cfg or get_config()
     t, v = _timing(cfg)
     if x_end <= x_start:
@@ -179,10 +209,8 @@ def build(countries: list[tuple], x_start: int, x_end: int, cfg: dict | None = N
     n = len(countries)
     per = per_country_seconds(n, cfg)
     n_steps = x_end - x_start
-    d = (per - t["transition"] - t["hold"]) / n_steps
-    slots = []
-    cursor = t["intro"]
-    for i, c in enumerate(countries):
+    prepared = []
+    for c in countries:
         iso3, years = c[0], c[1]
         values = c[2] if len(c) > 2 else None
         pairs = [(int(y), (values[j] if values else None)) for j, y in enumerate(years) if x_start <= y <= x_end]
@@ -190,6 +218,15 @@ def build(countries: list[tuple], x_start: int, x_end: int, cfg: dict | None = N
         vs = [p[1] for p in pairs] if values else None
         events = find_events(ys, vs, thr)
         slow_years = {y for e in events for y in range(e["prev_year"] + 1, e["year"] + 1)}
+        prepared.append((iso3, ys, events, slow_years))
+    lead = cold_open + snap
+    if lead > 0:   # every slot's drawn length is (per - fixed part) * its weighted steps / n_steps: take `lead` off the sum
+        weighted = sum(slow if y in sy else 1.0 for _, _, _, sy in prepared for y in range(x_start + 1, x_end + 1))
+        per -= lead * n_steps / weighted
+    d = (per - t["transition"] - t["hold"]) / n_steps
+    slots = []
+    cursor = t["intro"] + lead
+    for i, (iso3, ys, events, slow_years) in enumerate(prepared):
         start = cursor
         trans = t["transition"] if i else 0.0      # nothing to cross-fade from before the first country
         step = d if i else (per - t["hold"]) / n_steps
@@ -216,7 +253,7 @@ def build(countries: list[tuple], x_start: int, x_end: int, cfg: dict | None = N
                     end_card=t["end_card"], slots=slots, end_start=round(end_start, 6),
                     duration=round(duration, 6), n_frames=int(math.ceil(duration * fps - 1e-9)),
                     event_threshold=thr, event_slowmo=slow, hook_hold=t.get("hook_hold", 0.0),
-                    hook_shrink=t.get("hook_shrink", 0.45))
+                    hook_shrink=t.get("hook_shrink", 0.45), cold_open=round(cold_open, 6), snap=round(snap, 6))
 
 
 def fits(tl: Timeline, cfg: dict | None = None) -> bool:

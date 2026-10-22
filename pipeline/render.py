@@ -13,6 +13,9 @@ The opening question (captions.opening: a question about a computed fact) is on 
 big for timing.hook_hold seconds, then shrinks into the header that stays for the whole video. The
 first country's chart and line are there from frame 0 as well. The end card reveals the answer.
 No title pill, no source line, no channel name (the data credit lives in the post).
+
+A reel with a cold open (coldopen.py, timeline.cold_open_time) shows its most dramatic beat first, under the same
+opening question on the same timing, then rewinds to the first country and the race starts.
 """
 from __future__ import annotations
 
@@ -609,12 +612,27 @@ class Renderer:
         return self._final[i]
 
     def draw_frame(self, t: float):
-        self._draw_body(t)
-        self._hook(t)
+        race = self.tl.cold_open_time(t)
+        if race is None:
+            self._draw_body(t)
+        else:
+            self._draw_cold_open(t, race)
+        self._hook(t)   # the opening question keeps its own timing from frame 0, over the cold open too
+
+    def _draw_cold_open(self, t: float, race: float):
+        """The cold open (coldopen.py): the race at its most dramatic beat, already moving at frame 0; then the
+        rewind cut, which runs that line back to its start while dipping through the shared chrome (like a change
+        of country), and the race starts on the next frame."""
+        tl = self.tl
+        chrome = self.chrome_layer()  # (layers draw on the canvas when first built: build before drawing)
+        self.draw_country(tl.slot_at(race), race)
+        if t >= tl.cold_open:
+            p = min(1.0, (t - tl.cold_open + 1 / tl.fps) / tl.snap)
+            self.cv.draw_snapshot(chrome, alpha=0.85 * ease(p))
 
     def _draw_body(self, t: float):
         tl = self.tl
-        if t < tl.intro:
+        if t < tl.lead + tl.intro:
             self.cv.draw_snapshot(self.intro_layer())
             return
         # transitions dip through the shared chrome: old content fades out, then new content fades in

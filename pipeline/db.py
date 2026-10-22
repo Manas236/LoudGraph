@@ -141,6 +141,21 @@ CREATE TABLE IF NOT EXISTS hook_weights (
     mean_log_views REAL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS cold_open_baseline (
+    post_id INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    posted_at TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    stats_at TEXT,
+    age_hours REAL,
+    views INTEGER,
+    reach INTEGER,
+    avg_watch_s REAL,
+    avg_view_pct REAL,
+    total_watch_s REAL,
+    skip_rate REAL
+);
 """
 
 
@@ -170,7 +185,12 @@ MIGRATIONS = [("runs", "progress", "REAL"), ("runs", "progress_at", "TEXT"),
               ("runs", "hook_phrase", "TEXT"), ("posts", "hook_phrase", "TEXT"),
               # the posting-queue place of a reel sent back for a fresh approval; restored when re-approved
               ("runs", "prior_post_pos", "REAL"),
-              ("stats", "shares", "INTEGER"), ("stats", "saved", "INTEGER"), ("stats", "avg_watch_s", "REAL")]
+              ("stats", "shares", "INTEGER"), ("stats", "saved", "INTEGER"), ("stats", "avg_watch_s", "REAL"),
+              # the cold open A/B (coldopen.py): 1/0, and the beat it shows or why it has none; stored like the hook
+              ("runs", "cold_open", "INTEGER"), ("posts", "cold_open", "INTEGER"),
+              ("runs", "cold_open_beat", "TEXT"), ("posts", "cold_open_beat", "TEXT"),
+              # retention: total watch time (s) and Instagram's reels_skip_rate (% of views skipped in the first 3 s)
+              ("stats", "total_watch_s", "REAL"), ("stats", "skip_rate", "REAL")]
 _ready: set[str] = set()
 
 
@@ -421,8 +441,9 @@ def upsert_post(run_id: str, platform: str, status: str, remote_id: str | None =
     with db() as c:
         c.execute(
             """INSERT INTO posts(run_id, platform, status, remote_id, url, message, created_at, updated_at, hook_template,
-                                 hook_phrase)
-               VALUES (?,?,?,?,?,?,?,?,(SELECT hook_template FROM runs WHERE id=?),(SELECT hook_phrase FROM runs WHERE id=?))
+                                 hook_phrase, cold_open, cold_open_beat)
+               VALUES (?,?,?,?,?,?,?,?,(SELECT hook_template FROM runs WHERE id=?),(SELECT hook_phrase FROM runs WHERE id=?),
+                       (SELECT cold_open FROM runs WHERE id=?),(SELECT cold_open_beat FROM runs WHERE id=?))
                ON CONFLICT(run_id, platform) DO UPDATE SET
                  status=excluded.status,
                  remote_id=COALESCE(excluded.remote_id, posts.remote_id),
@@ -430,8 +451,10 @@ def upsert_post(run_id: str, platform: str, status: str, remote_id: str | None =
                  message=excluded.message,
                  updated_at=excluded.updated_at,
                  hook_template=COALESCE(posts.hook_template, excluded.hook_template),
-                 hook_phrase=COALESCE(posts.hook_phrase, excluded.hook_phrase)""",
-            (run_id, platform, status, remote_id, url, message, ts, ts, run_id, run_id),
+                 hook_phrase=COALESCE(posts.hook_phrase, excluded.hook_phrase),
+                 cold_open=COALESCE(posts.cold_open, excluded.cold_open),
+                 cold_open_beat=COALESCE(posts.cold_open_beat, excluded.cold_open_beat)""",
+            (run_id, platform, status, remote_id, url, message, ts, ts, run_id, run_id, run_id, run_id),
         )
         c.execute(
             "INSERT INTO stage_log(run_id, stage, message, ts) VALUES (?,?,?,?)",
@@ -480,25 +503,34 @@ def uploads_today(platform: str, now_utc: datetime | None = None) -> int:
 # ---------------------------------------------------------------- stats + weights
 
 def add_stats(post_id: int, views=None, avg_view_pct=None, reach=None, likes=None, comments=None, raw=None,
-              shares=None, saved=None, avg_watch_s=None) -> None:
+              shares=None, saved=None, avg_watch_s=None, total_watch_s=None, skip_rate=None) -> None:
     """One more stats row for a post: every pull is kept (fetched_at), so a reel's growth can be read back."""
     with db() as c:
         c.execute(
             "INSERT INTO stats(post_id, fetched_at, views, avg_view_pct, reach, likes, comments, raw, shares, saved, "
-            "avg_watch_s) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "avg_watch_s, total_watch_s, skip_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (post_id, now(), views, avg_view_pct, reach, likes, comments, json.dumps(raw) if raw is not None else None,
-             shares, saved, avg_watch_s),
+             shares, saved, avg_watch_s, total_watch_s, skip_rate),
         )
+
+
+# rows pulled before total_watch_s and skip_rate had columns keep them only in raw (what Meta returned)
+_RAW = "CASE WHEN json_valid(s.raw) THEN json_extract(s.raw, '$.{}') END"
 
 
 def latest_stats() -> list[dict]:
     """Latest stats row per post joined with its post and run."""
     with db() as c:
         rows = c.execute(
-            """SELECT p.id post_id, p.run_id, p.platform, p.status, p.url, p.remote_id, p.created_at posted_at,
+            f"""SELECT p.id post_id, p.run_id, p.platform, p.status, p.url, p.remote_id, p.created_at posted_at,
                       r.topic_id, COALESCE(p.hook_template, r.hook_template) hook_template,
-                      COALESCE(p.hook_phrase, r.hook_phrase) hook_phrase, s.views, s.avg_view_pct,
-                      s.reach, s.likes, s.comments, s.shares, s.saved, s.avg_watch_s, s.fetched_at
+                      COALESCE(p.hook_phrase, r.hook_phrase) hook_phrase,
+                      COALESCE(p.cold_open, r.cold_open) cold_open,
+                      COALESCE(p.cold_open_beat, r.cold_open_beat) cold_open_beat, s.views, s.avg_view_pct,
+                      s.reach, s.likes, s.comments, s.shares, s.saved, s.avg_watch_s, s.fetched_at,
+                      COALESCE(s.total_watch_s, COALESCE({_RAW.format('ig_reels_video_view_total_time')},
+                                                         {_RAW.format('post_video_view_time')}) / 1000.0) total_watch_s,
+                      COALESCE(s.skip_rate, {_RAW.format('reels_skip_rate')}) skip_rate
                FROM posts p JOIN runs r ON r.id = p.run_id
                LEFT JOIN stats s ON s.id = (SELECT MAX(id) FROM stats WHERE post_id = p.id)
                ORDER BY p.created_at DESC"""
@@ -512,6 +544,14 @@ def set_hook_template(run_id: str, template: str, phrase: str | None = None) -> 
     with db() as c:
         c.execute("UPDATE runs SET hook_template=?, hook_phrase=? WHERE id=?", (template, phrase, run_id))
         c.execute("UPDATE posts SET hook_template=?, hook_phrase=? WHERE run_id=?", (template, phrase, run_id))
+
+
+def set_cold_open(run_id: str, on: bool, beat: str | None) -> None:
+    """Whether the run's video opens with a cold open, and the beat it shows (or why it has none), on the run
+    and on every post made from it (coldopen.py)."""
+    with db() as c:
+        c.execute("UPDATE runs SET cold_open=?, cold_open_beat=? WHERE id=?", (int(on), beat, run_id))
+        c.execute("UPDATE posts SET cold_open=?, cold_open_beat=? WHERE run_id=?", (int(on), beat, run_id))
 
 
 def set_topic_weight(topic_id: str, weight: float | None, n_posts: int, mean_log_views: float | None,
