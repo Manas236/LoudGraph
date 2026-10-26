@@ -59,8 +59,10 @@ def reject(run_id: str, by: str) -> str:
 def send_to_telegram(run_id: str, by: str) -> str:
     """The dashboard's "Send to Telegram for approval": the bot shows this video on its review card
     now, and it is approved (or not) there. Nothing is posted by this."""
-    from . import health, review
+    from . import autopilot, health, review
     from .accounts import account_states, telegram_switch
+    if autopilot.on():
+        raise ValueError("Autopilot is on: reels are picked and posted by themselves, with no approval on Telegram.")
     if not account_states()["telegram"]["configured"]:
         raise ValueError("Telegram is not connected. Set it up in Settings first.")
     if not telegram_switch():

@@ -86,6 +86,21 @@ def _rows_in(series_rows, x0, x1):
     return [(int(y), float(v)) for y, v in series_rows if x0 <= y <= x1]
 
 
+def _has_year(series_rows, year: int) -> bool:
+    return any(int(y) == year for y, _ in series_rows)
+
+
+def final_year(cands: list[dict], series: dict, n: int, n_min: int) -> int:
+    """The reel's last year: the latest year that at least n candidates (else at least n_min) have a value for, so
+    every country in the reel has data through its final year (a series that stops earlier is left out)."""
+    years = sorted({int(y) for s in cands for y, _ in series[s["iso3"]]}, reverse=True)
+    for need in (n, n_min):
+        for y in years:
+            if sum(1 for s in cands if _has_year(series[s["iso3"]], y)) >= need:
+                return y
+    raise NotEnoughData(f"not enough interesting data: fewer than {n_min} countries share a final year")
+
+
 def pick(scored: list[dict], series: dict, topic: dict, exclude_sets: set[str] | None = None,
          seed: int | None = None, cfg: dict | None = None) -> dict:
     cfg = cfg or get_config()
@@ -99,7 +114,9 @@ def pick(scored: list[dict], series: dict, topic: dict, exclude_sets: set[str] |
         if falling:
             cands = cands + falling[:1]
     x0 = topic["start_year"]
-    x1 = max(s["last_year"] for s in cands)
+    x1 = final_year(cands, series, n, pc["min_countries"])
+    cands = [s for s in cands if _has_year(series[s["iso3"]], x1)]   # every country has data through the last year
+    n = min(n, len(cands))
     curves = {s["iso3"]: z_curve(series[s["iso3"]], x0, x1) for s in cands}
     by = {s["iso3"]: s for s in cands}
     rng = random.Random(seed)

@@ -1,0 +1,11 @@
+[Unit]
+Description=Graphony: make reels daily
+
+[Timer]
+# 21:30 UTC = 03:00 IST (IST is UTC+5:30 all year: no daylight saving)
+OnCalendar=*-*-* 21:30:00 UTC
+Persistent=true
+Unit=graphony-generate.service
+
+[Install]
+WantedBy=timers.target

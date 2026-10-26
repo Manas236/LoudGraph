@@ -38,3 +38,6 @@ diagnosis_frames/graph_api_pull.json
 
 # this laptop's posting kill-switch after the move to the server; must never reach the server
 MIGRATED_TO_SERVER
+
+# topics the autopilot discovered on the server (pipeline/discover.py)
+topics_auto.yaml

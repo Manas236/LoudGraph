@@ -1,0 +1,11 @@
+[Unit]
+Description=Graphony: post slot 1 daily
+
+[Timer]
+# 09:00 UTC = 14:30 IST (IST is UTC+5:30 all year: no daylight saving)
+OnCalendar=*-*-* 09:00:00 UTC
+Persistent=true
+Unit=graphony-post-1.service
+
+[Install]
+WantedBy=timers.target

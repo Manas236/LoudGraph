@@ -2,9 +2,10 @@
 
 Graphony is a data-sonification Shorts/Reels pipeline. It turns real public statistics (World Bank WDI, Our World in Data) into 20–23.3 s vertical videos (25 s with a cold open):
 each country's line chart is drawn while its data plays as music (one plucked note per year,
-pitch follows the value). A human approves each video on Telegram or the local dashboard, then it
-is posted to Instagram Reels and Facebook Page Reels (YouTube Shorts is supported and currently
-turned off), and analytics flow back into topic selection.
+pitch follows the value). It runs on **autopilot** (see below): a daily run keeps a pool of ready reels, and
+at each posting slot a picker chooses one by a breakout model learned from the account's own Instagram insights
+and posts it to Instagram Reels and Facebook Page Reels (YouTube Shorts is supported and currently turned off).
+With `AUTOPILOT=false` a human approves each video on Telegram or the local dashboard instead.
 
 Everything runs on a weak laptop (i5, 8 GB, no GPU): one render at a time, frames are streamed
 straight into FFmpeg, nothing is held in memory or written per frame.
@@ -16,7 +17,7 @@ only if you also set `render.watermark: true` (default `false`).
 
 ## Setup
 
-Requirements: Python 3.11+, FFmpeg on PATH. Same steps on Windows and Linux.
+Requirements: Python 3.10 to 3.12, FFmpeg on PATH. Same steps on Windows and Linux (the server: `deploy/README_SERVER.md`).
 
 ```bash
 python -m venv .venv
@@ -56,6 +57,57 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py preview (--topic ID \| --from-run ID) [--no-send]` | render a TEST video in `out/test-<time>/` (no database row: never in the review queue, never posted), check its first seconds, and send it to Telegram marked TEST |
 | `python run.py account` | the connected Instagram account (username, name, followers, posts) and Facebook Page, read live from Meta by id (read-only) |
 | `python -m pipeline.publish_youtube --auth` | one-time YouTube OAuth (opens a browser) |
+
+## Autopilot
+
+`AUTOPILOT=true` in `.env` (the default when it is empty): nothing waits for a person. Reels go ready -> pool ->
+picker -> post; no Telegram bot listens (nothing calls getUpdates), and Telegram only gets an **alert** when something
+breaks: a job crashes, generation makes 0 reels when the pool needed some, fewer than 3 ready reels, a post fails
+after 1 retry, the Meta token is invalid or expires within 7 days (checked daily with debug_token), insights fail 2
+days running, every Gemini model fails and that blocks generation, less than 5 GB free disk, or a slot is skipped by
+the late-slot guard. An alert is one line saying what broke and one saying what to check, at most once per 12 h, and
+one short "Resolved" line when it clears. `HEALTHCHECK_URL` (healthchecks.io) is pinged after every post and with
+`/fail` when a job fails. `AUTOPILOT=false` brings back the approval flow below, unchanged.
+
+| Job | When (IST) | What |
+|---|---|---|
+| `python -m pipeline generate` | 03:00 | count the pool's losses, top the pool up to 10 ready reels (at most 5 new, at least 3 explore-eligible) |
+| `python -m pipeline post --slot 1` / `--slot 2` | 14:30 / 16:00 | pick one reel by the breakout model and post it, retrying a failure once |
+| `python -m pipeline insights` | every 6 h | Instagram (and Facebook) insights; the ~24 h and ~72 h snapshots the model learns from |
+| `python -m pipeline health` | 09:00 | Meta token, disk, pool, insights; deletes the media of reels posted over 14 days ago |
+| `python -m pipeline dashboard` | always | the dashboard on 127.0.0.1 (`DASHBOARD_PORT`, default 5055) |
+
+On the server systemd timers run them (`deploy/`); on Windows, Bot.bat (`run.py bot`) runs the same jobs at the
+same times. `--dry-run` on `generate` renders one TEST video that never joins the pool; on `post` it prints the
+picks with their score breakdowns (`post --dry-run --day tomorrow`) and writes nothing. Every job holds one file
+lock, so they never overlap.
+
+**The model** (`pipeline/learn.py`). Views are bimodal (a breakout, or a ~150 floor, decided within ~20 h), so it
+scores breakout probability. The outcome is a reel's 72 h Instagram views (for a younger reel, its 24 h views times
+the account's typical 72 h / 24 h ratio); Instagram posts since the rename to Graphony (14 Oct 2026) count, those of
+an older `video.format_version` half. Breakout = 72 h views >= max(5 x the median of the last 30 posts, 500)
+(`autopilot.breakout_multiple`, `breakout_floor`). Each feature value (topic category, hook_template, hook_phrase,
+cold_open, slot time, length bucket) has a Beta-Binomial posterior with a prior worth 4 posts at the account's
+breakout rate; a reel's score is the sum of its values' log-odds against that rate.
+
+**The picker** (`pipeline/autopick.py`). Each day one EXPLOIT post (the best-scoring reel of a category with >= 4
+posts) and one EXPLORE post (a category with fewer, or a retired one due its retry, chosen by Thompson sampling;
+ties go to the interest scorer); slot 1 and slot 2 swap the two roles every day. The day's two posts differ in
+category and in the hook's answer country. A category with >= 6 posts whose 90% upper credible bound of the
+breakout rate is under half the base rate is retired from exploit and explored once more after 30 days. Every
+pick is a `decisions` row (slot, reel, score breakdown, top 3 runners-up), shown on the dashboard's Autopilot page.
+A reel eligible and not picked on 5 days (`autopilot.pool_max_losses`) is dropped: media deleted, row kept.
+
+**New categories** (`pipeline/discover.py`). With fewer than 5 untested categories left, new ones come from the
+World Bank and OWID catalogs, at most 3 a week: each indicator passes the interest scorer and the "Which
+country...?" truth check; Gemini only names it, every number comes from the data. They are kept in
+`topics_auto.yaml` (server state, not in git) with `origin: auto`.
+
+**Cold open**: each new reel gets one with the chance that cold opens break out more often (Thompson sampling on
+the cold_open feature), kept between 20% and 80% (`cold_open.mode: thompson`).
+
+**MIGRATED_TO_SERVER**: while this file exists in the project folder (it is gitignored), nothing posts from that
+machine: every job, `run.py bot`, `run.py publish` and every upload refuse. It is left on the laptop after the move.
 
 ## How a video is made
 

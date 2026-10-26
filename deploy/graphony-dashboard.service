@@ -1,0 +1,18 @@
+[Unit]
+Description=Graphony: dashboard on 127.0.0.1 only (DASHBOARD_PORT in .env, default 5055; reach it by SSH tunnel)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/graphony
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/graphony/.venv/bin/python -m pipeline dashboard
+Restart=on-failure
+RestartSec=10
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

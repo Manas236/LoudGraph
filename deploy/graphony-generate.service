@@ -1,0 +1,16 @@
+[Unit]
+Description=Graphony: top up the pool of ready reels
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/graphony
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/graphony/.venv/bin/python -m pipeline generate
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=3h
+CPUQuota=100%
+MemoryMax=1500M

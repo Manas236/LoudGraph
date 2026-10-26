@@ -10,6 +10,8 @@ paths:                          # relative to the project root
   db: pipeline.db
   fonts: assets/fonts
   flags: assets/flags
+  topics_auto: topics_auto.yaml   # topics the autopilot discovered (discover.py); server state, not in git
+  migrated_marker: MIGRATED_TO_SERVER   # while this file exists nothing posts from this machine (autopilot.py)
 
 cache_days: 30                  # re-fetch a cached series only when older than this
 
@@ -89,7 +91,8 @@ picker:
   require_falling: true         # no country with net < net_down -> run fails "low variety"
   min_variety_distance: 0.25    # min pairwise z-distance below this -> run fails "low variety"
 
-topic_cooldown_days: 21         # same topic may come back (with a different set) after this
+topic_cooldown_days: 10         # same topic may come back (with a different set) after this. 10, not 21: two posts a
+                                # day plus dropped reels use ~3 topics a day, and a 21-day rest let the pool run dry
 
 posting:                        # the posting queue (pipeline/posting.py): run by the bot itself, no OS scheduler
   time: ["14:30", "16:00"]      # approved reels post in these daily slots (keep the quotes). Every breakout so far
@@ -195,8 +198,10 @@ opening:                        # the question every video opens with (on screen
     - {text: "Which country sinks to last?", check: drops_to_last, spatial: true, answer: "{country} sinks from {rank_from} in {from_year} to last in {year}"}
 
 cold_open:                      # pipeline/coldopen.py: the reel opens on its most dramatic beat, then rewinds to the start
-  mode: alternate               # COLD_OPEN_MODE: alternate | always | never. alternate = every other NEW reel gets one (by
-                                # render order, kept in the database so it survives restarts): an A/B test on retention
+  mode: thompson                # COLD_OPEN_MODE: thompson | alternate | always | never. thompson = each NEW reel gets one
+                                # with the chance that cold opens break out more often (Thompson sampling on the breakout
+                                # model, learn.py), kept between autopilot.cold_open_min and _max so both sides keep
+                                # being tested; alternate = every other new reel (by render order, kept in the database)
   seconds: 1.5                  # COLD_OPEN_SECONDS: the clip's length. It is ADDED before the race, which stays exactly
                                 # as it is without one, so the reel is seconds + snap_seconds longer (<= 25.0 s, as the
                                 # race is <= video.max_seconds); a reel that would still pass video.max_seconds_cold_open
@@ -292,10 +297,43 @@ analytics:
   shrink_n: 3
   weight_platforms: [youtube, instagram]   # whose views set the topic and hook weights; Facebook Page reels are
                                 # pulled and kept too, but the Page has no audience yet (0-3 plays a reel)
+  pull_days: 30                 # a pull asks about the reels posted within this many days (older numbers have settled)
 
 selector:
   exploit_share: 0.7
   retire_after: 3
+
+autopilot:                      # AUTOPILOT=true in .env (the default): no approvals; jobs run from systemd timers (deploy/)
+  scoring_since: "2026-10-14"   # Instagram posts since the account became Graphony are the data (Facebook is ignored)
+  old_format_weight: 0.5        # a post made with an older video.format_version counts half
+  snapshot_hours: [24, 72]      # insights snapshots at about these ages; the outcome is the 72 h views, estimated from
+                                # the 24 h ones (times the account's typical 72 h / 24 h ratio) for younger reels
+  breakout_multiple: 5          # BREAKOUT = 72 h views >= max(breakout_multiple x median 72 h views of the last
+  breakout_floor: 500           # breakout_window posts, breakout_floor). Views are bimodal: a breakout or a ~150 floor
+  breakout_window: 30
+  prior_strength: 4             # Beta-Binomial prior: worth 4 posts, centred on the account's breakout rate
+  exploit_min_posts: 4          # a category is exploited once it has this many scored posts; below, it is explored
+  retire_min_posts: 6           # retired from exploit with >= 6 posts and the 90% upper credible bound of its breakout
+  retire_quantile: 0.9          # rate below half the base rate ...
+  retry_days: 30                # ... and explored once more this long after it was retired
+  anchor_day: "2026-10-27"      # slot 1 is the EXPLOIT post on this day and every 2nd day after it, slot 2 the days
+                                # between (the other slot is the EXPLORE post), so the slot time never confounds them
+  late_minutes: 90              # a post job refuses to run this long after its slot time ...
+  min_gap_minutes: 60           # ... or this soon after the previous post
+  pool_target: 10               # the daily generation run tops the ready pool up to this many reels ...
+  pool_max_new: 5               # ... making at most this many
+  pool_min_explore: 3           # ... keeping at least this many reels of explore-eligible categories
+  pool_max_losses: 5            # POOL_MAX_LOSSES: a reel eligible and not picked on this many days is dropped
+  posted_media_days: 14         # a posted reel's video and audio files are deleted this many days after it posted
+  min_free_gb: 5                # below this much free disk generation pauses (posting goes on) and an alert goes out
+  discover_below: 5             # fewer untested categories than this in the topic catalog: discover new ones
+  discover_per_week: 3          # ... at most this many new categories a week (World Bank / OWID catalogs)
+  cold_open_min: 0.2            # a new reel's chance of a cold open stays between these
+  cold_open_max: 0.8
+  alert_every_hours: 12         # the same alert goes out at most once per 12 h
+  insights_fail_hours: 48       # Instagram insights failing this long is an alert
+  token_warn_days: 7            # the Meta token expiring within this many days is an alert
+  length_buckets: [21.5, 23.35]   # reel length feature: short below 21.5 s, mid up to 23.35 s, long above (cold open)
 
 dashboard:
   host: 127.0.0.1               # never 0.0.0.0; use an SSH tunnel on a server

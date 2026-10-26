@@ -338,14 +338,72 @@ def numbers_in(text: str) -> list[str]:
     return [t.replace(",", "") for t in re.findall(r"\d+(?:[.,]\d+)*", text)]
 
 
-def metric_line(topic: dict, names: list[str], x_start: int, x_end: int) -> str:
-    """Line 2: the metric, the countries and the years, in plain words (for search and topic classification)."""
+def metric_line(topic: dict, names: list[str], x_start: int, x_end: int, hide: bool = False) -> str:
+    """Line 2: the metric, the countries and the years, in plain words (for search and topic classification).
+    hide=True (a video whose question has an answer country): "in 5 countries", so the caption never names it."""
     sub = topic["subtitle"]
     if len(sub) > 1 and sub[0].isupper() and sub[1].islower():
         sub = sub[0].lower() + sub[1:]
     listed = [f"the {n}" if n in THE else n for n in names]
     who = listed[0] if len(listed) == 1 else ", ".join(listed[:-1]) + " and " + listed[-1]
+    if hide:
+        who = f"{len(names)} countries"
     return f"{topic['name']}: {sub} in {who}, {x_start} to {x_end}."
+
+
+# ------------------------------------------------------------------ the hook's answer is never in the caption
+
+def answer_names(opening: dict | None) -> list[str]:
+    """The countries the video's opening question is answered with (its end card highlight)."""
+    return [str(n) for n in ((opening or {}).get("highlight") or []) if n]
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def names_in(text: str, names: list[str]) -> list[str]:
+    """Which of `names` the text mentions: as words ("the United States"), or in a hashtag (#unitedstates)."""
+    low = (text or "").lower()
+    tags = [_squash(t) for t in TAG.findall(text or "")]
+    hits = []
+    for n in names:
+        sq = _squash(n)
+        if re.search(r"(?<![a-z])" + re.escape(n.lower()) + r"(?![a-z])", low) or                 (len(sq) >= 4 and any(sq in t for t in tags)) or sq in tags:
+            hits.append(n)
+    return hits
+
+
+def _hide_in_metric(line: str) -> str:
+    """'...in Iran, Brazil and Iraq, 1990 to 2025.' -> '...in 3 countries, 1990 to 2025.'"""
+    m = re.fullmatch(r"(.*?) in (.+), (\d{4}) to (\d{4})\.", line or "")
+    if not m:
+        return line
+    n = len(re.split(r", | and ", m.group(2)))
+    return f"{m.group(1)} in {n} {'country' if n == 1 else 'countries'}, {m.group(3)} to {m.group(4)}."
+
+
+def guard_answer(c: dict, opening: dict | None) -> tuple[str, str | None]:
+    """(the caption to post, what had to change or None). The caption never names the hook's answer country: the
+    metric line counts the countries instead of listing them, a hashtag naming it is left out; if an option still
+    names it, the next one is tried, and last the on-screen question alone."""
+    names = answer_names(opening) or list(c.get("answer_names") or [])
+    text = compose(c)
+    hits = names_in(text, names)
+    if not hits:
+        return text, None
+    credit = c.get("credit") or []
+    cur = current(c)
+    tags = [t for t in cur["hashtags"] if not names_in(t, names)]
+    metric = c.get("metric_line") or ""
+    bodies = [cur["text"]] + [v["caption"] for i, v in enumerate(c["variants"]) if i != cur["index"]]
+    for body in bodies:
+        fixed = body.replace(metric, _hide_in_metric(metric)) if metric else body
+        out = _compose(fixed, credit, tags)
+        if not names_in(out, names):
+            return out, f"named the answer ({', '.join(hits)}): the countries are counted, not listed"
+    question = clean((opening or {}).get("question")) or "Which country is it?"
+    return _compose(question, credit[:1], tags), f"named the answer ({', '.join(hits)}): posted with the question alone"
 
 
 def credit_lines(topic: dict, data: dict) -> list[str]:
@@ -509,7 +567,8 @@ class Context:
         for f in facts:
             self.allowed |= fact_numbers(f)
         self.allowed.update(numbers_in(topic.get("subtitle", "")) + numbers_in(topic.get("name", "")))
-        self.metric = metric_line(topic, self.names, x_start, x_end)
+        self.answer = answer_names(self.opening)
+        self.metric = metric_line(topic, self.names, x_start, x_end, hide=bool(self.answer))
 
     def usable(self, hook: dict, fact: dict) -> bool:
         kinds = hook.get("facts") or ["any"]
@@ -852,8 +911,9 @@ def _rotate(pool: list[str], seed: int) -> list[str]:
 
 
 def pick_hashtags(topic: dict, facts: list[dict], seed: int = 0, s: dict | None = None, pools: dict | None = None,
-                  trending: bool | None = None, get=None) -> tuple[list[str], list[str]]:
-    """(hashtags with '#', notes). Default 5: 1 broad, 2 niche (pinned first), 1 topic, 1 country."""
+                  trending: bool | None = None, get=None, avoid=()) -> tuple[list[str], list[str]]:
+    """(hashtags with '#', notes). Default 5: 1 broad, 2 niche (pinned first), 1 topic, 1 country; never a country
+    in `avoid` (the hook's answer)."""
     s = s or settings()
     hs = s["hashtags"]
     pools = pools or load_hashtags()
@@ -879,7 +939,7 @@ def pick_hashtags(topic: dict, facts: list[dict], seed: int = 0, s: dict | None 
     seen = []
     for f in facts:
         for name in (f["country"], f.get("country2")):
-            t = country_tag(name, pools) if name else ""
+            t = country_tag(name, pools) if name and name not in avoid else ""
             if t and t not in seen and tag_ok(t, banned):
                 seen.append(t)
     picked: list[str] = []
@@ -1010,10 +1070,10 @@ def generate(topic: dict, countries: list[tuple[str, str]], series: dict, x_star
                          "caption": caption_text(v["hook"], ctx.metric, v["question"])})
     if len(variants) < n:
         notes.append(f"only {len(variants)} of {n} variants could be made from the facts")
-    tags, tag_notes = pick_hashtags(topic, facts, seed, s, trending=trending, get=get)
+    tags, tag_notes = pick_hashtags(topic, facts, seed, s, trending=trending, get=get, avoid=ctx.answer)
     model = ", ".join(sorted({v["model"] for v in accepted if v.get("model")})) or None   # the model(s) that served
     return {"generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "model": model,
-            "opener": ctx.style, "facts": facts, "metric_line": ctx.metric, "variants": variants,
+            "opener": ctx.style, "facts": facts, "metric_line": ctx.metric, "answer_names": ctx.answer, "variants": variants,
             "hashtags": tags, "chosen": 0, "notes": notes + tag_notes}
 
 
@@ -1129,6 +1189,9 @@ def check_edit(c: dict, text: str, hashtags) -> dict:
     if size > IG_CAPTION_LIMIT:
         errors.append(f"With the data credit and hashtags the caption is {size:,} characters; Instagram allows "
                       f"{IG_CAPTION_LIMIT:,}. Cut {size - IG_CAPTION_LIMIT:,}.")
+    named = names_in(body + " " + " ".join(tags), list(c.get("answer_names") or []))
+    if named:
+        errors.append(f"Leave out {', '.join(named)}: it is the answer to the video's question.")
     allowed = allowed_numbers(c)
     unknown = list(dict.fromkeys(n for n in numbers_in(TAG.sub(" ", body)) if n not in allowed))
     if unknown:
@@ -1258,16 +1321,27 @@ def choose(run_id: str, index: int) -> dict:
 
 def apply_to_meta(run_id: str, meta: dict) -> dict:
     """The metadata a publisher posts with: the chosen caption replaces description_instagram (used for
-    Instagram and Facebook) when captions.use_for_posting is on; otherwise meta is returned unchanged."""
+    Instagram and Facebook) when captions.use_for_posting is on; otherwise the old caption from meta.json. Either way
+    it never names the hook's answer country (guard_answer; in the old caption, its lines that do are left out)."""
     s = settings()
-    if not (s["enabled"] and s["use_for_posting"]):
+    if s["enabled"] and s["use_for_posting"]:
+        try:
+            c = load(run_id) or generate_for_run(run_id, llm=False, trending=False)
+            text, changed = guard_answer(c, meta.get("opening"))
+            if changed:
+                log.warning("captions: %s %s", run_id, changed)
+            return {**meta, "description_instagram": text}
+        except Exception as e:  # noqa: BLE001 - posting goes ahead with the old caption
+            log.warning("captions: %s posts with the old caption (%s)", run_id, e)
+    names = answer_names(meta.get("opening"))
+    old = meta.get("description_instagram") or ""
+    if not names or not names_in(old, names):
         return meta
-    try:
-        c = load(run_id) or generate_for_run(run_id, llm=False, trending=False)
-        return {**meta, "description_instagram": compose(c)}
-    except Exception as e:  # noqa: BLE001 - posting goes ahead with the old caption
-        log.warning("captions: %s posts with the old caption (%s)", run_id, e)
-        return meta
+    kept = [ln for ln in old.splitlines() if not names_in(ln, names)]
+    text = "\n".join(kept).strip() or clean((meta.get("opening") or {}).get("question"))
+    log.warning("captions: %s: the old caption named the answer (%s); those lines are left out", run_id,
+                ", ".join(names))
+    return {**meta, "description_instagram": text}
 
 
 def summary(c: dict) -> str:

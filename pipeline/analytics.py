@@ -32,7 +32,7 @@ import json
 import logging
 import math
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
@@ -50,8 +50,12 @@ _refused: dict[str, set[str]] = {"instagram": set(), "facebook": set()}   # metr
 
 
 def _live_posts(platform: str) -> list[dict]:
+    """Live posts of a platform; with analytics.pull_days set, only those posted within that many days (older reels'
+    numbers have settled, and a pull asks Meta once per reel, 3 s apart)."""
+    days = (get_config().get("analytics") or {}).get("pull_days")
+    since = (datetime.now(timezone.utc) - timedelta(days=float(days))).strftime("%Y-%m-%dT%H:%M:%SZ") if days else ""
     return [p for p in db.get_posts() if p["platform"] == platform and p["remote_id"]
-            and p["status"] in ("uploaded", "live", "private_locked")]
+            and p["status"] in ("uploaded", "live", "private_locked") and p["created_at"] >= since]
 
 
 def _values(d: dict) -> dict:
@@ -325,11 +329,20 @@ def _collect() -> dict:
         coldopen.refresh_baseline()   # the saved baseline reels get their newest numbers
     except Exception as e:  # noqa: BLE001 - the pull itself matters more
         log.warning("cold open baseline refresh failed: %s", e)
+    try:
+        from . import learn
+        out["snapshots"] = learn.take_snapshots()   # the autopilot's ~24 h and ~72 h views per Instagram reel
+    except Exception as e:  # noqa: BLE001 - the pull itself matters more
+        log.warning("insights snapshots failed: %s", e)
     return out
 
 
 def send_summary() -> None:
     db.kv_set(K_LAST_SUMMARY, db.now())
+    from .autopilot import on as autopilot_on
+    if autopilot_on():   # the autopilot is silent while healthy: alerts only (alerts.py)
+        log.info("daily summary not sent: autopilot is on")
+        return
     try:
         from .approve_telegram import daily_summary_text, enabled, send_message
         if enabled():

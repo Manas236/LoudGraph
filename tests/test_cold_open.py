@@ -69,13 +69,14 @@ def _timeline_for(rows, opening=None, decision=WANT):
 @pytest.fixture
 def env(temp_db, tmp_path, pinned_config):
     pinned_config["paths"].update(out=str(tmp_path / "out"), cache=str(tmp_path / "cache"))
+    pinned_config["cold_open"]["mode"] = "alternate"   # the alternation is tested here; the shipped mode is thompson
     return temp_db
 
 
 # ------------------------------------------------------------------ config and timing
 
 def test_the_shipped_settings(pinned_config):
-    assert coldopen.settings() == {"mode": "alternate", "seconds": 1.5, "snap_seconds": 0.2,
+    assert coldopen.settings() == {"mode": "thompson", "seconds": 1.5, "snap_seconds": 0.2,
                                    "apply_to_existing_queue": False}
 
 

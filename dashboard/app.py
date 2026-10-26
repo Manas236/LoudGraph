@@ -21,7 +21,7 @@ from dashboard.media import chart_thumbnail
 from pipeline import actions, db, health, posting
 from pipeline import review as review_queue
 from pipeline.accounts import PLATFORMS, account_states, ready_destinations, telegram_switch
-from pipeline.config import brand_name, get_config, path, setup_logging
+from pipeline.config import brand_name, get_config, path, secret, setup_logging
 from pipeline.errors import explain_error
 
 app = Flask(__name__)
@@ -123,6 +123,12 @@ def queue_page():
 @app.get("/fragment/queue")
 def queue_fragment():
     return render_template("_queue.html", rows=vm.queue_rows())
+
+
+@app.get("/autopilot")
+def autopilot_page():
+    """Read-only: the autopilot's picks with their score breakdowns, the pool, the categories and open alerts."""
+    return render_template("autopilot.html", ap=vm.autopilot_view())
 
 
 @app.get("/library")
@@ -338,14 +344,20 @@ def old_analytics():
     return redirect("/library")
 
 
+def port() -> int:
+    """DASHBOARD_PORT in .env, else dashboard.port in config.yaml (5055)."""
+    raw = secret("DASHBOARD_PORT")
+    return int(raw) if raw and raw.isdigit() else int(get_config()["dashboard"]["port"])
+
+
 def main() -> int:
     setup_logging()
     dc = get_config()["dashboard"]
     host = "127.0.0.1" if dc["host"] == "localhost" else dc["host"]
     if not ipaddress.ip_address(host).is_loopback:
         raise SystemExit(f"refusing to bind dashboard to {host}: loopback only (use an SSH tunnel)")
-    print(f"{brand_name()} dashboard: http://{host}:{dc['port']}/  (keep this window open; close it to stop)")
-    app.run(host=host, port=dc["port"], debug=False, threaded=True)
+    print(f"{brand_name()} dashboard: http://{host}:{port()}/  (keep this window open; close it to stop)")
+    app.run(host=host, port=port(), debug=False, threaded=True)
     return 0
 
 

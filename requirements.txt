@@ -1,17 +1,25 @@
-numpy>=1.26
-scipy>=1.11
-pandas>=2.1
-requests>=2.31
-pyyaml>=6.0
-ruamel.yaml>=0.18
-python-dotenv>=1.0
-wbgapi>=1.0.12
-pyloudnorm>=0.1.1
-pillow>=10.0
-skia-python>=87.5
-fonttools>=4.40
-flask>=3.0
-google-api-python-client>=2.100
-google-auth-oauthlib>=1.1
-google-auth-httplib2>=0.1
-pytest>=8.0
+# Pinned for Linux (x86_64 and aarch64 wheels) and Windows, CPython 3.10-3.12; checked on PyPI 2026-10-26.
+# numpy, scipy, pandas and fonttools dropped 3.10 in their newest releases, so 3.10 gets the last one that has it.
+# System packages (not pip): ffmpeg and ffprobe on PATH.
+numpy==2.2.6; python_version < "3.11"
+numpy==2.4.6; python_version >= "3.11"
+scipy==1.15.3; python_version < "3.11"
+scipy==1.17.1; python_version >= "3.11"
+pandas==2.3.3; python_version < "3.11"
+pandas==3.0.6; python_version >= "3.11"
+fonttools==4.65.0; python_version < "3.11"
+fonttools==4.66.1; python_version >= "3.11"
+requests==2.34.2
+pyyaml==6.0.3
+ruamel.yaml==0.19.1
+python-dotenv==1.2.4
+wbgapi==1.0.14
+pyloudnorm==0.2.0
+pillow==12.3.0
+skia-python==144.0.post2
+flask==3.1.3
+google-api-python-client==2.201.0
+google-auth-oauthlib==1.5.0
+google-auth-httplib2==0.4.4
+filelock==4.1.0
+pytest==9.1.1

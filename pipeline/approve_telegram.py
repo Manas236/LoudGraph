@@ -815,7 +815,20 @@ def poll_once(timeout: int, bot: Bot | None = None) -> int:
 
 
 def run_bot() -> int:
+    """Bot.bat / `run.py bot`. With AUTOPILOT on (the default) there is no Telegram bot: autopilot.loop() runs the
+    autopilot's jobs at their times instead, and nothing calls getUpdates. AUTOPILOT=false: the approval bot below."""
+    from . import autopilot
     from .lock import single_instance
+    if autopilot.migrated():
+        log.warning("bot refused: %s", autopilot.MIGRATED_TEXT)
+        print(autopilot.MIGRATED_TEXT)
+        return autopilot.REFUSED
+    if autopilot.on():
+        with single_instance("bot") as mine:
+            if not mine:
+                print("Graphony is already running in another window. You can close this one.")
+                return 0
+            return autopilot.loop()
     with single_instance("bot") as mine:
         if not mine:  # e.g. Bot.bat double-clicked twice: two bots would fight over getUpdates
             log.warning("the bot is already running in another window; this one stops")

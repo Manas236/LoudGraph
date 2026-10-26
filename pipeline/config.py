@@ -23,6 +23,13 @@ SECRET_NAMES = [
     "IG_ACCESS_TOKEN",
     "FB_PAGE_ID",
 ]
+# settings, not credentials: they live in .env because they differ between the laptop and the server
+SETTING_NAMES = [
+    "AUTOPILOT",
+    "HEALTHCHECK_URL",
+    "DASHBOARD_PORT",
+]
+ENV_NAMES = SECRET_NAMES + SETTING_NAMES
 
 
 def get_config() -> dict:
@@ -59,9 +66,9 @@ def run_dir(run_id: str) -> Path:
 
 
 def secret(name: str) -> str | None:
-    """The ONLY way code reads the environment. SECRET_NAMES must match .env.example (a test checks)."""
-    if name not in SECRET_NAMES:
-        raise KeyError(f"{name} is not a known secret; add it to SECRET_NAMES and .env.example")
+    """The ONLY way code reads the environment. ENV_NAMES must match .env.example (a test checks)."""
+    if name not in ENV_NAMES:
+        raise KeyError(f"{name} is not a known secret; add it to SECRET_NAMES (or SETTING_NAMES) and .env.example")
     v = os.environ.get(name, "").strip()
     return v or None
 

@@ -1,7 +1,7 @@
 """B6: .env.example lists exactly the variables the code reads, each with a one-line comment."""
 import re
 
-from pipeline.config import ROOT, SECRET_NAMES
+from pipeline.config import ENV_NAMES, ROOT
 
 CODE_DIRS = ["pipeline", "dashboard"]
 
@@ -30,7 +30,7 @@ def _code_reads():
 def test_env_example_matches_code_exactly():
     keys = _env_example()
     names, raw_env = _code_reads()
-    assert set(keys) == names == set(SECRET_NAMES), (set(keys), names, set(SECRET_NAMES))
+    assert set(keys) == names == set(ENV_NAMES), (set(keys), names, set(ENV_NAMES))
     # the only direct environment access is inside config.secret()
     assert len(raw_env) == 1 and raw_env[0].startswith("config.py"), raw_env
 
@@ -43,5 +43,5 @@ def test_each_variable_has_a_comment_saying_what_and_where():
 
 def test_readme_uses_the_same_names():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    for k in SECRET_NAMES:
+    for k in ENV_NAMES:
         assert k in readme, k

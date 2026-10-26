@@ -14,9 +14,12 @@ _OWNER_CONFIG = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"
 def no_real_secrets(monkeypatch):
     """pipeline.config loads the owner's .env at import; no test may see (or call an API with) those values.
     Tests that need a secret set a fake one with monkeypatch.setenv."""
-    from pipeline.config import SECRET_NAMES
-    for name in SECRET_NAMES:
+    from pipeline.config import ENV_NAMES
+    for name in ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
+    # the approval flow (review card, posting queue, the Telegram bot) is what most tests exercise: it is reachable
+    # with AUTOPILOT=false; the autopilot's own tests (test_autopilot.py) switch it on
+    monkeypatch.setenv("AUTOPILOT", "false")
 
 
 @pytest.fixture(autouse=True)
@@ -30,6 +33,9 @@ def pinned_config(monkeypatch):
     cfg["youtube"]["enabled"], cfg["instagram"]["enabled"], cfg["facebook"]["enabled"] = True, True, False
     cfg["dry_run"] = {"youtube": True, "instagram": True, "facebook": True}
     cfg["meta_api"] = {"min_gap_seconds": 0}
+    # never the machine's own discovered topics or MIGRATED_TO_SERVER marker (the laptop keeps one after the move)
+    cfg["paths"]["topics_auto"] = "tests/_no_topics_auto.yaml"
+    cfg["paths"]["migrated_marker"] = "tests/_no_MIGRATED_TO_SERVER"
     monkeypatch.setattr(config, "_read_config", lambda filename, modified: cfg)
     return cfg
 

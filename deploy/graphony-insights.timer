@@ -1,0 +1,11 @@
+[Unit]
+Description=Graphony: insights every 6 hours
+
+[Timer]
+# 00:15, 06:15, 12:15, 18:15 UTC = 05:45, 11:45, 17:45, 23:45 IST (IST is UTC+5:30 all year: no daylight saving)
+OnCalendar=*-*-* 00/6:15:00 UTC
+Persistent=true
+Unit=graphony-insights.service
+
+[Install]
+WantedBy=timers.target

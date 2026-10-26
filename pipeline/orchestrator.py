@@ -340,7 +340,11 @@ def selection_attention() -> None:
 # ------------------------------------------------------------------ publishing
 
 def publish_run(run_id: str, platform: str | None = None) -> bool:
+    from .autopilot import MIGRATED_TEXT, migrated
     from .lock import publish_lock, single_instance
+    if migrated():   # every upload, from every entrypoint (bot, dashboard, run.py publish, the autopilot), stops here
+        log.warning("publish %s refused: %s", run_id, MIGRATED_TEXT)
+        return False
     with single_instance(publish_lock(run_id)) as mine:
         if not mine:  # another publisher is posting this run: never upload twice
             log.info("publish %s: already being posted by another process", run_id)

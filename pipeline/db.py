@@ -11,7 +11,7 @@ from .config import path
 
 STAGES = [
     "queued", "data_ready", "picked", "labelled", "rendered",
-    "awaiting_approval", "approved", "rejected", "publishing", "published", "failed", "skipped",
+    "awaiting_approval", "approved", "rejected", "publishing", "published", "failed", "skipped", "dropped",
 ]
 # Forward edges of the state machine. Any stage may also go to "failed".
 NEXT = {
@@ -20,13 +20,14 @@ NEXT = {
     "picked": {"labelled"},
     "labelled": {"rendered"},
     "rendered": {"awaiting_approval"},
-    "awaiting_approval": {"approved", "rejected"},
-    "approved": {"publishing"},
+    "awaiting_approval": {"approved", "rejected", "dropped"},
+    "approved": {"publishing", "dropped"},
     "publishing": {"published"},
     "published": set(),
     "rejected": set(),
     "failed": set(),
     "skipped": set(),
+    "dropped": set(),   # the autopilot's pool gave up on it (autopick.drop): media deleted, row kept
 }
 POST_STATUSES = {"pending", "uploading", "uploaded", "live", "private_locked", "failed", "dry_run"}
 QUOTA_TZ = "America/Los_Angeles"  # the YouTube Data API quota resets at midnight Pacific time
@@ -141,6 +142,41 @@ CREATE TABLE IF NOT EXISTS hook_weights (
     mean_log_views REAL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS snapshots (
+    post_id INTEGER NOT NULL,
+    target_hours INTEGER NOT NULL,
+    age_hours REAL NOT NULL,
+    views INTEGER,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (post_id, target_hours)
+);
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL,
+    slot TEXT NOT NULL,
+    role TEXT NOT NULL,
+    run_id TEXT,
+    category TEXT,
+    score REAL,
+    breakdown TEXT,
+    runners_up TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS categories (
+    category TEXT PRIMARY KEY,
+    retired_at TEXT,
+    retired_reason TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS alerts (
+    key TEXT PRIMARY KEY,
+    message TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0,
+    sent_at TEXT,
+    cleared_at TEXT,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS cold_open_baseline (
     post_id INTEGER PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -194,7 +230,11 @@ MIGRATIONS = [("runs", "progress", "REAL"), ("runs", "progress_at", "TEXT"),
               # the posting slot (posting.py, "14:30"): set on the run when the queue starts it, copied onto its posts
               ("runs", "post_slot", "TEXT"), ("posts", "slot", "TEXT"),
               # the experiment marker (video.format_version) a reel was rendered with; None = made before it existed
-              ("runs", "format_version", "INTEGER"), ("posts", "format_version", "INTEGER")]
+              ("runs", "format_version", "INTEGER"), ("posts", "format_version", "INTEGER"),
+              # the autopilot's pool (autopick.py): days a reel was eligible and not picked, the last such day, and
+              # when its media files were deleted (dropped, or posted autopilot.posted_media_days ago)
+              ("runs", "pool_losses", "INTEGER NOT NULL DEFAULT 0"), ("runs", "pool_loss_day", "TEXT"),
+              ("runs", "media_deleted_at", "TEXT")]
 _ready: set[str] = set()
 
 

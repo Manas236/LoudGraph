@@ -1,0 +1,14 @@
+[Unit]
+Description=Graphony: pick and post the reel of slot 1
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/graphony
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/graphony/.venv/bin/python -m pipeline post --slot 1
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=2h

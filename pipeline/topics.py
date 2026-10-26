@@ -16,9 +16,25 @@ REQUIRED = ["id", "source", "code", "title", "subtitle", "unit_format", "start_y
             "modelled_data_warning"]
 
 
+def auto_topics_file():
+    """Topics the autopilot discovered (discover.py): server state next to topics.yaml, kept out of git."""
+    return ROOT / get_config()["paths"].get("topics_auto", "topics_auto.yaml")
+
+
+def load_auto_topics() -> list[dict]:
+    f = auto_topics_file()
+    if not f.exists():
+        return []
+    with open(f, encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or []
+
+
 def load_topics() -> list[dict]:
+    """topics.yaml, then the discovered topics (topics_auto.yaml) whose ids are not taken."""
     with open(TOPICS_FILE, encoding="utf-8") as f:
         topics = yaml.safe_load(f) or []
+    ids = {t.get("id") for t in topics}
+    topics += [t for t in load_auto_topics() if t.get("id") not in ids]
     for t in topics:
         missing = [k for k in REQUIRED if k not in t]
         if missing:

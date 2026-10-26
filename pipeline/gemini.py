@@ -26,6 +26,9 @@ class QuotaExhausted(RuntimeError):
     """No Gemini model answered: every one was overloaded, rate limited, out of quota or unreachable."""
 
 
+ALL_FAILED = {"count": 0, "last": ""}   # this process's calls where every model failed (the autopilot's alert reads it)
+
+
 def _gcfg() -> dict:
     return get_config()["gemini"]
 
@@ -160,4 +163,6 @@ def ask_json(prompt: str, what: str = "call", temperature: float = 0.2) -> tuple
             log.warning("Gemini %s: %s %s; trying the next model", what, model, _why(r))
             continue
         raise RuntimeError(f"Gemini {model} {_why(r)}")
+    ALL_FAILED["count"] += 1
+    ALL_FAILED["last"] = "; ".join(tried) or "no model configured"
     raise QuotaExhausted("no Gemini model answered: " + ("; ".join(tried) or "no model configured"))

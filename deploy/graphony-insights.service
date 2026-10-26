@@ -1,0 +1,14 @@
+[Unit]
+Description=Graphony: pull the insights of the posted reels
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/graphony
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/graphony/.venv/bin/python -m pipeline insights
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=2h

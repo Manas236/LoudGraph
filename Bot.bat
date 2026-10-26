@@ -1,5 +1,6 @@
 @echo off
-rem Graphony bot: Telegram approvals, scheduled videos and posting. Keep this window open.
+rem Graphony: with AUTOPILOT on (the default) this runs the autopilot's jobs at their times (generate, post,
+rem insights, health); with AUTOPILOT=false in .env, the Telegram approval bot. Keep this window open.
 setlocal
 cd /d "%~dp0"
 title Graphony bot
@@ -8,6 +9,6 @@ if not exist ".venv\Scripts\python.exe" (
   pause
   exit /b 1
 )
-echo Graphony bot is running. Keep this window open; close it to stop the bot.
+echo Graphony is running. Keep this window open; close it to stop it.
 ".venv\Scripts\python.exe" run.py bot
 pause

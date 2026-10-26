@@ -276,3 +276,38 @@ def topic_rows():
         out.append({"topic": topic, "used": len(used), "last": ago(used[0]["created_at"]) if used else "Never",
                     "average": short_views(round(sum(views) / len(views))) if views else "—", "status": status})
     return out
+
+
+def autopilot_view() -> dict:
+    """The Autopilot page (read-only): on/off, the latest picks with their breakdown, the pool, the categories and the
+    open alerts. The breakout model is rebuilt from the database on each visit (a few dozen posts)."""
+    from pipeline import alerts, autopick, autopilot, learn
+    from pipeline.review import topic_name
+    model = learn.build()
+    with db.db() as c:
+        cats = {r["category"]: dict(r) for r in c.execute("SELECT * FROM categories")}
+        rows = [dict(r) for r in c.execute("SELECT * FROM decisions ORDER BY id DESC LIMIT 20")]
+    states = {}
+    for cat in sorted(learn.catalog_categories() | {r["features"]["category"] for r in model.rows}):
+        n = model.category_posts(cat)
+        retired = bool((cats.get(cat) or {}).get("retired_at"))
+        states[cat] = {"posts": n, "rate": f"{model.mean('category', cat):.0%}", "upper": f"{model.upper(cat):.0%}",
+                       "role": "retired" if retired else "exploit" if n >= int(learn.settings()["exploit_min_posts"])
+                       else "explore"}
+    picks = []
+    for d in rows:
+        b = json.loads(d["breakdown"]) if d["breakdown"] else {}
+        picks.append({"when": f"{d['day']} {d['slot']}", "role": d["role"], "topic": topic_name(d["topic_id"]) if
+                      d.get("topic_id") else (topic_name(db.get_run(d["run_id"])["topic_id"]) if d["run_id"] else "—"),
+                      "category": d["category"] or "—", "score": d["score"], "note": d["note"] or "",
+                      "parts": [(f, str(p.get("value"))[:40], p.get("log_odds", p.get("draw_log_odds")))
+                                for f, p in (b.get("parts") or {}).items()],
+                      "runners": [f"{topic_name(r['topic_id'])} ({r['score']:+.2f})" for r in
+                                  json.loads(d["runners_up"] or "[]")]})
+    pool = [{"topic": topic_name(r["topic_id"]), "category": learn.category_of(r["topic_id"]),
+             "role": states.get(learn.category_of(r["topic_id"]), {}).get("role", "explore"),
+             "losses": r.get("pool_losses") or 0, "made": ago(r["created_at"]),
+             "cold_open": bool(r.get("cold_open"))} for r in autopick.pool()]
+    return {"on": autopilot.on(), "threshold": round(model.threshold), "base": f"{model.base:.0%}",
+            "max_losses": autopilot.settings().get("pool_max_losses", 5),
+            "scored": len(model.rows), "categories": states, "picks": picks, "pool": pool, "alerts": alerts.active()}

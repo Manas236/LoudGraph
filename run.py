@@ -79,7 +79,10 @@ def cmd_bot(a):
 
 
 def cmd_publish(a):
-    from pipeline import orchestrator
+    from pipeline import autopilot, orchestrator
+    if autopilot.migrated():
+        print(autopilot.MIGRATED_TEXT)
+        return autopilot.REFUSED
     return orchestrator.publish_approved(run_id=a.run, platform=a.platform)
 
 

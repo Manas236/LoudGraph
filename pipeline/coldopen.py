@@ -20,6 +20,11 @@ one-year move by how dramatic it is. The cold open shows the first move that
 Crossovers and overtakes cannot be beats: the video draws one country at a time, each on its own scale, so two
 lines never cross on screen. When nothing qualifies the reel is made without a cold open and the reason is kept.
 
+Thompson sampling (mode thompson, the autopilot's). A NEW reel gets a cold open with the chance that reels with one
+break out more often than reels without (learn.cold_open_chance: the two Beta posteriors of the cold_open feature,
+Monte Carlo), kept between autopilot.cold_open_min and cold_open_max (20-80%) so both sides keep being tested. The
+length fit below still applies: a reel that would pass video.max_seconds_cold_open is made without one.
+
 Alternation (mode alternate). A NEW reel gets the opposite of what the last new reel really got, by render
 order: a reel that should have had a cold open but had no beat counts as without, so the next one tries again.
 The state is the kv row cold_open:alternate, so it survives restarts. A re-render of a run keeps the side it was
@@ -49,7 +54,7 @@ from .config import get_config, path, run_dir
 
 log = logging.getLogger(__name__)
 
-MODES = ("alternate", "always", "never")
+MODES = ("thompson", "alternate", "always", "never")
 K_ALTERNATE = "cold_open:alternate"   # {"renders", "with", "last", "last_run"}: new reels in render order
 SNAP_MAX = 0.3                        # the rewind cut must stay under this
 ARRIVE = 0.35                         # the move lands this long after the clip's first frame: already moving at frame 0
@@ -106,7 +111,7 @@ def made_side(run_id: str) -> tuple[bool, str] | None:
     return on, meta.get("cold_open_beat") or ("" if on else BEFORE)
 
 
-def decide(run_id: str | None, fresh: bool = False) -> dict:
+def decide(run_id: str | None, fresh: bool = False, rng=None) -> dict:
     """{"want", "why", "counts"}: whether this render should try a cold open, why not, and whether it is a new
     reel that moves the alternation (record()). fresh=True: decide as for a new reel even when the run was made
     before (apply_to_queue)."""
@@ -119,6 +124,17 @@ def decide(run_id: str | None, fresh: bool = False) -> dict:
         return {"want": side[0], "why": side[1] or BEFORE, "counts": False}
     if s["mode"] == "always":
         return {"want": True, "why": "", "counts": run is not None}
+    if s["mode"] == "thompson":
+        import random
+        from .learn import cold_open_chance
+        try:
+            chance = cold_open_chance()
+        except Exception as e:  # noqa: BLE001 - no model (no data yet, no database): an even chance
+            log.warning("cold open: no breakout model (%s); an even chance", e)
+            chance = 0.5
+        want = (rng or random.Random()).random() < chance
+        why = "" if want else f"control side: Thompson sampling gave a cold open a {chance:.0%} chance"
+        return {"want": want, "why": why, "counts": run is not None, "chance": round(chance, 3)}
     st = alternate_state()
     if st["last"]:
         return {"want": False, "why": "control side of the A/B: the last new reel had a cold open",
