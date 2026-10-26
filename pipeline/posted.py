@@ -8,12 +8,23 @@ it instead of posting a second copy. Read-only: nothing is uploaded or published
   IG:  GET /{container-id}?fields=status_code          PUBLISHED = media_publish went through
        GET /{ig-user-id}/media?fields=id,caption,...   the reel itself (a container has no media id)
   FB:  GET /{video-id}?fields=status,permalink_url     publishing_phase.publish_status == published
+
+fix_post_dates() (`run.py post-dates`): posts whose created_at is not when they went out. Before 2026-10-23 a
+failed post that was retried later kept its first attempt's date (Carbon emissions: 19 Oct, live on 22 Oct). The
+real time is Instagram's own publish time (GET /{media-id}?fields=timestamp), else the moment the log saw the post
+go live. Only a post more than DATE_TOLERANCE_S out is listed (a normal post's upload starts ~40 s before it is
+live).
 """
 from __future__ import annotations
 
+import logging
+
 from . import config, db, meta_api
 from .config import secret
-from .publish_instagram import _check_json, base
+from .publish_instagram import _check_json, base, graph_time
+
+log = logging.getLogger(__name__)
+DATE_TOLERANCE_S = 600
 
 GONE = 100   # Graph API error code: the object does not exist (any more) or cannot be read
 RECENT = 25  # reels looked through for the one an earlier attempt published
@@ -40,7 +51,7 @@ def _instagram(post: dict, meta: dict) -> dict | None:
     for m in recent.get("data", []):
         # both are UTC: "2026-10-09T11:27:17+0000" (Instagram) and "2026-10-09T11:26:50Z" (ours)
         if (m.get("caption") or "").strip() == caption and (m.get("timestamp") or "")[:19] >= post["created_at"][:19]:
-            return {"remote_id": m["id"], "url": m.get("permalink")}
+            return {"remote_id": m["id"], "url": m.get("permalink"), "published_at": graph_time(m.get("timestamp"))}
     return {} if box else None   # published but not among the recent reels: live, link unknown
 
 
@@ -68,5 +79,41 @@ def earlier_attempt_live(run_id: str, platform: str, meta: dict) -> str | None:
     if found is None:
         return None
     db.upsert_post(run_id, platform, "live", remote_id=found.get("remote_id"), url=found.get("url"),
-                   message="published (an earlier upload had already gone live; nothing was uploaded again)")
+                   message="published (an earlier upload had already gone live; nothing was uploaded again)",
+                   published_at=found.get("published_at"))
     return "live"
+
+
+def logged_live(run_id: str, platform: str) -> str | None:
+    """When the log last saw this post go live ("instagram: live (published)")."""
+    with db.db() as c:
+        r = c.execute("SELECT ts FROM stage_log WHERE run_id=? AND message LIKE ? ORDER BY id DESC LIMIT 1",
+                      (run_id, f"{platform}: live%")).fetchone()
+    return r["ts"] if r else None
+
+
+def fix_post_dates(apply: bool = False) -> list[dict]:
+    """[{post_id, run_id, platform, recorded, actual, source}] for every live post recorded more than
+    DATE_TOLERANCE_S away from when it went out; apply=True writes the actual time into created_at."""
+    out = []
+    for p in db.get_posts():
+        if p["status"] not in ("live", "uploaded", "private_locked"):
+            continue
+        actual, source = None, None
+        if p["platform"] == "instagram" and p["remote_id"] and secret("IG_ACCESS_TOKEN") \
+                and not config.get_config()["dry_run"].get("instagram", True):
+            try:
+                actual = graph_time((_get(f"{base()}/{p['remote_id']}", "media timestamp", fields="timestamp") or {})
+                                    .get("timestamp"))
+                source = "Instagram publish time"
+            except Exception as e:  # noqa: BLE001 - the log still knows when it went live
+                log.warning("post %s: Instagram timestamp unavailable (%s); using the log", p["id"], e)
+        if not actual:
+            actual, source = logged_live(p["run_id"], p["platform"]), "when the log saw it go live"
+        if not actual or abs((db.parse_ts(actual) - db.parse_ts(p["created_at"])).total_seconds()) <= DATE_TOLERANCE_S:
+            continue
+        if apply:
+            db.set_post_created(p["id"], actual)
+        out.append({"post_id": p["id"], "run_id": p["run_id"], "platform": p["platform"], "recorded": p["created_at"],
+                    "actual": actual, "source": source})
+    return out

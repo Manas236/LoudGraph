@@ -1,6 +1,7 @@
 """Verification gate (section 14, extended in fix pass 01) for a rendered run:
 
-  * ffprobe: 1080x1920, 30 fps, 30-45 s, an audio stream
+  * ffprobe: 1080x1920, 30 fps, video.min_seconds to video.max_seconds (max_seconds_cold_open with a cold
+    open), an audio stream
   * loudness of the final MP4 via FFmpeg ebur128: -14 +-1 LUFS integrated, true peak <= -1 dBFS
   * sync: note onsets detected in audio.wav (spectral flux) vs the timeline's year onsets,
     median error must be <= 40 ms
@@ -26,7 +27,7 @@ from scipy.ndimage import maximum_filter1d, median_filter
 from scipy.stats import spearmanr
 
 from .config import country_by_iso3, get_config, run_dir
-from .timeline import Timeline
+from .timeline import Timeline, cap_for
 
 log = logging.getLogger(__name__)
 
@@ -230,7 +231,8 @@ def audio_start(video, window: float = 0.05, floor_dbfs: float = -40.0) -> dict:
 
 def opening_check(run_id: str, times=(0.0, 0.5, 1.0, 2.0), out_dir=None) -> dict:
     """The first seconds, measured on the MP4: no near-black or empty frame, the opening question on
-    screen, a line in the chart, audio from t = 0, and a length inside video.min/max_seconds."""
+    screen, a line in the chart, audio from t = 0, and a length inside video.min_seconds and the reel's cap
+    (video.max_seconds, or max_seconds_cold_open with a cold open)."""
     from PIL import Image
     d = run_dir(run_id)
     r, tl = renderer_for(run_id)
@@ -250,7 +252,7 @@ def opening_check(run_id: str, times=(0.0, 0.5, 1.0, 2.0), out_dir=None) -> dict
     checks = {"no_near_black_frame": not any(f["near_black"] for f in frames),
               "hook_in_every_frame": all(f["hook_present"] for f in frames),
               "line_in_every_frame": all(f["line_present"] for f in frames),
-              "duration_in_target": v["min_seconds"] - 0.05 <= dur <= v["max_seconds"] + 0.05,
+              "duration_in_target": v["min_seconds"] - 0.05 <= dur <= cap_for(tl) + 0.05,
               "audio_starts_at_0": audio["ok"]}
     return {"ok": all(checks.values()), "checks": checks, "frames": frames, "duration": round(dur, 3),
             "audio": audio, "question": r.opening.get("question"), "answer": r.opening.get("answer")}
@@ -358,10 +360,11 @@ def verify_run(run_id: str) -> dict:
     opening = opening_check(run_id)
     sheet = contact_sheet(run_id)
     v = cfg["video"]
+    cap = cap_for(Timeline.load(d / "timeline.json"))
     checks = {
         "resolution_1080x1920": probe["width"] == 1080 and probe["height"] == 1920,
         "fps_30": abs(probe["fps"] - 30) < 1e-6,
-        "duration_in_target": v["min_seconds"] - 0.05 <= probe["duration"] <= v["max_seconds"] + 0.05,
+        "duration_in_target": v["min_seconds"] - 0.05 <= probe["duration"] <= cap + 0.05,
         **{f"opening_{k}": ok for k, ok in opening["checks"].items() if k != "duration_in_target"},
         "audio_present": probe["audio_streams"] >= 1,
         "loudness_-14_pm1": loud["integrated_lufs"] is not None and abs(loud["integrated_lufs"] + 14) <= 1,

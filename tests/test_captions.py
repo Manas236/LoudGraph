@@ -186,7 +186,7 @@ def test_every_shipped_template_fills_into_a_valid_caption(ctx):
     for h in captions.load_formats()["hooks"]:
         c = ctx if not h.get("opener") else \
             captions.Context(TOPIC, COUNTRIES, ctx.facts, 2000, 2010,
-                             opening={"id": h["opener"], "question": "Who drops to the bottom?"})
+                             opening={"id": h["opener"], "question": "Which country sinks to last?"})
         h = c.hooks[h["id"]]   # as the video's context words it ({question} is the question on screen)
         facts = [f for f in c.facts if c.usable(h, f)]
         if not facts:
@@ -197,7 +197,7 @@ def test_every_shipped_template_fills_into_a_valid_caption(ctx):
              "fact_ids": [facts[0]["id"]]}
         assert captions.validate(v, c, set()) is None, (h["id"], hook)
         checked += 1
-    assert checked >= 23
+    assert checked >= 22
 
 
 def test_caption_formats_and_hashtag_pools_are_clean():
@@ -205,10 +205,13 @@ def test_caption_formats_and_hashtag_pools_are_clean():
     f = captions.load_formats()
     general = [h for h in f["hooks"] if not h.get("opener")]
     assert 15 <= len(general) <= 20 and len({h["id"] for h in f["hooks"]}) == len(f["hooks"])
-    # every guess-the-loser question ("Who drops to the bottom?"): its own hooks, which start with that question
-    teasers = captions.for_opener(f, "which_last", "Who drops to the bottom?")
-    assert len(teasers["hooks"]) >= 3 and teasers["questions"] and all(x.get("opener") for x in teasers["hooks"])
-    assert all(x["text"].startswith("Who drops to the bottom?") and x["fill"] == x["text"] for x in teasers["hooks"])
+    # every guess-the-loser question ("Which country loses the lead?"): its own two hooks, that question + a call
+    # to action
+    teasers = captions.for_opener(f, "which_last", "Which country loses the lead?")
+    assert teasers["questions"] and all(x.get("opener") for x in teasers["hooks"])
+    assert sorted(x["text"] for x in teasers["hooks"]) == ["Which country loses the lead? Don't scroll before the end",
+                                                           "Which country loses the lead? Guess before the end"]
+    assert all(x["fill"] == x["text"] for x in teasers["hooks"])
     for x in teasers["hooks"] + teasers["questions"]:   # they tease the answer, so they never name a country
         assert "[Country" not in x["text"] and (x.get("fill") is None or "{country" not in x["fill"])
     assert not any(h.get("opener") for h in captions.for_opener(f, "overtakes")["hooks"])

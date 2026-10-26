@@ -1,5 +1,5 @@
 {% extends 'base.html' %}{% block title %}Posting queue{% endblock %}{% block body %}
-<div class="page-intro"><p class="eyebrow">{{ rule|upper }}</p><p class="muted">Approved reels post in this order, one a day, while Bot.bat runs. Move them around, post one now, or send one back to Review.</p></div>
+<div class="page-intro"><p class="eyebrow">{{ rule|upper }}</p><p class="muted">Approved reels post in this order, in the daily slots, while Bot.bat runs. Move them around, post one now, or send one back to Review.</p></div>
 <div id="queue-list">{% include '_queue.html' %}</div>
 <dialog id="video-drawer" class="drawer" aria-label="Video details"><button class="drawer-close" aria-label="Close video details">×</button><div id="drawer-content"></div></dialog>
 {% endblock %}

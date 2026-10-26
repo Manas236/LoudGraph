@@ -394,7 +394,7 @@ def test_posting_queue_page_moves_and_unapproves_reels(client):
     from pipeline import db, posting
     first, second = waiting(db, stage="approved"), waiting(db, "homicide_rate", "approved")
     html = c.get("/queue").text
-    assert "ONE REEL A DAY AT 21:00 IST" in html and html.count('class="queue-row') == 2 and "Posts " in html
+    assert "TWO REELS A DAY, AT 14:30 AND 16:00 IST" in html and html.count('class="queue-row') == 2 and "Posts " in html
     assert html.index(f'data-drawer="{first["ref"]}"') < html.index(f'data-drawer="{second["ref"]}"')
     assert not re.search(r"r\d{8}-\d{6}-[0-9a-f]{4}|air_passengers|homicide_rate", html)
     assert post(c, web, second, "up").json["message"] == "Moved up"

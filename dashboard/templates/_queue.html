@@ -8,4 +8,4 @@
 <form action="/video/{{ video.ref }}/publish" method="post" data-async data-refresh="queue"><input type="hidden" name="csrf" value="{{ csrf }}"><button data-confirm="Post “{{ video.title }}” now? It goes out at once instead of waiting for its slot.">{{ icon('post') }}<span>Post now</span></button></form>
 <form action="/video/{{ video.ref }}/unapprove" method="post" data-async data-refresh="queue"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="text-button" title="Back to Review">{{ icon('undo') }}<span>Unapprove</span></button></form>
 </div>{% endif %}</li>{% endfor %}</ol>
-{% else %}<div class="library-empty"><h2>Nothing waiting to post.</h2><p class="muted">Approve a reel in Review and it lines up here, one a day.</p><a href="/">Go to Review →</a></div>{% endif %}
+{% else %}<div class="library-empty"><h2>Nothing waiting to post.</h2><p class="muted">Approve a reel in Review and it lines up here for the next free slot.</p><a href="/">Go to Review →</a></div>{% endif %}

@@ -1,6 +1,6 @@
 # Graphony
 
-Graphony is a data-sonification Shorts/Reels pipeline. It turns real public statistics (World Bank WDI, Our World in Data) into 20–25 s vertical videos:
+Graphony is a data-sonification Shorts/Reels pipeline. It turns real public statistics (World Bank WDI, Our World in Data) into 20–23.3 s vertical videos (25 s with a cold open):
 each country's line chart is drawn while its data plays as music (one plucked note per year,
 pitch follows the value). A human approves each video on Telegram or the local dashboard, then it
 is posted to Instagram Reels and Facebook Page Reels (YouTube Shorts is supported and currently
@@ -42,10 +42,11 @@ Fonts (Inter, OFL) and flags (flag-icons, MIT) are vendored in `assets/`.
 | `python run.py bot` | long-running: the Telegram home card and review card, the make queue (one reel at a time), scheduled videos, publishes approved runs |
 | `python run.py batch [--count N] [--queue-only]` | the Telegram Make a batch from the command line: queue N distinct topics, then make the queue here one at a time (the bot does it itself when it is running) |
 | `python run.py go-live [--check-only]` | read-only Instagram + Facebook checks; for those that pass, turn posting on and test mode off (old test-mode approvals go back to review first) |
-| `python run.py publish [--run ID]` | publish approved runs now, outside the posting queue (the bot's queue posts one a day by itself) |
+| `python run.py publish [--run ID]` | publish approved runs now, outside the posting queue (the bot's queue posts in the daily slots by itself) |
 | `python run.py stats [--no-summary]` | pull Instagram + Facebook insights for every posted reel now, recompute topic and hook weights, send the summary (the bot also does this when it starts and every 6 h; two pulls never overlap) |
 | `python run.py hooks` | fill in and list each reel's hook template (`which_last`, `who_overtakes`, `other`, from the question its video shows) and its `hook_phrase`, with the hook weights |
-| `python run.py coldopen [--baseline] [--apply-queue]` | the cold open A/B: settings, the alternation, the baseline (the last 6 reels posted without one; `--baseline` saves it the first time) and the average views, reach, watch time and skip rate with vs without; `--apply-queue` gives the unposted reels one, only when `cold_open.apply_to_existing_queue` is true |
+| `python run.py coldopen [--baseline] [--apply-queue] [--v1]` | the cold open A/B: settings, the alternation and, within the current `video.format_version` only, per side the number of reels, skip %, watch %, median views and how many posted at each slot; `--v1` shows the format 1 comparison and its baseline (the last 6 reels posted without one; `--baseline` saves it the first time, then refreshes it) instead, never mixed in; `--apply-queue` gives the unposted reels one, only when `cold_open.apply_to_existing_queue` is true |
+| `python run.py post-dates [--apply]` | posts recorded with the wrong date (a failed post retried later kept its first attempt's date): Instagram's publish time, else when the log saw it go live; `--apply` corrects them |
 | `python run.py rebrand [--run ID ...] [--dry-run] [--no-send]` | re-render reels that are made but not posted with the configured opening question (`opening.hook_template`, the which_last wording rotating from reel to reel): same data, countries and audio track (copied from the old file), old files kept as `*_oldhook.*`, approved ones back to review keeping their posting-queue place |
 | `python run.py dashboard` | local web UI on http://127.0.0.1:5055 (Review, Posting queue, Library, Settings) |
 | `python run.py verify [--run ID ...]` | ffprobe, loudness, A/V sync, stem balance, pitch-vs-data, pixel centring, contact sheet |
@@ -94,7 +95,7 @@ plain words:
 ⏳ Waiting to make: 2 (Inflation, Home broadband)
 📦 Batch: 3 of 7 ready
 👀 Ready for your review: 3
-📅 Approved, waiting to post: 2, next post Thu 15 Oct, 21:00 IST
+📅 Approved, waiting to post: 2, next post Thu 15 Oct, 14:30 IST
 📣 Last posted: Meat consumption, yesterday 16:49 IST, 210 views
 ```
 
@@ -120,14 +121,20 @@ The steps are 1 getting data, 2 rendering, 3 writing captions, 4 ready. Its butt
   After each decision the same card moves to the next ready reel; after the last one it closes.
   Skipped reels stay in Ready for review. A decision made in the dashboard moves the card on too, and
   a reel is never posted twice. No internal id is ever shown.
-- **Posting queue**: approved reels post **one a day** at `posting.time` (21:00 IST by default: a
-  starting guess for an international audience, to be moved once the stats show when viewers are on).
-  The screen lists each reel with its date and **Move N up**, **Move N down**, **Post N now** (asks
-  first) and **Unapprove N** (back to Ready for review). The bot runs this itself, not the OS scheduler,
-  so it keeps working on a server. If the bot was off at posting time, the reel that was due posts
-  **once** when it comes back: several missed days never become several posts, and a slot that would
-  come less than `posting.min_gap_hours` (12) after the last post is skipped. Each day's slot is
-  claimed in the database before posting, so a restart or a second bot never posts twice.
+- **Posting queue**: approved reels post in **two daily slots**, `posting.time` = 14:30 and 16:00 IST
+  (`posting.timezone`, whatever time zone the PC clock uses; every breakout so far went out between
+  14:26 and 16:28 on a two-post day). The screen lists each reel with its date and **Move N up**,
+  **Move N down**, **Post N now** (asks first) and **Unapprove N** (back to Ready for review). The bot
+  runs this itself, not the OS scheduler, so it keeps working on a server. With the cold-open A/B on,
+  the reel with a cold open and the one without **swap slots every day** (`posting.ab_first_day`: that
+  day the one with a cold open takes 14:30; the next day 16:00; and so on); when the queue has none on a
+  slot's side, the next reel in queue order posts and the reel's log says so. A missed slot (PC asleep,
+  bot stopped) still posts late while it is open: until the next slot starts, or 18:00
+  (`posting.late_until`) for the last one; after that its reel rolls to the next slot on its side, and
+  missed slots are never caught up with extra posts. A post waits until `posting.min_gap_hours` (1)
+  after the last one (Post now, a late post). Each slot is claimed in the database before posting, so a
+  restart or a second bot never posts twice; the slot is stored on the post (`posts.slot`). A publish
+  that fails keeps its slot: the reel waits for Retry.
 - **After posting**: the home card updates and one short message carries the post link.
 - **Errors** show on the home card in plain words, e.g. "⚠️ Rendering failed for Coal power: the
   internet connection was interrupted.", with **Retry** and **Drop it**; never a stack trace. A post
@@ -195,8 +202,8 @@ fresh home card. The moon/sun button in the top bar switches between the light t
 black dark theme; the choice is remembered in a cookie. Below 1100 px the sidebar opens from the menu
 button.
 
-- **Review** (`/`): one large, playable video, with **Approve** (adds it to the posting queue: one
-  reel a day at `posting.time`), **Send to Telegram for
+- **Review** (`/`): one large, playable video, with **Approve** (adds it to the posting queue: the
+  daily slots of `posting.time`), **Send to Telegram for
   approval** (shown when Telegram is connected: nothing is posted, the bot puts this video on its
   review card and you approve it there), **Remake** and **Reject**.
   Use A / T / M / X, or left/right arrows to move through the thumbnail queue. Click the hook title
@@ -224,23 +231,27 @@ videos. Production tries up to five topics per requested video before asking you
 The migration retains old picker-failed runs and logs, but removes them from failure lists.
 
 **Making times** (`cadence.posting_times`, in `cadence.timezone`) are when the bot makes the daily
-videos; they only post after your approval, one a day at `posting.time` (see Posting queue above).
+videos; they only post after your approval, in the daily slots of `posting.time` (see Posting queue above).
 Keep **Bot.bat** running. A schedule is optional. Use either these times or a Task Scheduler produce task, to avoid
 two batches. Settings changes are picked up by running processes without restarting them.
 
 - **Scorer** (`score.py`): rejects short, gappy, interpolated/flat, low-swing and negligible series;
   scores swing, zigzag reversals, biggest single-year shock and smoothness (weights in `config.yaml`).
   A series with 6+ reversals is noise: its shock points are scaled by 0.3.
-- **Length** (`video.min_seconds` / `max_seconds`, 20–25 s, end card included): fewer countries,
-  not faster ones. Each country still plays at about 0.1 s per year (4.2 s with its hold), so every
-  line stays readable; a video holds at most `picker.max_countries` (5) and at least
-  `picker.min_countries` (4).
+- **Length** (`video.min_seconds` / `max_seconds`, 20–23.3 s, end card included; a reel with a cold open
+  is 1.7 s longer, at most `video.max_seconds_cold_open`, 25 s): a race that would run longer is fitted
+  (`timing.fit`), only as far as needed: dead time first (each line's end hold and the cross-fade, down
+  to 0.2 s), then less slow motion on events (down to 1.5x), then a slightly faster line (down to 90% of
+  its time). Data years are never cut. Still too long, the least interesting country is dropped; at
+  `picker.min_countries` (4) the topic is skipped with the reason in its log. A video holds at most
+  `picker.max_countries` (5) countries. Every new reel is stamped `video.format_version` (2: two slots,
+  "Which country...?" hooks, <= 23.3 s) on its meta.json, run and posts.
 - **Picker**: up to 5 countries, maximises shape diversity, wants one rising, one falling
   and one multi-reversal series, plays the highest score last, never repeats a (topic, country set),
   and opens on a country with data from the first year (its line moves from frame 0).
   A set with no falling country or a minimum pairwise shape distance below 0.25 is skipped as
   **low variety** (the topic goes on cooldown and the selector picks another). If slow-mo events push
-  the video past 25 s, the least interesting country is dropped.
+  the video past `video.max_seconds` even after the fit, the least interesting country is dropped.
 - **Timeline** (`timeline.py`) is the single source of timing. There is no intro: the first country's
   line and its first note start at t = 0. A year whose move is at least 25% of the country's range is
   an **event**: the step into it lasts 3x longer, for both the video and the audio.
@@ -256,8 +267,10 @@ two batches. Settings changes are picked up by running processes without restart
   shrinking into the header that stays to the end. The metric with its unit sits under it in readable
   type, and the first chart is already drawing. With `opening.hook_template: which_last` (the default,
   the style of the 2,000-view breakout reel) every reel asks a guess-the-loser question, worded per reel
-  from `opening.phrasings` in `config.yaml` (10 wordings: "Which country ends up last?", "Which country
-  falls the most?", "Who drops to the bottom?", "Which country loses the lead?", ...). Each wording has a
+  from `opening.phrasings` in `config.yaml` (5 wordings, all "Which country...?" since 2026-10-23: "Which
+  country ends up last?", "Which country falls the most?", "Which country loses the lead?", "Which
+  country finishes last?", "Which country sinks to last?"; the retired "Who...?" ones still count as
+  which_last on older reels). Each wording has a
   truth check computed from the rendered series (`hooks.truths`: ends_last, falls_most, drops_to_last,
   loses_lead, overtaken_most, loses_ground), comparing values as shown on screen (a tie is no answer),
   and is used only when it is true and is drawn exactly like the first wording (same size and lines, so
@@ -268,8 +281,9 @@ two batches. Settings changes are picked up by running processes without restart
   true wordings were just used, "Which country ends up last?" is the fallback. When none is true (and
   for `opening.hook_explore_pct` % of reels, 0 by default), the old choice among the other openers in
   `caption_formats.json`; the run's log says why. Its captions use only the which_last hooks and
-  questions in `caption_formats.json`: line 1 starts with the very question on screen, and none names
-  the answer.
+  questions in `caption_formats.json`: line 1 is the very question on screen + "Guess before the end"
+  or "Don't scroll before the end" (option 1 alternates between the two from one reel to the next), and
+  none names the answer.
 - **Hook template** (`pipeline/hooks.py`): each run and post records which question its video opens
   with (`which_last`, `who_overtakes`, `other`), apart from the topic, so the stats can compare hooks;
   every which_last wording counts toward the one `which_last` weight, and `hook_phrase` keeps the exact
@@ -284,8 +298,9 @@ two batches. Settings changes are picked up by running processes without restart
   that lets the clip end before its line starts its final year step, so no final value and nothing of
   the final ranking is ever in it; no such beat, no cold open (the run's log says why). The cold open
   is added before the race, which stays exactly as it is without one (every frame and note 1.7 s
-  later), so the reel is 1.7 s longer; one that would pass 25 s is made without a cold open ("skipped:
-  would exceed 25s"). The cover moves by the same 1.7 s, to the same moment of the race. The opening
+  later), so the reel is 1.7 s longer: the race is fitted to 23.3 s, so it lands at <= 25 s; one that
+  would still pass `video.max_seconds_cold_open` is made without a cold open ("skipped: would exceed
+  25s", a safety net). The cover moves by the same 1.7 s, to the same moment of the race. The opening
   question keeps its timing from frame 0; the music and the look are unchanged. Runs and posts record
   `cold_open` and `cold_open_beat` like the hook; the Review page, the Library and the Telegram review
   card show it. Reels already made are left as they are unless `apply_to_existing_queue` is true.
@@ -381,7 +396,7 @@ account tests, insights) is sent from `pipeline/meta_api.py`. Before a request g
 when the previous one was sent and waits until that is at least `meta_api.min_gap_seconds` old
 (3 by default; 0 turns it off). The time of the last request is kept in the database, so the gap
 holds across everything running at once: two videos posting, the bot and the dashboard. It spaces
-requests, not posts; posts are spaced by the posting queue (one a day).
+requests, not posts; posts are spaced by the posting queue (two slots a day).
 
 ## Scheduling
 
@@ -460,9 +475,11 @@ each decision (skip, reject, approve, dashboard decisions, Send to Telegram), ca
 caption by reply, the one message after posting, stale buttons, chat filtering, edit throttling and
 429, the test-mode reset before going live, the Facebook permission check, and YouTube off skipping
 its upload; caption editing (em dash blocked, Instagram's length and hashtag limits, a warning for a
-number not in the facts, the credit always added); the posting queue (approving posts nothing, one
-reel a day at `posting.time`, a missed slot posted once and never several, the gap after a late post or
-Post now, no double posts across restarts or two bots, Move / Unapprove / Post now, the dates shown);
+number not in the facts, the credit always added); the posting queue (approving posts nothing, two
+slots a day at `posting.time` in IST, the cold-open A/B swapping slots daily and the fallback when one
+side is missing, a missed slot posted late only while it is open and never caught up, the gap after a
+late post or Post now, no double posts across restarts or two bots, the slot kept on the post, Move /
+Unapprove / Post now, the dates shown); a retried post getting its real publish date;
 a publisher that
 died mid-post being settled as failed, with a retry that never uploads a reel that already went live;
 and the Meta request limit (the gap between requests, shared through the database, and that no

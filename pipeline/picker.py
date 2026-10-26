@@ -132,7 +132,8 @@ def pick(scored: list[dict], series: dict, topic: dict, exclude_sets: set[str] |
         raise LowVariety(f"low variety: {variety_problem}")
     ordered = sorted(sel, key=lambda iso: by[iso]["score"])  # lowest drama first, best LAST
 
-    # Slow-mo events lengthen the video: drop the least interesting country until it fits.
+    # Slow-mo events lengthen the video: the timeline is fitted first (timing.fit: dead time, then slow-mo, then
+    # line speed; data years are never cut), then the least interesting country is dropped until it fits.
     dropped = []
     vmax = cfg["video"]["max_seconds"]
     while True:
@@ -141,7 +142,10 @@ def pick(scored: list[dict], series: dict, topic: dict, exclude_sets: set[str] |
         if tl.duration <= vmax + 1e-6:
             break
         if len(ordered) <= pc["min_countries"]:
-            raise NotEnoughData(f"video {tl.duration:.1f}s > {vmax}s even with {len(ordered)} countries")
+            how = (f" at the shortest timing (hold {tl.fit['hold']} s, slow-mo {tl.fit['event_slowmo']}x, line "
+                   f"{tl.fit['draw_share']:.0%} of its time)" if tl.fit else "")
+            raise NotEnoughData(f"video {tl.duration:.1f}s > {vmax}s even with {len(ordered)} countries{how}, "
+                                f"without cutting data years")
         removable = [c for c in ordered
                      if _variety_problem([x for x in ordered if x != c], by, curves, pc) is None] or ordered
         drop = min(removable, key=lambda c: by[c]["score"])

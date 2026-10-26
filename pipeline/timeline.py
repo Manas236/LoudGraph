@@ -22,6 +22,14 @@ rewind cut, before the intro. The race keeps every time it has without one, shif
 the cut, so the video is that much longer:
 
     | cold open | snap | intro | country 1 | ... | end card |
+
+Length fit (timing.fit). A race longer than video.max_seconds is shortened, only as far as needed, in this
+order: dead time first (each line's end hold and the cross-fade between countries, down to hold_min and
+transition_min), then less slow motion on events (down to event_slowmo_min), then a faster line (each
+country's draw time down to draw_min of the default). Data years are never cut. The fit is worked out on
+the race alone, so a reel with a cold open has exactly the race of the one without, cold_open + snap later
+(<= video.max_seconds_cold_open). When even the shortest timing is too long, build() returns that and the
+picker drops a country (picker.py).
 """
 from __future__ import annotations
 
@@ -105,6 +113,7 @@ class Timeline:
     cold_open: float = 0.0          # seconds of the cold open clip at the start (0 = none) ...
     snap: float = 0.0               # ... then the rewind cut back to the start of the race ...
     cold_open_from: float = 0.0     # ... and the race time the clip's first frame shows
+    fit: dict | None = None         # how the race was shortened to fit video.max_seconds (None: not needed)
 
     @property
     def lead(self) -> float:
@@ -171,11 +180,15 @@ def total_seconds(n: int, cfg: dict | None = None) -> float:
 
 
 def country_count_bounds(cfg: dict | None = None) -> tuple[int, int]:
-    """(n_min, n_max) countries that fill min_seconds..max_seconds at the default per-country time."""
+    """(n_min, n_max) countries that fill min_seconds..max_seconds: n_min at the default per-country time, n_max
+    with the dead time trimmed as far as timing.fit allows (slow-mo aside)."""
     t, v = _timing(cfg)
     fixed = t["intro"] + t["end_card"]
+    f = t.get("fit") or {}
+    trimmed = (t["hold"] - min(t["hold"], f.get("hold_min", t["hold"]))
+               + t["transition"] - min(t["transition"], f.get("transition_min", t["transition"])))
     n_min = math.ceil((v["min_seconds"] - fixed) / t["per_country"] - 1e-9)
-    n_max = math.floor((v["max_seconds"] - fixed) / t["per_country"] + 1e-9)
+    n_max = math.floor((v["max_seconds"] - fixed) / (t["per_country"] - trimmed) + 1e-9)
     return n_min, n_max
 
 
@@ -200,15 +213,60 @@ def build(countries: list[tuple], x_start: int, x_end: int, cfg: dict | None = N
     Values enable event slow-mo; without them every step has normal length.
     cold_open, snap: seconds of a cold open clip and of the rewind cut after it (coldopen.py), added before the race.
     The race is not touched: every slot, knot and note keeps its length and comes `cold_open + snap` later, so the
-    video is that much longer. The clip's place in the race (cold_open_from) is set once its beat is chosen."""
+    video is that much longer. The clip's place in the race (cold_open_from) is set once its beat is chosen.
+    A race longer than video.max_seconds is fitted (timing.fit, see the module doc)."""
     cfg = cfg or get_config()
     t, v = _timing(cfg)
     if x_end <= x_start:
         raise ValueError("x_end must be after x_start")
+    base = {"per": per_country_seconds(len(countries), cfg), "transition": t["transition"], "hold": t["hold"],
+            "slow": t.get("event_slowmo", 3.0)}
+    tl = _build(countries, x_start, x_end, cfg, base, cold_open, snap)
+    fit, cap = t.get("fit"), float(v["max_seconds"])
+    limit = cap - 1e-6   # a hair under the cap, so the frame count (n_frames rounds up) never passes it
+    if not fit or _race(tl) <= limit:
+        return tl
+    best, lo, hi = _build(countries, x_start, x_end, cfg, _squeeze(base, fit, 3.0), cold_open, snap), 0.0, 3.0
+    if _race(best) <= limit:
+        for _ in range(40):   # the least squeeze that fits (the race only gets shorter as the squeeze grows)
+            mid = (lo + hi) / 2
+            trial = _build(countries, x_start, x_end, cfg, _squeeze(base, fit, mid), cold_open, snap)
+            if _race(trial) <= limit:
+                best, hi = trial, mid
+            else:
+                lo = mid
+    p = _squeeze(base, fit, hi)
+    best.fit = {"max_seconds": cap, "before": round(_race(tl), 3), "after": round(_race(best), 3),
+                "fits": _race(best) <= limit, "hold": round(p["hold"], 3), "transition": round(p["transition"], 3),
+                "event_slowmo": round(p["slow"], 3), "draw_share": round(p["draw_share"], 3)}
+    return best
+
+
+def _race(tl: Timeline) -> float:
+    return tl.duration - tl.lead
+
+
+def _squeeze(base: dict, fit: dict, amount: float) -> dict:
+    """The timing `amount` (0-3) of the way to timing.fit's floors: 0-1 the dead time (hold and transition; the slot
+    shrinks by what they lose, so the line draws as before), 1-2 the slow-mo factor, 2-3 the draw time."""
+    a, b, c = (min(max(amount - k, 0.0), 1.0) for k in (0, 1, 2))
+    floor = {k: min(base[k], float(fit.get(name, base[k])))
+             for k, name in (("hold", "hold_min"), ("transition", "transition_min"), ("slow", "event_slowmo_min"))}
+    hold = base["hold"] - (base["hold"] - floor["hold"]) * a
+    trans = base["transition"] - (base["transition"] - floor["transition"]) * a
+    slow = base["slow"] - (base["slow"] - floor["slow"]) * b
+    share = 1.0 - (1.0 - min(1.0, float(fit.get("draw_min", 1.0)))) * c
+    per = base["per"] - (base["hold"] - hold) - (base["transition"] - trans)
+    per -= (per - trans - hold) * (1.0 - share)
+    return {"per": per, "transition": trans, "hold": hold, "slow": slow, "draw_share": share}
+
+
+def _build(countries: list[tuple], x_start: int, x_end: int, cfg: dict, p: dict, cold_open: float,
+           snap: float) -> Timeline:
+    """The timeline with the timing p ({"per", "transition", "hold", "slow"})."""
+    t, v = _timing(cfg)
     thr = t.get("event_threshold", 0.25)
-    slow = t.get("event_slowmo", 3.0)
-    n = len(countries)
-    per = per_country_seconds(n, cfg)
+    slow, per, trans_s, hold_s = p["slow"], p["per"], p["transition"], p["hold"]
     n_steps = x_end - x_start
     prepared = []
     for c in countries:
@@ -220,19 +278,19 @@ def build(countries: list[tuple], x_start: int, x_end: int, cfg: dict | None = N
         events = find_events(ys, vs, thr)
         slow_years = {y for e in events for y in range(e["prev_year"] + 1, e["year"] + 1)}
         prepared.append((iso3, ys, events, slow_years))
-    d = (per - t["transition"] - t["hold"]) / n_steps
+    d = (per - trans_s - hold_s) / n_steps
     slots = []
     cursor = t["intro"] + cold_open + snap
     for i, (iso3, ys, events, slow_years) in enumerate(prepared):
         start = cursor
-        trans = t["transition"] if i else 0.0      # nothing to cross-fade from before the first country
-        step = d if i else (per - t["hold"]) / n_steps
+        trans = trans_s if i else 0.0      # nothing to cross-fade from before the first country
+        step = d if i else (per - hold_s) / n_steps
         trans_end = start + trans
         knots = [trans_end]
         for y in range(x_start + 1, x_end + 1):
             knots.append(knots[-1] + step * (slow if y in slow_years else 1.0))
         draw_end = knots[-1]
-        end = draw_end + t["hold"]
+        end = draw_end + hold_s
         s = Slot(index=i, iso3=iso3, start=round(start, 6), end=round(end, 6), trans_end=round(trans_end, 6),
                  draw_start=round(trans_end, 6), draw_end=round(draw_end, 6), x_start=x_start, x_end=x_end,
                  years=ys, knots=[round(k, 6) for k in knots])
@@ -246,13 +304,21 @@ def build(countries: list[tuple], x_start: int, x_end: int, cfg: dict | None = N
     end_start = cursor
     duration = end_start + t["end_card"]
     fps = v["fps"]
-    return Timeline(fps=fps, intro=t["intro"], per_country=per, transition=t["transition"], hold=t["hold"],
+    return Timeline(fps=fps, intro=t["intro"], per_country=per, transition=trans_s, hold=hold_s,
                     end_card=t["end_card"], slots=slots, end_start=round(end_start, 6),
                     duration=round(duration, 6), n_frames=int(math.ceil(duration * fps - 1e-9)),
                     event_threshold=thr, event_slowmo=slow, hook_hold=t.get("hook_hold", 0.0),
                     hook_shrink=t.get("hook_shrink", 0.45), cold_open=round(cold_open, 6), snap=round(snap, 6))
 
 
+def cap_for(tl: Timeline, cfg: dict | None = None) -> float:
+    """The longest this reel may be: video.max_seconds, or video.max_seconds_cold_open with a cold open."""
+    _, v = _timing(cfg)
+    if tl.lead > 0:
+        return float(v.get("max_seconds_cold_open", v["max_seconds"] + tl.lead))
+    return float(v["max_seconds"])
+
+
 def fits(tl: Timeline, cfg: dict | None = None) -> bool:
     _, v = _timing(cfg)
-    return v["min_seconds"] - 1e-6 <= tl.duration <= v["max_seconds"] + 1e-6
+    return v["min_seconds"] - 1e-6 <= tl.duration <= cap_for(tl, cfg) + 1e-6

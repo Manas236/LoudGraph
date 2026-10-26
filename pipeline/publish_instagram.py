@@ -42,6 +42,14 @@ def _ic() -> dict:
     return get_config()["instagram"]
 
 
+def graph_time(ts: str | None) -> str | None:
+    """A Graph API time ("2026-10-22T09:43:52+0000") as the database writes times ("2026-10-22T09:43:52Z")."""
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S%z").astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+
+
 def base(section: str = "instagram") -> str:
     c = get_config()[section]
     return f"{c['graph_base']}/{c['api_version']}"
@@ -246,13 +254,15 @@ def publish(run_id: str, meta: dict, video: Path) -> str:
     pub = _check_json(meta_api.post(f"{base()}/{ig}/media_publish", data={"creation_id": cid, "access_token": tok},
                                     timeout=60), "media_publish")
     mid = pub["id"]
-    link = None
+    link, when = None, db.now()
     try:
-        link = meta_api.get(f"{base()}/{mid}", params={"fields": "permalink", "access_token": tok},
-                            timeout=30).json().get("permalink")
+        m = meta_api.get(f"{base()}/{mid}", params={"fields": "permalink,timestamp", "access_token": tok},
+                         timeout=30).json()
+        link, when = m.get("permalink"), graph_time(m.get("timestamp")) or when
     except Exception:  # noqa: BLE001 - the post is live either way
         pass
-    db.upsert_post(run_id, "instagram", "live", remote_id=mid, url=link, message="published")
+    # the post's date is Instagram's own publish time (a retried post must not keep its failed attempt's date)
+    db.upsert_post(run_id, "instagram", "live", remote_id=mid, url=link, message="published", published_at=when)
     return "live"
 
 
@@ -297,6 +307,7 @@ def publish_facebook(run_id: str, meta: dict, video: Path) -> str:
                                           "description": desc, "access_token": tok}, timeout=60), "FB reels finish")
     if not fin.get("success", True):
         raise RuntimeError(f"FB reels finish: {fin}")
+    published = db.now()   # finish with video_state=PUBLISHED is the moment it goes out
     db.upsert_post(run_id, "facebook", "uploading", remote_id=vid, message="published, Facebook is processing")
     # finish with video_state=PUBLISHED publishes it; follow processing so an error is reported, not hidden
     deadline = time.time() + fc.get("poll_max_minutes", 5) * 60
@@ -318,5 +329,5 @@ def publish_facebook(run_id: str, meta: dict, video: Path) -> str:
         time.sleep(fc.get("poll_seconds", 10))
     url = ("https://www.facebook.com" + link if link and link.startswith("/") else link) or \
         f"https://www.facebook.com/reel/{vid}"
-    db.upsert_post(run_id, "facebook", "live", remote_id=vid, url=url, message=note)
+    db.upsert_post(run_id, "facebook", "live", remote_id=vid, url=url, message=note, published_at=published)
     return "live"

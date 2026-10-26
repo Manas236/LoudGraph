@@ -190,7 +190,11 @@ MIGRATIONS = [("runs", "progress", "REAL"), ("runs", "progress_at", "TEXT"),
               ("runs", "cold_open", "INTEGER"), ("posts", "cold_open", "INTEGER"),
               ("runs", "cold_open_beat", "TEXT"), ("posts", "cold_open_beat", "TEXT"),
               # retention: total watch time (s) and Instagram's reels_skip_rate (% of views skipped in the first 3 s)
-              ("stats", "total_watch_s", "REAL"), ("stats", "skip_rate", "REAL")]
+              ("stats", "total_watch_s", "REAL"), ("stats", "skip_rate", "REAL"),
+              # the posting slot (posting.py, "14:30"): set on the run when the queue starts it, copied onto its posts
+              ("runs", "post_slot", "TEXT"), ("posts", "slot", "TEXT"),
+              # the experiment marker (video.format_version) a reel was rendered with; None = made before it existed
+              ("runs", "format_version", "INTEGER"), ("posts", "format_version", "INTEGER")]
 _ready: set[str] = set()
 
 
@@ -434,32 +438,48 @@ def used_country_sets(topic_id: str, except_run: str | None = None) -> set[str]:
 # ---------------------------------------------------------------- posts
 
 def upsert_post(run_id: str, platform: str, status: str, remote_id: str | None = None,
-                url: str | None = None, message: str | None = None) -> None:
+                url: str | None = None, message: str | None = None, published_at: str | None = None) -> None:
+    """Record a post's state. created_at is when the post went out: the start of the upload, set again when a
+    failed (or test-mode) post is tried anew, and replaced by published_at (the service's own publish time, or
+    when it went live) once that is known. The run's hook, cold open, format and posting slot are copied on."""
     if status not in POST_STATUSES:
         raise ValueError(f"bad post status {status}")
     ts = now()
     with db() as c:
         c.execute(
             """INSERT INTO posts(run_id, platform, status, remote_id, url, message, created_at, updated_at, hook_template,
-                                 hook_phrase, cold_open, cold_open_beat)
+                                 hook_phrase, cold_open, cold_open_beat, format_version, slot)
                VALUES (?,?,?,?,?,?,?,?,(SELECT hook_template FROM runs WHERE id=?),(SELECT hook_phrase FROM runs WHERE id=?),
-                       (SELECT cold_open FROM runs WHERE id=?),(SELECT cold_open_beat FROM runs WHERE id=?))
+                       (SELECT cold_open FROM runs WHERE id=?),(SELECT cold_open_beat FROM runs WHERE id=?),
+                       (SELECT format_version FROM runs WHERE id=?),(SELECT post_slot FROM runs WHERE id=?))
                ON CONFLICT(run_id, platform) DO UPDATE SET
                  status=excluded.status,
                  remote_id=COALESCE(excluded.remote_id, posts.remote_id),
                  url=COALESCE(excluded.url, posts.url),
                  message=excluded.message,
                  updated_at=excluded.updated_at,
+                 created_at=CASE WHEN ? IS NOT NULL OR (posts.status IN ('failed', 'dry_run')
+                                      AND excluded.status NOT IN ('failed', 'dry_run'))
+                                 THEN excluded.created_at ELSE posts.created_at END,
+                 slot=CASE WHEN posts.status IN ('failed', 'dry_run') AND excluded.status NOT IN ('failed', 'dry_run')
+                           THEN excluded.slot ELSE COALESCE(posts.slot, excluded.slot) END,
                  hook_template=COALESCE(posts.hook_template, excluded.hook_template),
                  hook_phrase=COALESCE(posts.hook_phrase, excluded.hook_phrase),
                  cold_open=COALESCE(posts.cold_open, excluded.cold_open),
-                 cold_open_beat=COALESCE(posts.cold_open_beat, excluded.cold_open_beat)""",
-            (run_id, platform, status, remote_id, url, message, ts, ts, run_id, run_id, run_id, run_id),
+                 cold_open_beat=COALESCE(posts.cold_open_beat, excluded.cold_open_beat),
+                 format_version=COALESCE(posts.format_version, excluded.format_version)""",
+            (run_id, platform, status, remote_id, url, message, published_at or ts, ts, *[run_id] * 6, published_at),
         )
         c.execute(
             "INSERT INTO stage_log(run_id, stage, message, ts) VALUES (?,?,?,?)",
             (run_id, "publishing", f"{platform}: {status}" + (f" ({message})" if message else ""), ts),
         )
+
+
+def set_post_created(post_id: int, created_at: str) -> None:
+    """Correct when a post went out (posted.fix_post_dates)."""
+    with db() as c:
+        c.execute("UPDATE posts SET created_at=? WHERE id=?", (created_at, post_id))
 
 
 def already_posted(run_id: str, platform: str, dry_run: bool) -> str | None:
@@ -530,7 +550,8 @@ def latest_stats() -> list[dict]:
                       s.reach, s.likes, s.comments, s.shares, s.saved, s.avg_watch_s, s.fetched_at,
                       COALESCE(s.total_watch_s, COALESCE({_RAW.format('ig_reels_video_view_total_time')},
                                                          {_RAW.format('post_video_view_time')}) / 1000.0) total_watch_s,
-                      COALESCE(s.skip_rate, {_RAW.format('reels_skip_rate')}) skip_rate
+                      COALESCE(s.skip_rate, {_RAW.format('reels_skip_rate')}) skip_rate,
+                      COALESCE(p.format_version, r.format_version) format_version, p.slot
                FROM posts p JOIN runs r ON r.id = p.run_id
                LEFT JOIN stats s ON s.id = (SELECT MAX(id) FROM stats WHERE post_id = p.id)
                ORDER BY p.created_at DESC"""
@@ -552,6 +573,19 @@ def set_cold_open(run_id: str, on: bool, beat: str | None) -> None:
     with db() as c:
         c.execute("UPDATE runs SET cold_open=?, cold_open_beat=? WHERE id=?", (int(on), beat, run_id))
         c.execute("UPDATE posts SET cold_open=?, cold_open_beat=? WHERE run_id=?", (int(on), beat, run_id))
+
+
+def set_post_slot(run_id: str, slot: str | None) -> None:
+    """The posting slot ("14:30") the queue started this run in; None for Post now and retries (posting.start)."""
+    with db() as c:
+        c.execute("UPDATE runs SET post_slot=? WHERE id=?", (slot, run_id))
+
+
+def set_format_version(run_id: str, version: int) -> None:
+    """The experiment marker (video.format_version) the run's video was rendered with, on the run and its posts."""
+    with db() as c:
+        c.execute("UPDATE runs SET format_version=? WHERE id=?", (version, run_id))
+        c.execute("UPDATE posts SET format_version=? WHERE run_id=?", (version, run_id))
 
 
 def set_topic_weight(topic_id: str, weight: float | None, n_posts: int, mean_log_views: float | None,

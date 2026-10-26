@@ -31,7 +31,7 @@ def spawn(*args: str) -> int:
 
 
 def approve(run_id: str, by: str, publish_now: bool = False, platforms: list[str] | None = None) -> str:
-    """Approve a reel: it joins the back of the posting queue (posting.py posts one a day), or takes back
+    """Approve a reel: it joins the back of the posting queue (posting.py's daily slots), or takes back
     the place it had before it was sent back for a fresh approval (review.back_to_review keep_place).
     publish_now=True posts it at once instead (Post now)."""
     from .accounts import enabled_platforms
@@ -162,6 +162,7 @@ def retry(run_id: str, from_step: str, by: str) -> str:
         if run["stage"] != "failed" or run["failed_stage"] != "publish":
             raise ValueError("retry from publish is only for a run whose publish failed")
         db.transition(run_id, "approved", f"retry publish requested via {by}", reset=True)
+        db.set_post_slot(run_id, None)   # a retry is not a queue slot
         spawn("publish", "--run", run_id)
         return "publishing again"
     why = rerun_blocker(run_id)
@@ -276,6 +277,7 @@ def retry_platform(run_id: str, platform: str, by: str) -> str:
     if platform not in ready_destinations(run):
         raise ValueError("Connect and enable this account in Settings first.")
     db.transition(run_id, "approved", f"retry {platform} via {by}", reset=True)
+    db.set_post_slot(run_id, None)   # a retry is not a queue slot
     spawn("publish", "--run", run_id, "--platform", platform)
     return "Trying the upload again"
 

@@ -18,7 +18,9 @@
   "uses ONLY those (they tease the answer the end card reveals, so they never name it), and no other video",
   "uses them. config.yaml opening.hook_template picks the opener every new video starts with.",
   "'which_last' is every guess-the-loser question (config.yaml opening.phrasings, worded per video): in its",
-  "hooks {question} is the exact question the video shows, so the caption's line 1 always matches the screen."
+  "hooks {question} is the exact question the video shows, so the caption's line 1 always matches the screen.",
+  "A which_last caption's line 1 is that question + 'Guess before the end' or 'Don't scroll before the end'",
+  "(the two which_last hooks); consecutive reels alternate between them (captions.generate_for_run)."
  ],
  "hooks": [
   {"id": "wait_for", "text": "Wait for [Country]",
@@ -81,11 +83,8 @@
   {"id": "from_to_watch", "text": "From [x] to [y]. Watch [Country]",
    "facts": ["biggest_rise", "biggest_fall", "surprising", "sharpest"],
    "fill": "From {from} to {to}. Watch {country}"},
-  {"id": "wl_question", "opener": "which_last", "text": "{question}", "facts": ["any"], "fill": "{question}"},
   {"id": "wl_guess", "opener": "which_last", "text": "{question} Guess before the end", "facts": ["any"],
    "fill": "{question} Guess before the end"},
-  {"id": "wl_watch", "opener": "which_last", "text": "{question} Watch till the end", "facts": ["any"],
-   "fill": "{question} Watch till the end"},
   {"id": "wl_dont_scroll", "opener": "which_last", "text": "{question} Don't scroll before the end", "facts": ["any"],
    "fill": "{question} Don't scroll before the end"}
  ],

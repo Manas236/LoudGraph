@@ -15,14 +15,14 @@ Account screens. A new /menu moves the card to the bottom (the old one is delete
   * When a reel becomes ready the bot sends at most ONE short note, and only when no other note is
     unread and the review card is not open.
   * Approved reels wait in the posting queue (Posting queue: Move up / Move down / Post now / Unapprove)
-    and post one a day; after a reel posts, the home card updates and one short message carries the link.
+    and post in the daily slots; after a reel posts, the home card updates and one short message carries the link.
   * Errors show on the home card in plain words with Retry and Drop, never as a stack trace.
 Buttons on any older message answer that they are out of date and do nothing. Edits are throttled to one
 per EDIT_GAP_S per message (a tap is answered at once), and a 429 waits for its retry_after.
 
-`run.py bot` also works the make queue, runs the posting queue (posting.py: one approved reel a day at
-posting.time, a missed slot posted once when the bot is back), settles a publisher that died, collects
-stats and makes the scheduled daily videos (schedule.py).
+`run.py bot` also works the make queue, runs the posting queue (posting.py: approved reels in the daily
+slots of posting.time, a missed slot posted late only while it is still open), settles a publisher that
+died, collects stats and makes the scheduled daily videos (schedule.py).
 
 The dashboard's Telegram switch (config telegram.enabled) turns all of the Telegram side off and on while
 the bot keeps running: off clears the buttons from the chat (pause), on drops the taps made meanwhile and
@@ -924,7 +924,7 @@ def _bot_loop() -> int:
                 health.beat("bot", telegram=tg)   # the dashboard turns red when this is > 3 min old
                 last_beat = time.time()
             from . import posting
-            posting.tick()   # one approved reel a day at posting.time; a missed slot posts once, late
+            posting.tick()   # approved reels in the daily slots of posting.time; a missed slot posts late while open
             if time.time() - last_scan > 30:
                 from .orchestrator import settle_stopped
                 settle_stopped()   # a publisher that died mid-post is reported, not left "posting"

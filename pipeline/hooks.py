@@ -2,7 +2,8 @@
 topic so the stats can say which hook works (analytics.update_hook_weights; the Telegram Stats screen).
 
   which_last     a guess-the-loser question, worded per reel from config.yaml opening.phrasings ("Which country
-                 ends up last?", "Who drops to the bottom?", ...); the exact wording is kept as hook_phrase
+                 ends up last?", "Which country loses the lead?", ...; only "Which country...?" questions since
+                 2026-10-23); the exact wording is kept as hook_phrase
   who_overtakes  "Who overtakes who?"            (opener overtakes in caption_formats.json)
   other          any other question, or no on-screen hook (the reels made before 2026-10-13)
 
@@ -37,26 +38,21 @@ WHICH_LAST, WHO_OVERTAKES, OTHER = "which_last", "who_overtakes", "other"
 QUESTIONS = {"Who overtakes who?": WHO_OVERTAKES}
 OPENERS = {WHICH_LAST: "ends_last", WHO_OVERTAKES: "overtakes"}   # template -> opener id (caption_formats.json)
 LABELS = {WHICH_LAST: "Guess the loser", WHO_OVERTAKES: "Who overtakes who?", OTHER: "Other or no hook"}
-# The phrasings shipped with the code (config.yaml has the same list): a reel that shows one of them stays
-# which_last even after its wording is taken out of config.yaml, so the hook weight is never split.
+# The phrasings shipped with the code (config.yaml has the same list): only "Which country...?" questions.
 DEFAULT_PHRASINGS = [   # interleaved by check, so the rotation's ties (config order) vary the question, not just its words
     {"text": "Which country ends up last?", "check": "ends_last", "answer": "{country} ends up last: {value} in {year}"},
     {"text": "Which country falls the most?", "check": "falls_most", "spatial": True,
      "answer": "{country} falls the most: {from} to {to}"},
     {"text": "Which country loses the lead?", "check": "loses_lead",
      "answer": "{country} loses the lead to {country2} in {year}"},
-    {"text": "Who drops to the bottom?", "check": "drops_to_last", "spatial": True,
-     "answer": "{country} drops from {rank_from} in {from_year} to last in {year}"},
-    {"text": "Who gets overtaken most?", "check": "overtaken_most", "answer": "{country} gets overtaken by {n} countries"},
     {"text": "Which country finishes last?", "check": "ends_last", "answer": "{country} finishes last: {value} in {year}"},
-    {"text": "Who loses the most ground?", "check": "loses_ground",
-     "answer": "{country} drops from {rank_from} in {from_year} to {rank_to} in {year}"},
     {"text": "Which country sinks to last?", "check": "drops_to_last", "spatial": True,
      "answer": "{country} sinks from {rank_from} in {from_year} to last in {year}"},
-    {"text": "Who comes last in the end?", "check": "ends_last", "answer": "{country} comes last: {value} in {year}"},
-    {"text": "Who ends up at the bottom?", "check": "ends_last", "spatial": True,
-     "answer": "{country} ends up at the bottom: {value} in {year}"},
 ]
+# Wordings no longer used (the "Who...?" questions, retired 2026-10-23): a reel that shows one stays which_last,
+# so the hook weight is never split. Their checks (overtaken_most, loses_ground) still work if they come back.
+RETIRED_PHRASINGS = ["Who drops to the bottom?", "Who gets overtaken most?", "Who loses the most ground?",
+                     "Who comes last in the end?", "Who ends up at the bottom?"]
 
 
 def _norm(text: str | None) -> str:
@@ -87,7 +83,7 @@ def phrasings() -> list[dict]:
 def classify(question: str | None) -> str:
     """The template of an on-screen opening question (exact wording, as drawn on the video)."""
     q = _norm(question)
-    if q in {p["text"] for p in phrasings()} | {p["text"] for p in DEFAULT_PHRASINGS}:
+    if q in {p["text"] for p in phrasings()} | {p["text"] for p in DEFAULT_PHRASINGS} | set(RETIRED_PHRASINGS):
         return WHICH_LAST
     return QUESTIONS.get(q, OTHER)
 

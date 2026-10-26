@@ -3,8 +3,9 @@ hard stab, then a quick rewind cut (cold_open.snap_seconds) back to the start of
 cold_open). It is ONE variable for an A/B test on retention: the race is exactly the reel it would be without
 one (every frame and note at the same race time, timeline.build), only cold_open + snap seconds later; the hook
 question keeps its timing from frame 0, and the music, colours and fonts stay as they are. The reel gets longer
-by that much, so one that would pass video.max_seconds (25 s) is made without a cold open ("skipped: would
-exceed 25s").
+by that much: the race is fitted to video.max_seconds (23.3 s, timeline.py), so a reel with a cold open lands at
+<= video.max_seconds_cold_open (25 s). One that would still pass it is made without a cold open ("skipped: would
+exceed 25s"), a safety net that should not fire any more.
 
 The beat. captions.ranked_moves, the list the "sharpest" story fact takes its first move from, ranks every
 one-year move by how dramatic it is. The cold open shows the first move that
@@ -27,8 +28,11 @@ made with; TEST videos (no run row) never move it.
 Tagging. cold_open (1/0) and cold_open_beat (the beat, or why there is none) are stored like the hook: in
 meta.json, on the run, and copied onto each post when it is made (db.upsert_post). backfill() marks every reel
 made before cold opens existed as without one. The stats loop keeps them next to hook and topic
-(db.latest_stats), groups() averages the retention metrics per side and save_baseline() keeps the last reels
-without one as the baseline (`python run.py coldopen`).
+(db.latest_stats). `python run.py coldopen` compares the two sides WITHIN the current video.format_version (the
+experiment marker every new reel is rendered with, from 2: two posting slots, "Which country...?" hooks, <= 23.3
+s): per side n, skip %, watch %, median views and how many posted at each slot (arms()). The format 1 comparison
+and its saved baseline (save_baseline(): the last reels posted without a cold open) stay viewable with --v1 and
+are never mixed in.
 
 Reels already made are never re-rendered unless cold_open.apply_to_existing_queue is true; then
 `python run.py coldopen --apply-queue` re-renders the unposted ones (apply_to_queue).
@@ -212,8 +216,10 @@ def timeline_for(topic: dict, pick: dict, data: dict, labels: dict, countries: l
     views = build_views(topic, pick, data, labels, plain)
     why = decision["why"]
     if decision["want"]:
-        s, cap = settings(), float(get_config()["video"]["max_seconds"])
+        from .timeline import cap_for
+        s = settings()
         tl = build(countries, pick["x_start"], pick["x_end"], cold_open=s["seconds"], snap=s["snap_seconds"])
+        cap = cap_for(tl)
         if tl.duration > cap + 1e-6:
             why = (f"skipped: would exceed {cap:g}s ({plain.duration:.2f} s + {tl.lead:.2f} s cold open and cut = "
                    f"{tl.duration:.2f} s)")
@@ -268,21 +274,31 @@ def side_of(run: dict) -> tuple[bool | None, str]:
 
 # ------------------------------------------------------------------ reels made before / the stats loop
 
+def format_version() -> int:
+    """video.format_version: the experiment marker new reels are rendered with (1 when it is not set)."""
+    return int(get_config()["video"].get("format_version") or 1)
+
+
 def backfill() -> int:
-    """cold_open and cold_open_beat for every run with a video that has none yet, from its meta.json (a video made
-    before cold opens existed has none), on the run and its posts. Idempotent. Returns how many were filled in."""
+    """cold_open, cold_open_beat and format_version for every run with a video that has none yet, from its meta.json
+    (a video made before cold opens existed has none; one made before format_version existed is format 1), on the
+    run and its posts. Idempotent. Returns how many runs were filled in."""
     with db.db() as c:
-        ids = [r["id"] for r in c.execute("SELECT id FROM runs WHERE cold_open IS NULL").fetchall()]
+        cold = {r["id"] for r in c.execute("SELECT id FROM runs WHERE cold_open IS NULL").fetchall()}
+        fmt = {r["id"] for r in c.execute("SELECT id FROM runs WHERE format_version IS NULL").fetchall()}
     n = 0
-    for rid in ids:
+    for rid in sorted(cold | fmt):
         meta = _meta(rid)
         if meta is None:
             continue
-        on = bool(meta.get("cold_open", False))
-        db.set_cold_open(rid, on, meta.get("cold_open_beat") or ("" if on else BEFORE))
+        if rid in cold:
+            on = bool(meta.get("cold_open", False))
+            db.set_cold_open(rid, on, meta.get("cold_open_beat") or ("" if on else BEFORE))
+        if rid in fmt:
+            db.set_format_version(rid, int(meta.get("format_version") or 1))
         n += 1
     if n:
-        log.info("cold_open filled in for %d run(s)", n)
+        log.info("cold_open / format_version filled in for %d run(s)", n)
     return n
 
 
@@ -316,11 +332,11 @@ def groups(rows: list[dict]) -> dict:
     return out
 
 
-def grouped(now: datetime | None = None) -> dict:
+def grouped(now: datetime | None = None, versions=None) -> dict:
     """groups() over the posted reels on analytics.weight_platforms that are analytics.min_age_hours old, plus how
-    many younger ones were left out."""
+    many younger ones were left out. versions: keep only the reels whose format_version passes it."""
     age = float(get_config()["analytics"]["min_age_hours"])
-    every = _rows(0, now)
+    every = [r for r in _rows(0, now) if versions is None or versions(r.get("format_version") or 1)]
     old = [r for r in every if r["age_hours"] >= age]
     return {"min_age_hours": age, "groups": groups(old), "too_young": len(every) - len(old)}
 
@@ -365,14 +381,62 @@ def refresh_baseline() -> None:
         save_baseline()
 
 
-def report_lines() -> list[str]:
-    """`python run.py coldopen`: the settings, the alternation, the baseline and the averages per side."""
-    from .review import topic_name
+def arms(rows: list[dict], slots: list[str]) -> dict:
+    """{"with": {...}, "without": {...}}: n reels with stats, mean skip % and watch %, median views, and how many were
+    posted in each slot ("other": Post now, a retry, or before the slots existed)."""
+    from statistics import median
+    out = {}
+    for side, on in (("with", True), ("without", False)):
+        mine = [r for r in rows if bool(r.get("cold_open")) == on and r.get("views") is not None]
+        g = {"n": len(mine)}
+        for k in ("skip_rate", "avg_view_pct"):
+            vals = [r[k] for r in mine if r.get(k) is not None]
+            g[k] = round(sum(vals) / len(vals), 2) if vals else None
+        g["median_views"] = median(r["views"] for r in mine) if mine else None
+        g["slots"] = {sl: sum(1 for r in mine if r.get("slot") == sl) for sl in slots}
+        g["slots"]["other"] = len(mine) - sum(g["slots"].values())
+        out[side] = g
+    return out
+
+
+def report_lines(v1: bool = False) -> list[str]:
+    """`python run.py coldopen`: the settings, the alternation and the A/B within the current format_version;
+    v1=True: the format 1 comparison and its saved baseline instead."""
+    from .posting import times
     s, st = settings(), alternate_state()
     lines = [f"cold_open: mode {s['mode']}, clip {s['seconds']:g} s, rewind {s['snap_seconds']:g} s, "
              f"apply_to_existing_queue {str(s['apply_to_existing_queue']).lower()}",
              f"alternation: {st['renders']} new reel(s) rendered, {st['with']} with a cold open; next: "
              f"{'without (control)' if st['last'] else 'with'}" if s["mode"] == "alternate" else ""]
+    if v1:
+        return [ln for ln in lines + _v1_lines() if ln is not None]
+    fv, age = format_version(), float(get_config()["analytics"]["min_age_hours"])
+    mine = [r for r in _rows(0) if (r.get("format_version") or 1) == fv]
+    old = [r for r in mine if r["age_hours"] >= age]
+    slots = [t.strftime("%H:%M") for t in times()]
+    a = arms(old, slots)
+    head = f"{'':<28}{'n':>4}{'skip %':>9}{'watch %':>9}{'median views':>14}" + "".join(f"{'at ' + x:>10}" for x in slots) \
+        + f"{'other':>7}"
+    lines += ["", f"Cold open A/B, format_version {fv} only: reels posted at least {age:g} h ago "
+                  f"({len(mine) - len(old)} younger left out)", head]
+    num = lambda v, f: "-" if v is None else format(v, f)  # noqa: E731
+    for side in ("with", "without"):
+        x = a[side]
+        lines.append(f"{side + ' cold open':<28}{x['n']:>4}{num(x['skip_rate'], '.1f'):>9}{num(x['avg_view_pct'], '.1f'):>9}"
+                     f"{num(x['median_views'], ',.0f'):>14}" + "".join(f"{x['slots'][sl]:>10}" for sl in slots)
+                     + f"{x['slots']['other']:>7}")
+    if not old:
+        lines.append(f"No format_version {fv} reel is {age:g} h old with stats yet: the comparison fills in as they are "
+                     f"posted and pulled.")
+    lines += ["", "The format 1 comparison and its baseline: python run.py coldopen --v1 (never mixed in here)."]
+    return [ln for ln in lines if ln is not None]
+
+
+def _v1_lines() -> list[str]:
+    """The format 1 A/B: the saved baseline and the averages per side over the reels made before format 2."""
+    from .review import topic_name
+    fv = format_version()
+    lines = []
 
     def num(v, k):
         return "-" if v is None else f"{v:,.0f}" if k in ("views", "reach") else f"{v:.2f}"
@@ -385,15 +449,15 @@ def report_lines() -> list[str]:
         run = db.get_run(r["run_id"]) or {}
         name = f"{topic_name(run.get('topic_id', ''))[:22]} {r['posted_at'][5:10]} {r['age_hours']:>4.0f}h"
         lines.append(f"{name:<38}" + "".join(f"{num(r[k], k):>14}" for k, _ in METRICS))
-    g = grouped()
-    lines += ["", f"Average per side, reels posted at least {g['min_age_hours']:g} h ago ({g['too_young']} younger left out):",
-              head]
+    g = grouped(versions=lambda v: v != fv)
+    lines += ["", f"Average per side, format 1 reels posted at least {g['min_age_hours']:g} h ago ({g['too_young']} "
+                  f"younger left out):", head]
     for side in ("with", "without"):
         x = g["groups"][side]
         lines.append(f"{side + ' cold open (' + str(x['n']) + ' reels)':<38}" + "".join(f"{num(x[k], k):>14}" for k, _ in METRICS))
     if not g["groups"]["with"]["n"]:
-        lines.append("No reel with a cold open has stats yet: the comparison fills in as they are posted and pulled.")
-    return [ln for ln in lines if ln is not None]
+        lines.append("No format 1 reel with a cold open has stats.")
+    return lines
 
 
 # ------------------------------------------------------------------ reels already made

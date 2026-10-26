@@ -90,10 +90,16 @@ def reel_inputs(run_id: str) -> tuple[dict, dict, dict, list[tuple]]:
 
 def render_reel(run_id: str, topic: dict, opening: dict | None = None, decision: dict | None = None) -> tuple[str, dict]:
     """The render step's work; the caller holds the render lock. opening: keep this opening question (a re-render)
-    instead of choosing one; decision: coldopen.decide()'s answer, made here when not given."""
+    instead of choosing one; decision: coldopen.decide()'s answer, made here when not given. A new reel is stamped
+    with video.format_version (the experiment marker); a re-render keeps the one it was made with."""
     from . import audio, coldopen, render
-    from .timeline import build, fits
+    from .timeline import build, cap_for, fits
     d = run_dir(run_id)
+    try:
+        before = _read(run_id, "meta.json") if opening is not None else {}
+    except (OSError, ValueError):
+        before = {}
+    version = int(before.get("format_version") or 1) if opening is not None else coldopen.format_version()
     data, p, labels, countries = reel_inputs(run_id)
     decision = decision or coldopen.decide(run_id)
     chosen = opening is None   # first the question: the cold open never shows a country its answer names
@@ -102,7 +108,7 @@ def render_reel(run_id: str, topic: dict, opening: dict | None = None, decision:
     tl, views, cold = coldopen.timeline_for(topic, p, data, labels, countries, decision, opening)
     if not fits(tl):
         raise RuntimeError(f"timeline is {tl.duration:.1f}s with slow-mo events, outside "
-                           f"{get_config()['video']['min_seconds']}-{get_config()['video']['max_seconds']}s; re-pick")
+                           f"{get_config()['video']['min_seconds']}-{cap_for(tl):g}s; re-pick")
     tl.save(d / "timeline.json")
     rows = {c: dict(zip(years, vals)) for c, years, vals in countries}
     values = {s.iso3: [rows[s.iso3][y] for y in s.years] for s in tl.slots}
@@ -123,11 +129,20 @@ def render_reel(run_id: str, topic: dict, opening: dict | None = None, decision:
     meta["cold_open_beat"] = cold["cold_open_beat"]   # ... the beat it shows, or why it has none
     if cold["beat"]:
         meta["cold_open_detail"] = cold["beat"]
+    meta["format_version"] = version                 # the experiment marker (`run.py coldopen` compares within it)
+    if tl.fit:
+        meta["length_fit"] = tl.fit                  # how the race was shortened to video.max_seconds
     _write(run_id, "meta.json", meta)
     db.set_hook_template(run_id, opening["hook_template"], opening.get("hook_phrase"))
     run = db.get_run(run_id)
     if run:   # (a TEST video has no run row)
         coldopen.record(run_id, decision, cold)
+        db.set_format_version(run_id, version)
+        if tl.fit:
+            f = tl.fit
+            db.log(run_id, run["stage"], f"length fitted to {f['max_seconds']:g} s: race {f['before']:.2f} s -> "
+                                         f"{f['after']:.2f} s (hold {f['hold']:g} s, cross-fade {f['transition']:g} s, "
+                                         f"slow-mo {f['event_slowmo']:g}x, line at {f['draw_share']:.0%} of its time)")
         if chosen and opening.get("fallback"):
             db.log(run_id, run["stage"], f"opens with \"{opening['question']}\" instead of the configured hook: "
                                          f"{opening['fallback']}"[:1500])

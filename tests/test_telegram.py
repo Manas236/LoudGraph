@@ -695,7 +695,7 @@ def test_posting_queue_screen_with_dates_and_buttons_per_reel(env):
     assert press(env, "h:queue", hm) == "Posting queue"
     shown = fake.of("editMessageText")[-1]
     lines = shown["text"].splitlines()
-    assert lines[0] == "📅 Posting queue: one reel a day at 21:00 IST"
+    assert lines[0] == "📅 Posting queue: two reels a day, at 14:30 and 16:00 IST"
     assert lines[2:5] == [f"{i}. {review.topic_name(s['run']['topic_id'])} · {posting.when_text(s['when'])}"
                           for i, s in enumerate(sched, 1)]
     assert buttons(shown["reply_markup"]) == [

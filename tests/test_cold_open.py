@@ -106,7 +106,22 @@ def test_the_cold_open_is_added_on_top_of_an_untouched_race():
     assert plain.cold_open_time(0.0) is None and tl.cold_open_time(LEAD) is None
 
 
-def test_a_reel_that_would_pass_25_s_is_made_without_one():
+def test_the_race_is_fitted_so_the_cold_open_lands_within_25_s():
+    """5 countries are about 23.7 s at the default timing: the race is fitted to 23.3 s (699 frames), and the
+    reel with a cold open has that very race, 1.7 s later, at 25.0 s (750 frames)."""
+    rows = _series(names=NAMES + ("KOR",))
+    plain = build(rows, 1990, 2023)
+    assert plain.fit and plain.fit["before"] > 23.3 and plain.duration <= 23.3 and plain.n_frames == 699
+    tl, _, state = _timeline_for(rows)
+    assert state["cold_open"] is True and tl.duration <= 25.0 and tl.n_frames == 750
+    for a, b in zip(tl.slots, plain.slots):
+        assert a.onsets == pytest.approx([o + LEAD for o in b.onsets], abs=1e-5)
+
+
+def test_a_reel_that_would_pass_25_s_is_made_without_one(pinned_config):
+    """The safety net, with the fit off: a race that is still too long is made without a cold open."""
+    pinned_config["timing"]["fit"] = None
+    pinned_config["video"]["max_seconds"] = 25
     rows = _series(names=NAMES + ("KOR",))   # 5 countries: about 23.7 s, so 25.4 s with the cold open
     plain = build(rows, 1990, 2023)
     assert plain.duration + LEAD > 25 >= plain.duration
@@ -416,6 +431,13 @@ def test_render_reel_tags_meta_and_run_and_alternates(env, monkeypatch):
     assert [db.get_run(r)["cold_open"] for r in ids] == [1, 0]
     assert seen[0].cold_open == 1.5 and seen[1].cold_open == 0
     assert seen[0].duration == pytest.approx(seen[1].duration + LEAD)   # added on top of the same race
+    # every new reel carries the experiment marker; a re-render keeps the one it was made with (none = format 1)
+    assert [m["format_version"] for m in metas] == [2, 2] and [db.get_run(r)["format_version"] for r in ids] == [2, 2]
+    old = {k: v for k, v in metas[1].items() if k != "format_version"}
+    (run_dir(ids[1]) / "meta.json").write_text(json.dumps(old))
+    orchestrator.render_reel(ids[1], topic, opening=old["opening"])
+    assert json.loads((run_dir(ids[1]) / "meta.json").read_text())["format_version"] == 1
+    assert db.get_run(ids[1])["format_version"] == 1
     assert metas[0]["duration_seconds"] == pytest.approx(metas[1]["duration_seconds"] + LEAD)
     assert metas[0]["cover_seconds"] == pytest.approx(metas[1]["cover_seconds"] + LEAD)
     assert db.has_log(ids[0], "cold open: South Africa crashes") and db.has_log(ids[1], "no cold open: control side")

@@ -19,7 +19,8 @@
     python run.py batch [--count N] [--queue-only]
     python run.py rebrand [--run RUN_ID ...] [--dry-run] [--no-send]
     python run.py hooks
-    python run.py coldopen [--baseline] [--apply-queue]
+    python run.py coldopen [--baseline] [--apply-queue] [--v1]
+    python run.py post-dates [--apply]
 """
 from __future__ import annotations
 
@@ -244,8 +245,9 @@ def cmd_hooks(a):
 
 
 def cmd_coldopen(a):
-    """The cold open A/B (pipeline/coldopen.py): fill in cold_open for older reels, then print the settings, the
-    alternation, the baseline and the average retention per side. --baseline saves (or refreshes) the baseline;
+    """The cold open A/B (pipeline/coldopen.py): fill in cold_open and format_version for older reels, then print the
+    settings, the alternation and, per side, the retention of the reels of the current video.format_version.
+    --v1 shows the format 1 comparison and its baseline instead; --baseline saves (or refreshes) that baseline;
     --apply-queue gives the unposted reels a cold open, only when cold_open.apply_to_existing_queue is true."""
     import json
     from pipeline import coldopen, db
@@ -260,7 +262,19 @@ def cmd_coldopen(a):
         print(json.dumps(res, indent=1, ensure_ascii=False, default=str))
     if a.baseline:
         coldopen.save_baseline()
-    print("\n".join(coldopen.report_lines()))
+    print("\n".join(coldopen.report_lines(v1=a.v1)))
+    return 0
+
+
+def cmd_post_dates(a):
+    """Posts whose recorded date is not when they really went out (a failed post retried later kept the first
+    attempt's date): Instagram's own publish time, else when the log saw it go live. --apply corrects them."""
+    import json
+    from pipeline import db, posted
+    db.init()
+    rows = posted.fix_post_dates(apply=a.apply)
+    print(json.dumps(rows, indent=1, ensure_ascii=False))
+    print(f"{len(rows)} post(s) {'corrected' if a.apply else 'to correct (run again with --apply)'}")
     return 0
 
 
@@ -336,7 +350,13 @@ def main(argv=None):
                                                            "open), or refresh its numbers once saved")
     s.add_argument("--apply-queue", action="store_true", help="give the unposted reels a cold open (needs "
                                                               "cold_open.apply_to_existing_queue: true)")
+    s.add_argument("--v1", action="store_true", help="the format 1 comparison and its baseline (never mixed into the "
+                                                     "current format_version's A/B)")
     s.set_defaults(fn=cmd_coldopen)
+    s = sub.add_parser("post-dates", help="correct the date of posts that went out later than recorded (a retried "
+                                          "failed post)")
+    s.add_argument("--apply", action="store_true", help="write the corrections (default: only list them)")
+    s.set_defaults(fn=cmd_post_dates)
     a = p.parse_args(argv)
     setup_logging()
     return a.fn(a) or 0

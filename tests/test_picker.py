@@ -114,7 +114,7 @@ def test_low_variety_when_shapes_are_alike():
         pick(_scored(series), series, TOPIC)
 
 
-def test_drops_countries_when_slowmo_makes_it_too_long():
+def _eventful():
     rng = np.random.default_rng(5)
     series = {}
     for i in range(16):   # every series has several >= 25% one-year moves (events)
@@ -124,7 +124,25 @@ def test_drops_countries_when_slowmo_makes_it_too_long():
         elif i % 3 == 1:
             v = v + 2.5 * T          # rising ones
         series[f"E{i:02d}"] = [[y, float(x)] for y, x in zip(YEARS, v)]
+    return series
+
+
+def test_the_fit_keeps_the_countries_that_slowmo_would_have_dropped():
+    """Slow-mo events would push 5 countries past 23.3 s: the timeline is fitted (dead time, then slow-mo) instead
+    of dropping a country or cutting years."""
     from pipeline.config import get_config
+    series = _eventful()
+    r = pick(_scored(series), series, TOPIC)
+    assert r["duration_seconds"] <= get_config()["video"]["max_seconds"] + 1e-6
+    assert not r["dropped_for_length"] and r["n"] == get_config()["picker"]["max_countries"]
+    assert (r["x_start"], r["x_end"]) == (YEARS[0], YEARS[-1])
+
+
+def test_drops_countries_when_slowmo_makes_it_too_long(pinned_config):
+    from pipeline.config import get_config
+    pinned_config["timing"]["fit"] = None                       # without the fit (and at the old 25 s cap)
+    pinned_config["video"]["max_seconds"] = 25                  # the least interesting country goes
+    series = _eventful()
     r = pick(_scored(series), series, TOPIC)
     assert r["duration_seconds"] <= get_config()["video"]["max_seconds"] + 1e-6
     assert r["dropped_for_length"] and r["n"] < get_config()["picker"]["max_countries"]

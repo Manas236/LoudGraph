@@ -988,6 +988,8 @@ def generate(topic: dict, countries: list[tuple[str, str]], series: dict, x_star
     facts = compute_facts(topic, countries, series, x_start, x_end)
     ctx = Context(topic, countries, facts, x_start, x_end, s=s, opening=opening)
     n = int(s["variants"])
+    if ctx.fixed:   # a which_last video: one option per line-1 template it has (two calls to action)
+        n = min(n, len(ctx.suitable_hooks()) or n)
     notes, accepted = [], []
     use_llm = (s["llm"] if llm is None else llm) and not ctx.fixed
     if use_llm and facts:
@@ -1199,6 +1201,8 @@ def generate_for_run(run_id: str, llm: bool | None = None, trending: bool | None
                  llm=llm, ask=ask, trending=trending, get=get, opening=opening)
     c = {"run_id": run_id, "topic_id": topic["id"], **c, "credit": credit_lines(topic, data)}
     old = load(run_id)
+    if c.get("opener") == "which_last" and (fresh or not old):
+        _alternate_line1(run_id, c)
     if old and not fresh and 0 < old.get("chosen", 0) < len(c["variants"]):
         c["chosen"] = old["chosen"]
     for k in ("edit", "edits", "use_edit"):   # the owner's own caption survives a regeneration
@@ -1208,6 +1212,23 @@ def generate_for_run(run_id: str, llm: bool | None = None, trending: bool | None
         c["use_edit"] = False
     save(run_id, c)
     return c
+
+
+def _alternate_line1(run_id: str, c: dict) -> None:
+    """A which_last caption's option 1 ends with the other call to action than the newest other which_last reel's
+    chosen caption ("Guess before the end" / "Don't scroll before the end"), so consecutive reels alternate."""
+    from . import db
+    last = None
+    for r in db.list_runs(limit=60):
+        other = load(r["id"]) if r["id"] != run_id else None
+        if other and other.get("opener") == "which_last":
+            last = other["variants"][min(other.get("chosen", 0), len(other["variants"]) - 1)]["template_id"]
+            break
+    v = c["variants"]
+    if last and v and v[0]["template_id"] == last:
+        k = next((i for i, x in enumerate(v) if x["template_id"] != last), None)
+        if k is not None:
+            v.insert(0, v.pop(k))
 
 
 def ensure(run_id: str) -> dict | None:

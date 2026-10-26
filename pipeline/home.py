@@ -404,8 +404,8 @@ QUEUE_SHOWN = 8   # items with their own buttons on the Posting queue screen
 def queue_view(s: dict) -> tuple[str, dict]:
     from . import posting
     sched = posting.schedule()
-    lines = [f"📅 Posting queue: one reel a day at {posting.settings()['time']} "
-             f"{datetime.now(posting.tz()).tzname()}", ""]
+    rule = posting.rule_text()
+    lines = [f"📅 Posting queue: {rule[:1].lower()}{rule[1:]}", ""]
     if note(s):
         lines += [note(s), ""]
     if not sched:
@@ -439,8 +439,8 @@ def confirm_post_view(s: dict) -> tuple[str, dict]:
                 {"inline_keyboard": [[{"text": "📅 Back to the queue", "callback_data": "h:queue"}], [HOME]]})
     where = " and ".join(PLATFORMS[p] for p in ready_destinations(run)) or "nowhere yet (no account is connected)"
     text = (f"📤 Post {review.topic_name(run['topic_id'])} now?\n\nIt goes to {where} straight away, instead of "
-            f"{posting.when_for(run['id'])}. The next daily post is skipped if it would come less than "
-            f"{posting.settings()['min_gap_hours']} hours after this one.")
+            f"{posting.when_for(run['id'])}. The next slot waits until {posting.settings()['min_gap_hours']:g} "
+            f"hour(s) after this one while it is still open.")
     rows = [[{"text": "✅ Yes, post it now", "callback_data": f"h:qyes:{run['ref']}"}],
             [{"text": "⬅️ Back to the queue", "callback_data": "h:queue"}], [HOME]]
     return text, {"inline_keyboard": rows}

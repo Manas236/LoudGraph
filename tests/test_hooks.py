@@ -166,8 +166,7 @@ def test_last_follows_the_metric_direction():
     assert t["loses_lead"]["fields"] == {"country": "Iceland", "country2": "Norway", "year": 2003}
     o, why_not = hooks.which_last_opening(topic(lower_first=True), RACE_ROWS, RACE_NAMES, FMT, [])
     assert (o["question"], o["answer"]) == ("Which country ends up last?", "Finland ends up last: 45.0 in 2004")
-    spatial = ("Who ends up at the bottom?", "Which country falls the most?", "Who drops to the bottom?",
-               "Which country sinks to last?")
+    spatial = ("Which country falls the most?", "Which country sinks to last?")
     assert all("up/down words" in why_not[q] for q in spatial) and not set(spatial) & set(o["eligible"])
     v = views(RACE_ROWS, RACE_NAMES)
     assert [v[i].name for i in render.end_order(topic(), v)] == ["Finland", "Denmark", "Sweden", "Iceland", "Norway"]
@@ -180,10 +179,21 @@ def test_last_follows_the_metric_direction():
 
 # ------------------------------------------------------------------ rotation
 
+def test_only_which_country_questions_are_used():
+    """Every breakout opened with a "Which country...?" question: the configured and shipped lists hold nothing else,
+    and a reel that showed a retired "Who...?" wording is still which_last."""
+    from pipeline import hooks
+    for texts in (P(), [x["text"] for x in hooks.DEFAULT_PHRASINGS]):
+        assert texts == ["Which country ends up last?", "Which country falls the most?",
+                         "Which country loses the lead?", "Which country finishes last?", "Which country sinks to last?"]
+    assert all(hooks.classify(q) == "which_last" for q in hooks.RETIRED_PHRASINGS)
+    assert not any(q.startswith("Which country") for q in hooks.RETIRED_PHRASINGS)
+
+
 def test_rotation_never_reuses_the_last_3_and_picks_the_least_used(env):
     from pipeline import hooks
     p = P()
-    assert len(p) == 10 and p[0] == "Which country ends up last?"
+    assert len(p) == 5 and p[0] == "Which country ends up last?"
 
     def pick(history):
         return hooks.which_last_opening(topic(), RACE_ROWS, RACE_NAMES, FMT, history)[0]["question"]
@@ -205,11 +215,11 @@ def test_the_fallback_is_ends_up_last_when_every_true_phrasing_was_just_used(env
     rising = {"NOR": list(zip(RACE_YEARS, [1, 2, 3, 4, 5])), "SWE": list(zip(RACE_YEARS, [10, 11, 12, 13, 14])),
               "FIN": list(zip(RACE_YEARS, [20, 21, 22, 23, 24]))}         # only "last" is true: Norway
     last = [x["text"] for x in hooks.phrasings() if x["check"] == "ends_last"]
-    assert len(last) == 4 and last[0] == "Which country ends up last?"
+    assert last == ["Which country ends up last?", "Which country finishes last?"]
     o, _ = hooks.which_last_opening(topic(), rising, RACE_NAMES, FMT, last[1:])
     assert o["question"] == last[0] and o["choice"].startswith("rotation") and o["eligible"] == last
-    pinned_config["opening"]["recent_block"] = 4
-    o, _ = hooks.which_last_opening(topic(), rising, RACE_NAMES, FMT, [last[0], last[3], last[1], last[2]])
+    pinned_config["opening"]["recent_block"] = 2
+    o, _ = hooks.which_last_opening(topic(), rising, RACE_NAMES, FMT, [last[0], last[1]])
     assert o["question"] == "Which country ends up last?" and o["choice"].startswith("fallback")
 
 
@@ -233,16 +243,11 @@ def test_the_end_card_answers_the_question_that_was_asked(env):
     p = P()
     want = {"Which country ends up last?": "Norway ends up last: 10.0 in 2004",
             "Which country finishes last?": "Norway finishes last: 10.0 in 2004",
-            "Who comes last in the end?": "Norway comes last: 10.0 in 2004",
-            "Who ends up at the bottom?": "Norway ends up at the bottom: 10.0 in 2004",
             "Which country falls the most?": "Norway falls the most: 50.0 to 10.0",
-            "Who drops to the bottom?": "Norway drops from 1st in 2000 to last in 2004",
             "Which country sinks to last?": "Norway sinks from 1st in 2000 to last in 2004",
-            "Which country loses the lead?": "Norway loses the lead to Finland in 2002",
-            "Who gets overtaken most?": "Norway gets overtaken by 4 countries",
-            "Who loses the most ground?": "Norway drops from 1st in 2000 to 5th in 2004"}
+            "Which country loses the lead?": "Norway loses the lead to Finland in 2002"}
     assert set(want) == set(p)
-    for k in range(10):
+    for k in range(len(p)):
         o = render.opening_for(topic(), views(RACE_ROWS, RACE_NAMES), 2000, 2004, history=p[:k])
         assert (o["question"], o["answer"]) == (p[k], want[p[k]])
         assert o["hook_template"] == "which_last" and o["hook_phrase"] == p[k] and "fallback" not in o
@@ -295,16 +300,21 @@ def test_every_subtitle_is_one_line_so_the_chart_sits_where_a_one_line_reel_does
 # ------------------------------------------------------------------ the caption follows the screen
 
 def test_caption_line_1_is_the_question_on_screen(env):
+    """Line 1 is the question on screen + "Guess before the end" or "Don't scroll before the end"; option 1
+    alternates between the two from one reel to the next."""
     from pipeline import captions
-    asked = []
-    for q in ("Who drops to the bottom?", "Which country loses the lead?", "Which country ends up last?"):
+    asked, firsts = [], []
+    cta = {"wl_guess": "Guess before the end", "wl_dont_scroll": "Don't scroll before the end"}
+    for q in ("Which country sinks to last?", "Which country loses the lead?", "Which country ends up last?"):
         rid = reel(env, q)
         c = captions.generate_for_run(rid, ask=lambda prompt: asked.append(prompt))
-        assert c["opener"] == "which_last" and len(c["variants"]) == 3
-        assert len({v["template_id"] for v in c["variants"]}) == 3
+        assert c["opener"] == "which_last" and {v["template_id"] for v in c["variants"]} == set(cta)
+        assert len(c["variants"]) == 2 and not any("variants could be made" in n for n in c["notes"])
         for v in c["variants"]:
             hook, _, question = v["caption"].split("\n")
-            assert hook.startswith(q) and question.endswith("?") and "France" not in hook + question
+            assert hook == f"{q} {cta[v['template_id']]}" and question.endswith("?") and "France" not in hook + question
+        firsts.append(c["variants"][c["chosen"]]["template_id"])
+    assert firsts[0] != firsts[1] != firsts[2] and firsts[0] == firsts[2]
     assert not asked                                            # the wording is fixed: Gemini is not asked
     over = captions.generate_for_run(reel(env, "Who overtakes who?"), llm=False)    # other openers: the general hooks
     assert not any(v["template_id"].startswith("wl_") for v in over["variants"])

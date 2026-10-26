@@ -34,8 +34,13 @@ video:
   crf: 18
   preset: medium
   audio_bitrate: 192k
-  min_seconds: 20               # target length, end card included: the picker drops countries to stay
-  max_seconds: 25               # inside it, and a timeline outside it is re-picked
+  min_seconds: 20               # target length, end card included: the timeline is fitted (timing.fit) and the
+  max_seconds: 23.3             # picker drops countries to stay inside it; a timeline outside it is re-picked. A reel
+                                # WITHOUT a cold open is at most max_seconds ...
+  max_seconds_cold_open: 25.0   # ... and one with a cold open (max_seconds + cold_open.seconds + snap_seconds) at most this
+  format_version: 2             # the experiment marker every NEW reel is rendered with (meta.json, runs, posts):
+                                # 2 = two slots a day, "Which country...?" hooks only, <= 23.3 s. `run.py coldopen`
+                                # compares the cold-open A/B within this version
 
 timing:                         # timeline.py is the only consumer; everything else reads the timeline
   intro: 0.0                    # 0 = the first country's line moves from frame 0 (the hook is drawn over it)
@@ -47,6 +52,13 @@ timing:                         # timeline.py is the only consumer; everything e
   hook_shrink: 0.45             # ... then shrinks into the header that stays for the whole video
   event_threshold: 0.25         # a year-to-year move >= 25% of the country's range is an EVENT
   event_slowmo: 3.0             # ...and the step into it lasts 3x longer (video + audio)
+  fit:                          # a race longer than video.max_seconds is shortened in this order, only as far as needed
+    hold_min: 0.2               # 1. dead time: the end hold of each line ...
+    transition_min: 0.2         #    ... and the cross-fade between countries, down to these
+    event_slowmo_min: 1.5       # 2. less slow motion on events, down to this factor
+    draw_min: 0.9               # 3. a faster line: each country's draw time down to this share of the default
+                                # Data years are never cut. Still too long: the picker drops the least interesting
+                                # country; at picker.min_countries the topic is skipped, with the reason logged
 
 scorer:
   min_points: 20
@@ -80,12 +92,16 @@ picker:
 topic_cooldown_days: 21         # same topic may come back (with a different set) after this
 
 posting:                        # the posting queue (pipeline/posting.py): run by the bot itself, no OS scheduler
-  time: "21:00"                 # approved reels post ONE PER DAY at this local time. 21:00 IST is a starting
-                                # guess for an international audience (evening in India, morning-to-afternoon
-                                # in the Americas); move it once the stats show when viewers are on
-  timezone: Asia/Kolkata        # IST
-  min_gap_hours: 12             # a slot that comes less than this after the last post is skipped (e.g. right
-                                # after a missed post went out late), so posts never bunch up
+  time: ["14:30", "16:00"]      # approved reels post in these daily slots (keep the quotes). Every breakout so far
+                                # went out between 14:26 and 16:28 IST, on a day with two posts
+  timezone: Asia/Kolkata        # the slots are IST whatever time zone the PC's clock is set to
+  min_gap_hours: 1              # a post waits until this long after the last one (Post now, a late post), while its
+                                # slot is still open
+  late_until: "18:00"           # a missed slot (PC asleep, bot stopped) still posts late until the next slot starts or,
+                                # for the last slot, until this time; after that its reel rolls to the next day
+  ab_first_day: "2026-10-24"    # the cold-open A/B swaps slots daily: on this day (and every 2nd day after it) the reel
+                                # WITH a cold open takes the first slot and the one without the second; the days
+                                # between, the other way round
 
 cadence:
   videos_per_day: 2
@@ -170,24 +186,21 @@ opening:                        # the question every video opens with (on screen
   # = up/down words (falls, drops, bottom): only for topics ranked highest first, where the chart agrees.
   # `answer` is the end card's line and must answer the question. The first ends_last phrasing is the fallback.
   # Ties in the rotation go by this order, so it alternates the kinds of question.
+  # Only "Which country...?" questions (every breakout opened with one; the "Who...?" wordings went 0 for 2).
   phrasings:
     - {text: "Which country ends up last?", check: ends_last, answer: "{country} ends up last: {value} in {year}"}
     - {text: "Which country falls the most?", check: falls_most, spatial: true, answer: "{country} falls the most: {from} to {to}"}
     - {text: "Which country loses the lead?", check: loses_lead, answer: "{country} loses the lead to {country2} in {year}"}
-    - {text: "Who drops to the bottom?", check: drops_to_last, spatial: true, answer: "{country} drops from {rank_from} in {from_year} to last in {year}"}
-    - {text: "Who gets overtaken most?", check: overtaken_most, answer: "{country} gets overtaken by {n} countries"}
     - {text: "Which country finishes last?", check: ends_last, answer: "{country} finishes last: {value} in {year}"}
-    - {text: "Who loses the most ground?", check: loses_ground, answer: "{country} drops from {rank_from} in {from_year} to {rank_to} in {year}"}
     - {text: "Which country sinks to last?", check: drops_to_last, spatial: true, answer: "{country} sinks from {rank_from} in {from_year} to last in {year}"}
-    - {text: "Who comes last in the end?", check: ends_last, answer: "{country} comes last: {value} in {year}"}
-    - {text: "Who ends up at the bottom?", check: ends_last, spatial: true, answer: "{country} ends up at the bottom: {value} in {year}"}
 
 cold_open:                      # pipeline/coldopen.py: the reel opens on its most dramatic beat, then rewinds to the start
   mode: alternate               # COLD_OPEN_MODE: alternate | always | never. alternate = every other NEW reel gets one (by
                                 # render order, kept in the database so it survives restarts): an A/B test on retention
   seconds: 1.5                  # COLD_OPEN_SECONDS: the clip's length. It is ADDED before the race, which stays exactly
-                                # as it is without one, so the reel is seconds + snap_seconds longer; a reel that would
-                                # then pass video.max_seconds (25) is made without one ("skipped: would exceed 25s")
+                                # as it is without one, so the reel is seconds + snap_seconds longer (<= 25.0 s, as the
+                                # race is <= video.max_seconds); a reel that would still pass video.max_seconds_cold_open
+                                # is made without one ("skipped: would exceed 25s"), a safety net
   snap_seconds: 0.2             # the rewind cut from the clip back to the start of the race; must be under 0.3
   apply_to_existing_queue: false   # COLD_OPEN_APPLY_TO_EXISTING_QUEUE: false = reels already made are never re-rendered;
                                 # true = `python run.py coldopen --apply-queue` may re-render the unposted ones

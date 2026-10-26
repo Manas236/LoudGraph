@@ -9,15 +9,49 @@ YEARS = list(range(1990, 2024))
 
 
 def test_count_bounds_default():
-    # no intro + 4.2 s/country + 2.5 s end card within 20-25 s -> 5 countries (4 after a drop for slow-mo)
+    # no intro + 4.2 s/country + 2.5 s end card within 20-23.3 s, with the dead time trimmed -> 5 countries
     assert country_count_bounds() == (5, 5)
 
 
-def test_total_seconds_in_range_for_bounds():
+def test_every_count_in_the_bounds_fits_after_the_fit():
     cfg = get_config()
     n_min, n_max = country_count_bounds()
     for n in range(n_min, n_max + 1):
-        assert cfg["video"]["min_seconds"] <= total_seconds(n) <= cfg["video"]["max_seconds"]
+        assert cfg["video"]["min_seconds"] <= total_seconds(n)              # the default pace, before any fit
+        assert fits(build([(c, YEARS) for c in "ABCDE"[:n]], 1990, 2023))
+
+
+def _eventful(n: int, cuts: int = 3) -> list[tuple]:
+    """n countries whose series crash `cuts` times (each crash an event: slow-mo)."""
+    out = []
+    for i in range(n):
+        vals = [50.0 + 0.1 * k for k in range(len(YEARS))]
+        for c in range(cuts):
+            k = 5 + c * 9 + i % 3
+            vals = vals[:k] + [v - 30.0 * (c % 2 * 2 - 1) for v in vals[k:]]
+        out.append((f"C{i}", YEARS, vals))
+    return out
+
+
+def test_the_fit_trims_dead_time_first_then_slow_mo_and_never_cuts_years():
+    cfg = get_config()
+    t = cfg["timing"]
+    tl = build(_eventful(5, cuts=1), 1990, 2023)
+    assert tl.fit and tl.fit["before"] > 23.3 >= tl.duration and tl.n_frames <= 699
+    assert t["fit"]["hold_min"] <= tl.hold < t["hold"] and tl.event_slowmo == t["event_slowmo"]   # dead time was enough
+    many = build(_eventful(5, cuts=4), 1990, 2023)
+    assert many.fit["before"] > tl.fit["before"] and many.duration <= 23.3
+    assert many.hold == pytest.approx(t["fit"]["hold_min"]) and many.transition == pytest.approx(t["fit"]["transition_min"])
+    assert many.event_slowmo < t["event_slowmo"]                                     # then less slow motion
+    for s in many.slots:                                                             # every year is still drawn
+        assert (s.x_start, s.x_end) == (1990, 2023) and s.years == YEARS and len(s.knots) == len(YEARS)
+    short = build(_eventful(4, cuts=0), 1990, 2023)
+    assert short.fit is None and short.hold == t["hold"]                             # nothing to fit: untouched
+
+
+def test_a_race_that_cannot_fit_is_returned_at_its_shortest_and_does_not_fit():
+    tl = build([(c, YEARS) for c in "ABCDEFG"], 1990, 2023)                          # 7 countries
+    assert tl.fit and not tl.fit["fits"] and not fits(tl) and tl.fit["draw_share"] == pytest.approx(0.9)
 
 
 def test_stretch_when_few_countries():

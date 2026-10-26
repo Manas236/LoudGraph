@@ -1,22 +1,33 @@
-"""The posting queue: approved reels post automatically, ONE PER DAY, at posting.time (config.yaml,
-default 21:00 IST). The bot runs it itself (tick(), every loop), not the OS scheduler, so it works the
-same on a laptop or a server.
+"""The posting queue: approved reels post automatically, in the daily SLOTS of posting.time (config.yaml:
+14:30 and 16:00, in posting.timezone, Asia/Kolkata; the PC clock's own time zone is never used). The bot runs
+it itself (tick(), every loop), not the OS scheduler, so it works the same on a laptop or a server.
 
 The queue is every run in stage "approved", in runs.post_pos order; approving puts a reel at the back,
-and Move up / Move down swap neighbours. Every day has one slot at posting.time in posting.timezone.
-tick() claims the slot atomically in the kv table (posting:slot:<date>) before it starts a post, so a
-restart or a second bot never posts twice in one slot, and the publisher itself refuses a run that is
-no longer "approved", so a reel is never posted twice.
+and Move up / Move down swap neighbours. tick() claims a slot atomically in the kv table
+(posting:slot:<date>T<HH:MM>) before it starts a post, so a restart or a second bot never posts twice in
+one slot, and the publisher itself refuses a run that is no longer "approved", so a reel is never posted
+twice. The slot a post was made in (14:30, 16:00) is kept on its run (post_slot) and copied onto its post
+rows (posts.slot); Post now and a Retry leave it empty.
 
-Missed slots: when the bot was off at posting time, the reel that was due posts ONCE when the bot comes
-back. Only the most recent slot counts (three missed days never become three posts in a row), and only a
-reel approved before that slot. A slot that comes less than posting.min_gap_hours after the last post is
-skipped, so a late post is never followed straight away by the next one.
-Post now posts at once (the owner asked for it) and counts as the last post.
+The cold-open A/B (cold_open.mode alternate): the reel with a cold open and the one without SWAP slots every
+day. On posting.ab_first_day, and every second day after it, the first slot is for a reel with a cold open
+and the second for one without; on the days in between it is the other way round. Within its side a slot
+takes the first approved reel in queue order. When the queue has no reel on a slot's side, the slot posts
+the first reel in queue order instead, and that is logged on the reel.
+
+Missed slots (the PC asleep, the bot stopped, no connection): a slot stays open until the next slot of the
+day starts or, for the last one, until posting.late_until (18:00); while it is open the bot posts it as
+soon as it can. A slot whose window closed is gone ("missed"): its reel stays at the front of the queue and
+rolls to the next slot on its side. Missed slots are never caught up with extra posts. A post waits until
+posting.min_gap_hours have passed since the last one (inside its slot's window). Only a reel approved
+before a slot can post in it. Post now posts at once (the owner asked for it) and counts as the last post.
+A publish that FAILS keeps its slot: the reel waits on the home card for Retry, so a broken token cannot
+use up the queue.
 """
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -25,7 +36,8 @@ from .config import get_config
 
 log = logging.getLogger(__name__)
 
-DEFAULTS = {"time": "21:00", "timezone": "Asia/Kolkata", "min_gap_hours": 12}
+DEFAULTS = {"time": ["14:30", "16:00"], "timezone": "Asia/Kolkata", "min_gap_hours": 1, "late_until": "18:00",
+            "ab_first_day": None}
 K_LAST = "posting:last_started"   # when the last post (from the queue or Post now) was started
 K_LAST_RUN = "posting:last_run"   # ... and which reel it was
 STARTING_S = 15 * 60              # a reel just handed to the publisher is "starting" this long, not queued
@@ -102,32 +114,130 @@ def unapprove(run_id: str, by: str) -> str:
 
 # ------------------------------------------------------------------ slots
 
-def slot_on(day: date) -> datetime:
-    hh, mm = (int(x) for x in str(settings()["time"]).split(":"))
-    return datetime.combine(day, time(hh, mm), tz())
+def _hm(value) -> time:
+    """"14:30" as a time. PyYAML reads an unquoted 14:30 as the number 870 (base 60), so that is accepted too."""
+    if isinstance(value, int):
+        h, m = divmod(value, 60)
+    else:
+        h, m = (int(x) for x in str(value).strip().split(":"))
+    return time(h, m)
 
 
-def due_slot(now: datetime | None = None) -> datetime:
-    """The most recent slot at or before now."""
+def times() -> list[time]:
+    """posting.time (one time or a list), sorted."""
+    raw = settings()["time"]
+    out = sorted({_hm(t) for t in ([raw] if isinstance(raw, (str, int)) else raw or [])})
+    if not out:
+        raise ValueError("posting.time has no posting time")
+    return out
+
+
+@dataclass(frozen=True)
+class Slot:
+    at: datetime        # the slot's time, in posting.timezone
+    until: datetime     # it may still post (late) up to here: the next slot of the day, else posting.late_until
+    index: int          # 0 = the day's first slot
+
+    @property
+    def label(self) -> str:
+        return f"{self.at:%H:%M}"
+
+    @property
+    def key(self) -> str:
+        return f"posting:slot:{self.at.date().isoformat()}T{self.label}"
+
+
+def slots_on(day: date) -> list[Slot]:
+    """The day's slots. A slot's window ends when the next one starts; the last one's at posting.late_until (at
+    midnight when late_until is not after it)."""
+    z = tz()
+    ats = [datetime.combine(day, t, z) for t in times()]
+    late = datetime.combine(day, _hm(settings()["late_until"]), z)
+    midnight = datetime.combine(day + timedelta(days=1), time(0, 0), z)
+    out = []
+    for i, at in enumerate(ats):
+        ends = [x for x in (ats[i + 1] if i + 1 < len(ats) else None, late if late > at else None) if x]
+        out.append(Slot(at, min(ends) if ends else midnight, i))
+    return out
+
+
+def current_slot(now: datetime | None = None) -> Slot | None:
+    """The slot whose window is open now, else None."""
     local = (now or _now()).astimezone(tz())
-    s = slot_on(local.date())
-    return s if s <= local else slot_on(local.date() - timedelta(days=1))
+    return next((s for s in slots_on(local.date()) if s.at <= local < s.until), None)
 
 
-def _key(slot: datetime) -> str:
-    return f"posting:slot:{slot.date().isoformat()}"
+def upcoming(now: datetime | None = None, days: int = 366):
+    """Every slot whose window has not closed yet, from now on, in order."""
+    local = (now or _now()).astimezone(tz())
+    for k in range(days):
+        for s in slots_on(local.date() + timedelta(days=k)):
+            if s.until > local:
+                yield s
 
 
-def claimed(slot: datetime) -> bool:
-    return bool(db.kv_get(_key(slot)))
+def claimed(slot: Slot) -> bool:
+    return bool(db.kv_get(slot.key))
 
 
-def _claim(slot: datetime, what: str) -> bool:
+def _claim(slot: Slot, what: str) -> bool:
     """Atomically take the slot; False when it was already taken (a restart, a second bot)."""
     db.init()
     with db.db() as c:
         return c.execute("INSERT OR IGNORE INTO kv(key, value, updated_at) VALUES (?,?,?)",
-                         (_key(slot), what, db.now())).rowcount == 1
+                         (slot.key, what, db.now())).rowcount == 1
+
+
+def _close_missed(now: datetime) -> None:
+    """Today's slots whose window closed without a post are marked missed (their reels roll to the next slot)."""
+    local = now.astimezone(tz())
+    for s in slots_on(local.date()):
+        if s.until <= local and not claimed(s) and _claim(s, f"missed: nothing posted between {s.label} and "
+                                                             f"{s.until:%H:%M}"):
+            log.info("posting: the %s slot was missed; its reel waits for the next slot", s.at.isoformat())
+
+
+# ------------------------------------------------------------------ the cold-open A/B
+
+def ab_running() -> bool:
+    from .coldopen import settings as cold_open
+    return cold_open()["mode"] == "alternate"
+
+
+def _ab_anchor() -> date:
+    first = settings().get("ab_first_day")
+    if isinstance(first, datetime):
+        return first.date()
+    if isinstance(first, date):   # PyYAML reads an unquoted 2026-10-24 as a date
+        return first
+    return date.fromisoformat(str(first)) if first else date(2026, 1, 1)
+
+
+def wants_cold_open(slot: Slot) -> bool:
+    """The side of the A/B a slot is for: with a cold open in the first slot on ab_first_day and every second day
+    after it, and in the second slot on the days between."""
+    on_first = (slot.at.date() - _ab_anchor()).days % 2 == 0
+    return (slot.index % 2 == 0) == on_first
+
+
+def has_cold_open(run: dict) -> bool:
+    return bool(run.get("cold_open"))
+
+
+def pick(slot: Slot, q: list[dict]) -> tuple[dict | None, str]:
+    """(the reel this slot posts, a note when it is not on the slot's side). Only reels approved before the slot;
+    with the A/B running, the first of them on the slot's side, else the first in queue order (noted)."""
+    ready = [r for r in q if approved_time(r) <= slot.at]
+    if not ready:
+        return None, ""
+    if not ab_running():
+        return ready[0], ""
+    want = wants_cold_open(slot)
+    run = next((r for r in ready if has_cold_open(r) == want), None)
+    if run:
+        return run, ""
+    return ready[0], (f"A/B slot balance: no reel {'with' if want else 'without'} a cold open was waiting for the "
+                      f"{slot.label} slot of {slot.at:%a %d %b}, so the next one in queue order posts instead")
 
 
 def last_post() -> datetime | None:
@@ -158,46 +268,44 @@ def approved_time(run: dict) -> datetime:
     return db.parse_ts(r["ts"] if r else run["updated_at"])
 
 
-def _due_reel(slot: datetime, q: list[dict]) -> dict | None:
-    """The reel that slot posts: the first in the queue that was approved before the slot."""
-    return next((r for r in q if approved_time(r) <= slot), None)
-
-
 # ------------------------------------------------------------------ posting
 
-def start(run_id: str, by: str, now: datetime | None = None) -> str:
+def start(run_id: str, by: str, now: datetime | None = None, slot: str | None = None) -> str:
+    """Hand a reel to the publisher. slot: the queue slot it posts in ("14:30"), None for Post now."""
     from . import actions
     db.kv_set(K_LAST, (now or _now()).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     db.kv_set(K_LAST_RUN, run_id)
+    db.set_post_slot(run_id, slot)
     return actions.publish(run_id, by)
 
 
 def tick(now: datetime | None = None) -> str | None:
-    """Called on every bot loop: post the reel the current slot is due for, at most once per slot.
+    """Called on every bot loop: post the reel the open slot is for, at most once per slot.
     Returns the run id it started posting, else None."""
     from .accounts import ready_destinations
     now = now or _now()
-    slot = due_slot(now)
-    if claimed(slot):
+    _close_missed(now)
+    slot = current_slot(now)
+    if slot is None or claimed(slot):
         return None
-    q = queue()
-    run = _due_reel(slot, q)
+    run, note = pick(slot, queue())
     if not run:   # nothing was waiting at that time: the slot passes (a later approval waits for the next)
         _claim(slot, "nothing to post")
         return None
     last = last_post()
     if last and now - last < _gap():
-        _claim(slot, f"skipped: the last post started at {last:%Y-%m-%d %H:%M} UTC, under "
-                     f"{settings()['min_gap_hours']} h before")
-        log.info("posting: slot %s skipped, the last post was less than %s h ago", slot, settings()["min_gap_hours"])
-        return None
+        return None   # too soon after the last post: the slot waits, while its window is open
     if not ready_destinations(run):
         return None   # no connected account: the slot stays open and the home card says so
     if not _claim(slot, run["id"]):
         return None
-    late = "" if now - slot < timedelta(minutes=10) else f" (the bot was off at {slot:%H:%M}: posted late, once)"
-    log.info("posting: %s for the %s slot%s", run["id"], slot.isoformat(), late)
-    start(run["id"], f"posting queue, {slot:%a %d %b %H:%M}{late}", now)
+    late = "" if now - slot.at < timedelta(minutes=10) else \
+        f" (the bot was off at {slot.label}: posted late, still before {slot.until:%H:%M})"
+    if note:
+        log.info("posting: %s", note)
+        db.log(run["id"], run["stage"], note)
+    log.info("posting: %s for the %s slot%s", run["id"], slot.at.isoformat(), late)
+    start(run["id"], f"posting queue, {slot.at:%a %d %b %H:%M}{late}", now, slot=slot.label)
     return run["id"]
 
 
@@ -211,27 +319,38 @@ def post_now(run_id: str, by: str) -> str:
 # ------------------------------------------------------------------ what the owner sees
 
 def schedule(now: datetime | None = None) -> list[dict]:
-    """[{"run", "when"}] for the whole queue, by the same rules as tick(): when is a datetime, or None
-    for "now" (the current slot is due and the bot posts it on its next loop)."""
+    """[{"run", "when", "slot", "cold_open", "note"}] for the whole queue, by the same rules as tick(): when is a
+    datetime, or None for "now" (the open slot is due and the bot posts it on its next loop)."""
     now = now or _now()
     busy = starting(now)
     q = [r for r in queue() if r["id"] != busy]
-    if not q:
-        return []
     out, last = [], last_post()
-    slot = due_slot(now)
-    head = _due_reel(slot, q) if not claimed(slot) else None
-    if head and (not last or now - last >= _gap()):
-        out.append({"run": head, "when": None})
-        q = [r for r in q if r["id"] != head["id"]]
-        last = now
-    nxt = slot_on(slot.date() + timedelta(days=1))
-    for run in q:
-        while last and nxt - last < _gap():
-            nxt += timedelta(days=1)
-        out.append({"run": run, "when": nxt})
-        last, nxt = nxt, nxt + timedelta(days=1)
+    for slot in upcoming(now):
+        if not q:
+            break
+        if claimed(slot):
+            continue
+        at = max(slot.at, now)
+        if last and at < last + _gap():
+            at = last + _gap()
+        if at >= slot.until:
+            continue   # the gap runs past this slot's window: the reel rolls to the next slot
+        run, note = pick(slot, q)
+        if not run:
+            continue
+        out.append({"run": run, "when": None if at <= now else at, "slot": slot.label,
+                    "cold_open": has_cold_open(run), "note": note})
+        q = [r for r in q if r["id"] != run["id"]]
+        last = at
     return out
+
+
+def rule_text() -> str:
+    """"Two reels a day, at 14:30 and 16:00 IST"."""
+    ts = [t.strftime("%H:%M") for t in times()]
+    count = {1: "One reel", 2: "Two reels", 3: "Three reels"}.get(len(ts), f"{len(ts)} reels")
+    at = ts[0] if len(ts) == 1 else ", ".join(ts[:-1]) + " and " + ts[-1]
+    return f"{count} a day, at {at} {datetime.now(tz()).tzname()}"
 
 
 def when_text(when: datetime | None) -> str:

@@ -99,10 +99,8 @@ def queue_rows():
 
 
 def posting_rule():
-    from datetime import date
     from pipeline import posting
-    slot = posting.slot_on(date.today())
-    return f"One reel a day at {slot:%H:%M} {slot.tzname()}"
+    return posting.rule_text()
 
 
 def short_views(value):
