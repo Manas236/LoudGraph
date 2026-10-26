@@ -595,3 +595,52 @@ def test_no_windows_paths_in_the_code(pinned_config):
     for f in [ROOT / "run.py", *(ROOT / "pipeline").glob("*.py"), *(ROOT / "dashboard").glob("*.py")]:
         text = f.read_text(encoding="utf-8")
         assert not re.search(r"[A-Za-z]:\\\\(Users|Windows|Program)", text), f.name
+
+
+def test_the_dashboard_shows_the_picks_read_only(ap, monkeypatch):
+    from dashboard.app import app
+    from pipeline import autopick
+    from pipeline.config import ROOT
+    history(monkeypatch, HISTORY)
+    reel(ap, "inflation", score=90)
+    reel(ap, "child_mortality", answer="Brazil", others=("Mexico", "Kenya", "Nigeria"))
+    for d in autopick.plan(DAY, rng=random.Random(1)):
+        autopick.record(d)
+    page = app.test_client().get("/autopilot")
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", page.data.decode("utf-8")))
+    assert page.status_code == 200 and "AUTOPILOT ON" in text
+    assert "Inflation" in text and "Child mortality" in text and "exploit" in text and "explore" in text
+    assert "<form" not in (ROOT / "dashboard" / "templates" / "autopilot.html").read_text(encoding="utf-8")
+
+
+def test_discovered_topics_take_every_number_from_the_data_and_only_names_from_gemini(ap):
+    from pipeline import discover, gemini
+    from pipeline.config import countries
+    pool = [c["iso3"] for c in countries()][:30]
+    series = {c: [[y, 20.0 + i] for y in range(1990 if i < 26 else 2001, 2024)] for i, c in enumerate(pool)}
+    assert discover.numbers_from_data(series, "", "Arable land (% of land area)") == \
+        {"start_year": 1990, "min_meaningful": 1.7, "unit_format": "{:.1f}%"}           # 5% of the median peak (34.5)
+    cand = {"name": "Arable land (% of land area)", "unit": "", "note": "", "code": "AG.LND.ARBL.ZS", "source": "worldbank"}
+
+    def says(**reply):
+        return lambda prompt: ({"name": "Arable land", "title": "Who farms the most land?",
+                                "subtitle": "Arable land, % of land area", "lower_is_better": False, **reply}, "m")
+    got = discover.label(cand, "farming", ask=says())
+    assert got == {"name": "Arable land", "title": "Who farms the most land?", "subtitle": "Arable land, % of land area",
+                   "lower_first": False}
+    assert discover.label(cand, "farming", ask=says(title="The top 10 farming nations")) is None   # a made-up number
+    assert discover.label(cand, "farming", ask=says(subtitle="Share of all the land in a country that is arable "
+                                                             "farmland, in percent")) is None        # not one line
+
+    def down(prompt):
+        raise gemini.QuotaExhausted("no Gemini model answered")
+    assert discover.label(cand, "farming", ask=down) is None                  # no name: it waits for a later run
+    assert discover.quota_left() == 3
+
+
+def test_a_slot_with_nothing_to_post_raises_the_pool_alert(ap, monkeypatch):
+    from pipeline import autopick
+    history(monkeypatch, HISTORY)
+    assert autopick.post(1, now=at(0, "14:31"), wait_s=0) == 0
+    assert autopick.decisions_on(DAY)[0]["run_id"] is None
+    assert len(ap["sent"]) == 1 and "only 0 ready reel(s) in the pool" in ap["sent"][0]

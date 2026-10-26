@@ -479,6 +479,8 @@ def post(index: int, now: datetime | None = None, rng: random.Random | None = No
     record(decision)
     log.info("autopilot pick:\n%s", describe(decision))
     if not decision["run_id"]:
+        from .generator import check_pool
+        check_pool()   # an empty pool is the "fewer than 3 ready reels" alert, at once
         return 0
     run = db.get_run(decision["run_id"])
     refresh_accounts()

@@ -74,6 +74,7 @@ Reply with JSON only:
  "title": "a short catchy title, at most 38 characters, e.g. If inflation had a sound",
  "subtitle": "what the number IS, with its unit, at most 34 characters, e.g. Consumer prices, % rise in a year",
  "lower_is_better": true or false (true when a lower value is the better outcome)}}
+Write all three in sentence case (only the first word and names capitalised).
 Use no number in name, title or subtitle unless it is in the series name above (like "per 1,000 people")."""
 
 
