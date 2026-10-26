@@ -64,9 +64,13 @@ def status():
 
 def nav():
     """The sidebar: how many reels wait in Review and in the posting queue, the Telegram switch and the bot."""
-    from pipeline import posting, review
+    from pipeline import autopilot, posting, review
     telegram = account_states()["telegram"]
     running = health.heartbeat_state(db.kv_get("heartbeat:bot"))["state"] == "ok"
+    if autopilot.on():   # the jobs run from timers (or Bot.bat's job loop); Telegram only gets alerts
+        return {"review": len(review.queue()), "queue": len(posting.queue()), "bot": True,
+                "bot_text": "Autopilot is on", "telegram": {"configured": telegram["configured"], "on": False,
+                                                            "line": "Alerts only (autopilot)"}}
     on = telegram["configured"] and telegram_switch()
     if not telegram["configured"]:
         line = "Not set up yet"
@@ -77,6 +81,7 @@ def nav():
     else:
         line = "On — cards go to your phone"
     return {"review": len(review.queue()), "queue": len(posting.queue()), "bot": running,
+            "bot_text": "Bot is running" if running else "Bot is stopped — double-click Bot.bat",
             "telegram": {"configured": telegram["configured"], "on": on, "line": line}}
 
 

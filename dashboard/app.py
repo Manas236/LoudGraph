@@ -112,7 +112,7 @@ def review_state():
                    activity=render_template("_activity.html", making=vm.activity(), attention=vm.attention()),
                    status=render_template("_status.html"),
                    counts={"review": nav["review"], "queue": nav["queue"]}, bot=nav["bot"],
-                   telegram=nav["telegram"]["line"])
+                   bot_text=nav["bot_text"], telegram=nav["telegram"]["line"])
 
 
 @app.get("/queue")

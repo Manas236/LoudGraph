@@ -44,7 +44,7 @@
     }
     const line = $('[data-telegram-line]'); if (line && data.telegram) line.textContent = data.telegram;
     const bot = $('[data-bot-line]');
-    if (bot) { bot.classList.toggle('is-running', data.bot); $('[data-bot-text]', bot).textContent = data.bot ? 'Bot is running' : 'Bot is stopped — double-click Bot.bat'; }
+    if (bot) { bot.classList.toggle('is-running', data.bot); $('[data-bot-text]', bot).textContent = data.bot_text || (data.bot ? 'Bot is running' : 'Bot is stopped — double-click Bot.bat'); }
   }
   async function poll() {
     if (pollBusy || busy || document.hidden) return;

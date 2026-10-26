@@ -22,7 +22,7 @@
 <form action="/settings/telegram" method="post" data-async data-telegram class="telegram-card {{ 'is-on' if nav.telegram.on }}"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label class="switch telegram-switch"><span class="telegram-icon">{{ icon('send') }}</span><span class="telegram-copy"><b>Telegram</b><small data-telegram-line>{{ nav.telegram.line }}</small></span><input type="checkbox" name="enabled" role="switch" aria-label="Telegram approvals" data-autosave {{ 'checked' if nav.telegram.on }} {{ 'disabled' if not nav.telegram.configured }}></label>
 {% if not nav.telegram.configured %}<a class="side-link" href="/settings#accounts">Set up Telegram in Settings →</a>{% endif %}<noscript><button>Save</button></noscript></form>
-<p class="bot-line {{ 'is-running' if nav.bot }}" data-bot-line><span class="dot" aria-hidden="true"></span><span data-bot-text>{{ 'Bot is running' if nav.bot else 'Bot is stopped — double-click Bot.bat' }}</span></p>
+<p class="bot-line {{ 'is-running' if nav.bot }}" data-bot-line><span class="dot" aria-hidden="true"></span><span data-bot-text>{{ nav.bot_text }}</span></p>
 </div>
 </aside>
 <div class="scrim" data-sidebar-close></div>

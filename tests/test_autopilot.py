@@ -644,3 +644,9 @@ def test_a_slot_with_nothing_to_post_raises_the_pool_alert(ap, monkeypatch):
     assert autopick.post(1, now=at(0, "14:31"), wait_s=0) == 0
     assert autopick.decisions_on(DAY)[0]["run_id"] is None
     assert len(ap["sent"]) == 1 and "only 0 ready reel(s) in the pool" in ap["sent"][0]
+
+
+def test_the_sidebar_says_autopilot_not_bot_stopped(ap):
+    from dashboard.app import app
+    html = app.test_client().get("/autopilot").data.decode("utf-8")
+    assert "Autopilot is on" in html and "double-click Bot.bat" not in html
