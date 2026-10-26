@@ -1,14 +1,19 @@
 # secrets
 .env
-.env.bak-*
+.env.*
+!.env.example
 tokens/
 
 # generated
 cache/
 out/
+logs/
+*.log
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
+*.sqlite*
 *.lock
 *.yaml.bak-*
 
@@ -21,11 +26,15 @@ __pycache__/
 # local safety copies (contain secrets)
 backups/
 
-# backups made before every edit (<file>.bak-YYYYMMDD-HHMM)
+# backups made before every edit (<file>.bak-YYYYMMDD-HHMM and <file>.YYYYMMDD-HHMM.bak)
 *.bak-*
+*.bak
 
 # raw Graph API responses from the diagnosis (account and Page ids)
 diagnosis_frames/graph_api_pull.json
 
 # DB safety copies made before a migration (pipeline.db.bak_YYYYMMDD_HHMM)
 *.db.bak_*
+
+# this laptop's posting kill-switch after the move to the server; must never reach the server
+MIGRATED_TO_SERVER
